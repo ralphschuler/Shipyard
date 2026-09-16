@@ -297,6 +297,19 @@ func TestRequestedTransitionAcceptsStableColumnID(t *testing.T) {
 	}
 }
 
+func TestExplicitTransitionSuppressesAutomationSuccessFallback(t *testing.T) {
+	run := domain.AgentRun{RuleID: "rule-success"}
+	if got := suppressAutomationOutcome(run, true, false); got.RuleID != "" {
+		t.Fatalf("explicit transition must own the outcome, got rule %q", got.RuleID)
+	}
+	if got := suppressAutomationOutcome(run, true, true); got.RuleID != "rule-success" {
+		t.Fatalf("interaction pause must retain the rule, got rule %q", got.RuleID)
+	}
+	if got := suppressAutomationOutcome(run, false, false); got.RuleID != "rule-success" {
+		t.Fatalf("implicit outcome must retain the rule, got rule %q", got.RuleID)
+	}
+}
+
 func TestFormatAllowedTransitionsUsesIDsAndDisplayLabels(t *testing.T) {
 	got := formatAllowedTransitions([]domain.Transition{{ToColumnID: "development-id"}}, []domain.Column{{ID: "development-id", Name: "Entwicklung"}})
 	if !strings.Contains(got, "target_column_id") || !strings.Contains(got, "development-id") || !strings.Contains(got, "Entwicklung") {
