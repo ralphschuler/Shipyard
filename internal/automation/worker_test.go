@@ -269,6 +269,21 @@ func TestSelfReviewGateFailsClosedWhenRunLogsCannotBeRead(t *testing.T) {
 	}
 }
 
+func TestAutomationEventNoopOnlySuppressesUnchangedReviewReturns(t *testing.T) {
+	if !automationEventIsNoop(domain.AutomationEvent{Payload: []byte(`{"qa_return":true,"change_available":false}`)}) {
+		t.Fatal("unchanged QA/review return must be a terminal no-op")
+	}
+	for _, event := range []domain.AutomationEvent{
+		{Payload: []byte(`{"qa_return":true,"change_available":true}`)},
+		{Payload: []byte(`{"qa_return":false,"change_available":false}`)},
+		{Payload: []byte(`not-json`)},
+	} {
+		if automationEventIsNoop(event) {
+			t.Fatalf("event must remain processable: %s", event.Payload)
+		}
+	}
+}
+
 func TestMaxAutomationEventAttemptsDefaultsToThreeAndIsConfigurable(t *testing.T) {
 	t.Setenv("SHIPYARD_MAX_AUTOMATION_EVENT_ATTEMPTS", "")
 	if got := maxAutomationEventAttempts(); got != 3 {

@@ -995,6 +995,19 @@ func (w *Worker) Process(ctx context.Context) {
 		return
 	}
 	for _, event := range events {
+		if automationEventIsNoop(event) {
+			// This is a deliberate terminal no-op: the QA return did not follow
+			// any previously applied repository change, so starting a worker would
+			// create an automation loop without producing a deliverable.
+			if err := w.Store.MarkEventProcessed(ctx, event.ID); err != nil {
+				log.Printf("automation event %s could not be marked as no-op: %v", event.ID, err)
+				continue
+			}
+			if event.TaskID != "" {
+				_ = w.Store.AddComment(ctx, event.TaskID, "Taskboard", "QA-/Review-Rücklauf ohne zuvor übernommene Änderung ignoriert; kein neuer Automationszyklus gestartet.")
+			}
+			continue
+		}
 		deferEvent := false
 		deferWithReason := func(reason string) {
 			attempts, recordErr := w.Store.RecordEventFailure(ctx, event.ID, reason)
@@ -1062,6 +1075,20 @@ func (w *Worker) Process(ctx context.Context) {
 		w.startRun(ctx, run)
 	}
 	w.processWebhookDeliveries(ctx)
+}
+
+func automationEventIsNoop(event domain.AutomationEvent) bool {
+	if len(event.Payload) == 0 || string(event.Payload) == "null" {
+		return false
+	}
+	var payload struct {
+		QAReturn        bool `json:"qa_return"`
+		ChangeAvailable bool `json:"change_available"`
+	}
+	if json.Unmarshal(event.Payload, &payload) != nil {
+		return false
+	}
+	return payload.QAReturn && !payload.ChangeAvailable
 }
 
 func (w *Worker) startRun(ctx context.Context, run domain.AgentRun) {

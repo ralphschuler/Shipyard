@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type User struct {
 	ID, Email, DisplayName, PasswordHash, Role string
@@ -240,6 +243,7 @@ type RunTrace struct {
 }
 type AutomationEvent struct {
 	ID, Type, TaskID, BoardID string
+	Payload                   json.RawMessage
 	OccurredAt                time.Time
 }
 type AutomationPreviewTask struct {

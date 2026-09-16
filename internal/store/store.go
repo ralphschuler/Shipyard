@@ -1095,8 +1095,9 @@ func (s *Store) DeleteTask(c context.Context, id string) error {
 // inside a larger transaction lets an interaction answer, its continuation
 // run and an optional user-selected next step become one atomic hand-off.
 func moveTaskTx(c context.Context, tx pgx.Tx, id, target, source string) error {
-	var current, board, transition string
-	err := tx.QueryRow(c, "SELECT column_id,board_id FROM tasks WHERE id=$1 FOR UPDATE", id).Scan(&current, &board)
+	var current, board, currentName, currentType, transition string
+	err := tx.QueryRow(c, `SELECT t.column_id,t.board_id,c.name,c.column_type
+		FROM tasks t JOIN workflow_columns c ON c.id=t.column_id WHERE t.id=$1 FOR UPDATE`, id).Scan(&current, &board, &currentName, &currentType)
 	if err != nil {
 		return err
 	}
@@ -1105,10 +1106,12 @@ func moveTaskTx(c context.Context, tx pgx.Tx, id, target, source string) error {
 		return errors.New("transition is not allowed")
 	}
 	var terminal bool
-	err = tx.QueryRow(c, "SELECT column_type='done' FROM workflow_columns WHERE id=$1 AND board_id=$2", target, board).Scan(&terminal)
+	var targetType string
+	err = tx.QueryRow(c, "SELECT column_type FROM workflow_columns WHERE id=$1 AND board_id=$2", target, board).Scan(&targetType)
 	if err != nil {
 		return err
 	}
+	terminal = targetType == "done"
 	_, err = tx.Exec(c, "UPDATE tasks SET column_id=$2,completed_at=CASE WHEN $3 THEN now() ELSE NULL END,updated_at=now() WHERE id=$1", id, target, terminal)
 	if err != nil {
 		return err
@@ -1121,7 +1124,20 @@ func moveTaskTx(c context.Context, tx pgx.Tx, id, target, source string) error {
 	if terminal {
 		eventType = "task.completed"
 	}
-	_, err = tx.Exec(c, "INSERT INTO automation_events(type,task_id,board_id,payload) VALUES($1,$2,$3,jsonb_build_object('target_column_id',$4::text))", eventType, id, board, target)
+	// A QA/review return is only automation-eligible when a previous delivery
+	// really changed the repository and was applied. This flag is written in
+	// the same transaction as the transition, making concurrent/replayed
+	// deliveries deterministic and preventing no-op return loops.
+	changeAvailable := false
+	returnColumn := strings.EqualFold(strings.TrimSpace(currentName), "qa") || strings.EqualFold(strings.TrimSpace(currentName), "review")
+	if returnColumn && targetType != "done" {
+		err = tx.QueryRow(c, "SELECT EXISTS(SELECT 1 FROM agent_runs WHERE task_id=$1 AND applied_at IS NOT NULL)", id).Scan(&changeAvailable)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(c, `INSERT INTO automation_events(type,task_id,board_id,payload)
+		VALUES($1,$2,$3,jsonb_build_object('target_column_id',$4::text,'qa_return',$5,'change_available',$6))`, eventType, id, board, target, returnColumn, changeAvailable)
 	return err
 }
 
@@ -2350,7 +2366,7 @@ func (s *Store) Provider(c context.Context, provider string) (domain.ProviderSet
 	return p, err
 }
 func (s *Store) PendingEvents(c context.Context) ([]domain.AutomationEvent, error) {
-	r, e := s.DB.Query(c, "SELECT id,type,COALESCE(task_id::text,''),COALESCE(board_id::text,''),occurred_at FROM automation_events WHERE processed_at IS NULL ORDER BY occurred_at LIMIT 20")
+	r, e := s.DB.Query(c, "SELECT id,type,COALESCE(task_id::text,''),COALESCE(board_id::text,''),payload,occurred_at FROM automation_events WHERE processed_at IS NULL ORDER BY occurred_at LIMIT 20")
 	if e != nil {
 		return nil, e
 	}
