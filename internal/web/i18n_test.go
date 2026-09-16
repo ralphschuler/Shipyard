@@ -3,6 +3,7 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -28,5 +29,18 @@ func TestAccountLanguageOverridesBrowserAndFallbackUsesEnglish(t *testing.T) {
 	}
 	if got := translate("de", "missing.key", "English fallback"); got != "English fallback" {
 		t.Fatalf("missing translation = %q, want English fallback", got)
+	}
+}
+
+func TestLocalizeHTMLTranslatesLegacyViewAndKeepsGermanDefault(t *testing.T) {
+	html := `<html lang="dynamic"><nav aria-label="Hauptnavigation"><a>Übersicht</a></nav><h1>Neue Aufgabe</h1><p>Eigener Task-Titel</p></html>`
+	english := localizeHTML(html, "en")
+	for _, want := range []string{`lang="dynamic"`, "Overview", "New task", "Eigener Task-Titel"} {
+		if !strings.Contains(english, want) {
+			t.Fatalf("English HTML missing %q: %s", want, english)
+		}
+	}
+	if got := localizeHTML(html, "de"); got != html {
+		t.Fatalf("German HTML changed unexpectedly: %s", got)
 	}
 }

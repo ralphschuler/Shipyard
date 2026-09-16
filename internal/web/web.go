@@ -509,6 +509,7 @@ func (a *App) Register(m *http.ServeMux) {
 		w.Header().Set("Cache-Control", "no-store")
 		http.FileServerFS(files).ServeHTTP(w, r)
 	}))
+	m.HandleFunc("GET /api/i18n", a.i18nAPI)
 	m.HandleFunc("GET /events", a.events)
 	m.HandleFunc("GET /api/v1/dashboard", a.dashboardAPI)
 	m.HandleFunc("GET /api/v1/boards", a.boardsAPI)
@@ -1528,13 +1529,26 @@ func (a *App) render(r *http.Request, w http.ResponseWriter, name string, data a
 	// Account preferences are authoritative for every server-rendered view.
 	// This also covers templates that do not carry a page-specific Lang field.
 	lang := a.accountLanguage(r)
-	html := strings.Replace(page.String(), `<html lang="de">`, `<html lang="`+lang+`">`, 1)
-	html = strings.Replace(html, `<html lang="en">`, `<html lang="`+lang+`">`, 1)
+	html := page.String()
+	// Templates from before the i18n layer used a fixed language attribute.
+	// Normalize every document here so a newly localized page cannot announce
+	// German while the account is using English.
+	if start := strings.Index(html, `<html lang="`); start >= 0 {
+		valueStart := start + len(`<html lang="`)
+		if end := strings.Index(html[valueStart:], `"`); end >= 0 {
+			html = html[:valueStart] + lang + html[valueStart+end:]
+		}
+	}
+	html = localizeHTML(html, lang)
 	// Every server-rendered view exposes one stable swap boundary. HTMX uses
 	// it for mutations today and for fragment navigation in the next layer.
 	html = strings.Replace(html, "<main ", `<main id="app-main" `, 1)
 	html = strings.Replace(html, "<main>", `<main id="app-main">`, 1)
 	_, _ = io.WriteString(w, html)
+}
+
+func (a *App) i18nAPI(w http.ResponseWriter, r *http.Request) {
+	writeAPI(w, map[string]any{"language": a.accountLanguage(r), "translations": legacyDictionary("en")}, nil)
 }
 func (a *App) account(w http.ResponseWriter, r *http.Request) {
 	u, ok := currentUser(r.Context())

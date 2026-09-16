@@ -1,9 +1,9 @@
 // Templates intentionally remain server-rendered, but this canonical list
 // keeps legacy pages and newer pages on the exact same navigation contract.
 const navigationEntries=[['/','▦','Übersicht'],['/projects','◫','Projekte'],['/boards','▤','Boards'],['/agents','◉','Agents'],['/automations','↯','Automationen',['/automations','/schedules','/webhooks']],['/skills','◇','Skills'],['/runs','▶','Runs'],['/audit','◷','Audit'],['/settings/providers','⚙','Einstellungen']];
-// Legacy pages are progressively localized from one central dictionary. The
-// exact-text map keeps old templates usable while they migrate to data-i18n.
-const shipyardTranslations={en:{'Übersicht':'Overview','Projekte':'Projects','Boards':'Boards','Agents':'Agents','Automationen':'Automations','Skills':'Skills','Runs':'Runs','Audit':'Audit','Einstellungen':'Settings','Erscheinungsbild & Bedienung':'Appearance & interaction','Sprache':'Language','Oberflächensprache':'Interface language','Die Auswahl wird für dein Benutzerkonto gespeichert.':'The selection is saved for your account.','Einstellungen speichern':'Save settings','Willkommen an Bord':'Welcome aboard','Melde dich an, um deinen Shipyard zu öffnen.':'Sign in to open your Shipyard.','E-Mail-Adresse':'Email address','Passwort':'Password','Anmelden':'Sign in','Arbeitsfluss':'Workflow','Boards verwalten':'Manage boards','Tasks':'Tasks','offen':'open','erledigt':'completed','Systemdarstellung verwenden':'Use system appearance','Hell':'Light','Dunkel':'Dark'}};
+// The server owns the translation vocabulary. Fetching it keeps legacy pages
+// and dynamically inserted controls on one source of truth.
+let shipyardTranslations={de:{},en:{}};
 const shipyardLanguage=()=>cookieValue('shipyard_language')==='en'?'en':'de';
 const translationOriginals=new WeakMap();
 const applyLanguage=()=>{const lang=shipyardLanguage();document.documentElement.lang=lang;const dictionary=shipyardTranslations[lang]||{};const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);const nodes=[];while(walker.nextNode())nodes.push(walker.currentNode);nodes.forEach(node=>{const original=translationOriginals.get(node)||node.nodeValue;translationOriginals.set(node,original);const value=original.trim();if(dictionary[value])node.nodeValue=original.replace(value,dictionary[value]);});document.querySelectorAll('[title],[aria-label],[placeholder]').forEach(node=>['title','aria-label','placeholder'].forEach(attribute=>{const originalKey=`${attribute}`;const original=translationOriginals.get(node)?.[originalKey]||node.getAttribute(attribute);const values=translationOriginals.get(node)||{};values[originalKey]=original;translationOriginals.set(node,values);if(original&&dictionary[original])node.setAttribute(attribute,dictionary[original]);}));document.querySelectorAll('[data-i18n-key]').forEach(node=>{const key=node.dataset.i18nKey;const visible=dictionary[key]||key;node.querySelector('span')?.replaceChildren(document.createTextNode(visible));node.title=visible;});};
@@ -16,8 +16,8 @@ const applyTheme=()=>{const selected=shipyardPrefs.theme||'system';document.docu
 applyTheme();
 systemDark.addEventListener?.('change',()=>{if((shipyardPrefs.theme||'system')==='system')applyTheme()});
 document.title=document.title.replace(/Taskboard/g,'Shipyard');
-applyLanguage();
-document.addEventListener('change',event=>{if(!(event.target instanceof HTMLSelectElement)||event.target.name!=='language')return;const value=event.target.value==='en'?'en':'de';document.cookie=`shipyard_language=${value}; path=/; max-age=31536000; SameSite=Lax`;try{localStorage.setItem('shipyard.language',value)}catch(_){}applyLanguage();});
+const loadTranslations=fetch('/api/i18n',{credentials:'same-origin'}).then(response=>response.ok?response.json():null).then(data=>{if(data?.translations)shipyardTranslations.en=data.translations;applyLanguage();return data}).catch(()=>{applyLanguage();return null});
+document.addEventListener('change',event=>{if(!(event.target instanceof HTMLSelectElement)||event.target.name!=='language')return;const value=event.target.value==='en'?'en':'de';document.cookie=`shipyard_language=${value}; path=/; max-age=31536000; SameSite=Lax`;try{localStorage.setItem('shipyard.language',value)}catch(_){}if(value==='de'||Object.keys(shipyardTranslations.en).length)applyLanguage();else loadTranslations.then(applyLanguage);});
 // Keep focus on the invoking control and make Escape opt-in for closable
 // dialogs. Native showModal() supplies the remaining focus containment.
 const modalReturnFocus=new WeakMap();
