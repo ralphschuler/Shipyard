@@ -4286,12 +4286,63 @@ function RunConsole({ runID }: { runID: string }) {
   const [olderLogs, setOlderLogs] = useState<any[]>([]);
   const [olderAvailable, setOlderAvailable] = useState<boolean | undefined>();
   const [message, setMessage] = useState("");
+  const [newLogsAvailable, setNewLogsAvailable] = useState(false);
+  const logRef = useRef<HTMLPreElement>(null);
+  const followLogs = useRef(true);
+  const latestSequence = useRef<number>();
+  const olderScrollHeight = useRef<number>();
   const logs = data?.entries || [];
   const visibleLogs = [...olderLogs, ...logs];
   const canLoadOlder = olderAvailable ?? Boolean(data?.truncated);
+
+  const isNearEnd = () => {
+    const log = logRef.current;
+    return !!log && log.scrollHeight - log.scrollTop - log.clientHeight <= 48;
+  };
+  const scrollToLatest = () => {
+    const log = logRef.current;
+    if (!log) return;
+    followLogs.current = true;
+    setNewLogsAvailable(false);
+    log.scrollTo({ top: log.scrollHeight, behavior: "auto" });
+  };
+
+  useEffect(() => {
+    if (!data) return;
+    const latest = Number(data.entries?.at(-1)?.Sequence ?? 0);
+    const log = logRef.current;
+    const shouldFollow = followLogs.current || !log || latestSequence.current === undefined;
+    const receivedNewLogs = latestSequence.current !== undefined && latest > latestSequence.current;
+
+    latestSequence.current = latest;
+    if (receivedNewLogs && !shouldFollow) setNewLogsAvailable(true);
+    if (shouldFollow) {
+      requestAnimationFrame(() => {
+        const current = logRef.current;
+        if (current) current.scrollTop = current.scrollHeight;
+      });
+    }
+  }, [data]);
+
+  useEffect(() => {
+    const log = logRef.current;
+    const previousHeight = olderScrollHeight.current;
+    if (!log || previousHeight === undefined) return;
+    log.scrollTop += log.scrollHeight - previousHeight;
+    olderScrollHeight.current = undefined;
+  }, [olderLogs]);
+
+  const handleLogScroll = () => {
+    const nearEnd = isNearEnd();
+    followLogs.current = nearEnd;
+    if (nearEnd) setNewLogsAvailable(false);
+  };
+
   const loadOlderLogs = async () => {
     const before = visibleLogs[0]?.Sequence;
     if (!before) return;
+    const log = logRef.current;
+    olderScrollHeight.current = log?.scrollHeight ?? 0;
     try {
       const response = await fetch(`/api/v1/runs/${runID}/logs?before=${encodeURIComponent(before)}`, { credentials: "same-origin" });
       if (!response.ok) throw new Error(await response.text());
@@ -4299,6 +4350,7 @@ function RunConsole({ runID }: { runID: string }) {
       setOlderLogs((entries) => [...(page.entries || []), ...entries]);
       setOlderAvailable(Boolean(page.truncated));
     } catch (err) {
+      olderScrollHeight.current = undefined;
       setMessage(String(err));
     }
   };
@@ -4312,9 +4364,25 @@ function RunConsole({ runID }: { runID: string }) {
         {error ? (
           <p className="text-sm text-destructive">Protokoll konnte nicht geladen werden.</p>
         ) : (
-          <pre className="max-h-[34rem] overflow-auto whitespace-pre-wrap rounded-lg bg-muted p-3 text-xs">
+          <div className="relative">
+            <pre
+              ref={logRef}
+              onScroll={handleLogScroll}
+              aria-label="Run-Protokoll"
+              className="max-h-[34rem] overflow-auto whitespace-pre-wrap rounded-lg bg-muted p-3 text-xs"
+            >
             {visibleLogs.map((log: any) => `[${log.Sequence}] ${log.Level}: ${log.Message}`).join("\n") || "Noch keine Protokolleinträge."}
-          </pre>
+            </pre>
+            {newLogsAvailable && (
+              <Button
+                className="absolute bottom-3 left-1/2 -translate-x-1/2 shadow-md"
+                size="sm"
+                onClick={scrollToLatest}
+              >
+                Neue Einträge anzeigen
+              </Button>
+            )}
+          </div>
         )}
         {message && <p className="mt-3 text-sm text-destructive">{message}</p>}
         {canLoadOlder && visibleLogs.length > 0 && (
