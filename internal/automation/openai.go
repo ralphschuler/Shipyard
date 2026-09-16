@@ -34,13 +34,15 @@ type responseRequest struct {
 	Store              bool     `json:"store"`
 }
 type responseUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	InputTokens       int `json:"input_tokens"`
+	OutputTokens      int `json:"output_tokens"`
+	TotalTokens       int `json:"total_tokens"`
+	CachedInputTokens int `json:"cached_input_tokens"`
+	ReasoningTokens   int `json:"reasoning_tokens"`
 }
 type openAIUsage struct {
-	InputTokens, OutputTokens, TotalTokens int
-	EstimatedCostMicrousd                  int64
+	InputTokens, OutputTokens, CachedInputTokens, ReasoningTokens, TotalTokens int
+	EstimatedCostMicrousd                                                      int64
 }
 type responseOutput struct {
 	Type      string `json:"type"`
@@ -250,6 +252,8 @@ func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, pr
 		}
 		usage.InputTokens += result.Usage.InputTokens
 		usage.OutputTokens += result.Usage.OutputTokens
+		usage.CachedInputTokens += result.Usage.CachedInputTokens
+		usage.ReasoningTokens += result.Usage.ReasoningTokens
 		usage.TotalTokens += result.Usage.TotalTokens
 		var outputs []map[string]string
 		for _, item := range result.Output {

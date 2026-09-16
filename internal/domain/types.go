@@ -94,6 +94,11 @@ type Dashboard struct {
 	CreatedSeries, CompletedSeries []Metric
 	Runs                           RunMetrics
 	EstimatedCostMicrousd          int64
+	KnownActualCostMicrousd        int64
+	EstimatedCostMicrousdV2        int64
+	IncludedOrUnknownRuns          int
+	IncludedOrUnknownTokens        int64
+	UsageByDimension               []UsageMetric
 	CostByAgent                    []CostMetric
 	Notifications                  []Notification
 }
@@ -107,6 +112,12 @@ type RunMetrics struct{ Queued, Running, Succeeded, Failed int }
 type CostMetric struct {
 	Name           string
 	AmountMicrousd int64
+}
+type UsageMetric struct {
+	Dimension, Name   string
+	Tokens            int64
+	ActualMicrousd    int64
+	EstimatedMicrousd int64
 }
 type Notification struct {
 	ID, TaskID, AgentRunID, Kind, Message string
@@ -182,6 +193,14 @@ type RunDelivery struct {
 	InputTokens, OutputTokens, TokenUsage, DurationSeconds int
 	EstimatedCostMicrousd                                  int64
 	AppliedAt                                              *time.Time
+}
+type UsageReport struct {
+	Provider, Model, ServiceTier, Status, CostSource, PriceVersion string
+	APICalls, InputTokens, OutputTokens, CachedInputTokens         *int64
+	CacheWriteTokens, ReasoningTokens, TotalTokens                 *int64
+	NativeCostMicrousd, CalculatedCostMicrousd                     *int64
+	RawUsage                                                       []byte
+	CostCalculatedAt                                               *time.Time
 }
 type Webhook struct {
 	ID, Name, URL, Events             string

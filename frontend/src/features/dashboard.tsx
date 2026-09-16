@@ -32,6 +32,10 @@ type DashboardData = {
   CompletedSeries: Metric[];
   Runs: { Queued: number; Running: number; Succeeded: number; Failed: number };
   EstimatedCostMicrousd: number;
+  KnownActualCostMicrousd: number;
+  EstimatedCostMicrousdV2: number;
+  IncludedOrUnknownRuns: number;
+  IncludedOrUnknownTokens: number;
   Notifications: { ID: string; Kind: string; Message: string }[];
 };
 type Attention = {
@@ -137,8 +141,8 @@ export default function Dashboard() {
   if (error) return <Card><CardContent className="py-12 text-center text-sm text-destructive">Daten konnten nicht geladen werden. Bitte erneut versuchen.</CardContent></Card>;
   if (!data) return <Card><CardContent className="flex min-h-56 items-center justify-center gap-3 text-sm text-muted-foreground"><LoaderCircle className="size-5 animate-spin" />Lade Betriebsdaten …</CardContent></Card>;
   const series = data.CreatedSeries.map((metric, index) => ({ day: metric.Name, created: metric.Count, completed: data.CompletedSeries[index]?.Count ?? 0 }));
-  const costs = new Intl.NumberFormat("de-DE", { style: "currency", currency: "USD" }).format(data.EstimatedCostMicrousd / 1e6);
-  const stats = [["Offene Aufgaben", data.Active, "Im aktiven Workflow"], ["Abgeschlossen", data.Completed, "Seit Beginn"], ["Laufende Agents", data.Runs.Running, `${data.Runs.Queued} warten`], ["Geschätzte Kosten", costs, "Alle Agentenläufe"]];
+  const money = (microusd: number) => new Intl.NumberFormat("de-DE", { style: "currency", currency: "USD" }).format(microusd / 1e6);
+  const stats = [["Offene Aufgaben", data.Active, "Im aktiven Workflow"], ["Abgeschlossen", data.Completed, "Seit Beginn"], ["Laufende Agents", data.Runs.Running, `${data.Runs.Queued} warten`], ["Istkosten", money(data.KnownActualCostMicrousd), "Providerseitig gemeldet"], ["Schätzung", money(data.EstimatedCostMicrousdV2), "Nach Preisregel berechnet"], ["Unklar / inkludiert", data.IncludedOrUnknownRuns, `${data.IncludedOrUnknownTokens.toLocaleString("de-DE")} Tokens ohne Grenzpreis`]];
   const priorityItems = attention ? [
     ["Blockierte Tasks", attention.BlockedTasks, "#/boards"],
     ["Fehlgeschlagene Runs · 7 Tage", attention.FailedRuns7d, "#/runs"],
