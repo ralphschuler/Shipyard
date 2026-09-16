@@ -34,6 +34,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const Dashboard = lazy(() => import("@/features/dashboard"));
 type NavItem = {
@@ -2751,6 +2752,105 @@ function BoardDetail({ id }: { id: string }) {
   );
 }
 
+
+type DiffFile = { path: string; additions: number; deletions: number; lines: string[] };
+
+function parseDiff(raw: string): DiffFile[] {
+  const files: DiffFile[] = [];
+  let current: DiffFile | undefined;
+  for (const line of raw.split("\n")) {
+    const header = line.match(/^diff --git a\/(.+) b\/(.+)$/);
+    if (header) {
+      current = { path: header[2], additions: 0, deletions: 0, lines: [] };
+      files.push(current);
+      continue;
+    }
+    if (!current || line.startsWith("--- ") || line.startsWith("+++ ") || line.startsWith("@@ ") || line.startsWith("index ") || line.startsWith("new file") || line.startsWith("old mode") || line.startsWith("new mode")) continue;
+    if (line.startsWith("+") && !line.startsWith("+++")) current.additions += 1;
+    if (line.startsWith("-") && !line.startsWith("---")) current.deletions += 1;
+    current.lines.push(line);
+  }
+  return files;
+}
+
+function changeState(change: any) {
+  if (!change) return "Kein Delivery-Run vorhanden.";
+  if (["queued", "running"].includes(change.Status)) return "Der Delivery-Run läuft noch. Änderungen können erst nach Abschluss geprüft werden.";
+  if (change.Status !== "succeeded") return "Der Delivery-Run ist fehlgeschlagen; seine Änderungen sind nicht übernehmbar.";
+  if (change.GateStatus !== "passed") return "Das Qualitäts-Gate ist nicht bestanden; die Änderungen bleiben geschützt.";
+  if (!change.DiffSummary) return "Dieser Run enthält keine übernehmbaren Änderungen.";
+  if (change.AppliedAt) return "Diese Änderungen wurden bereits übernommen.";
+  return "";
+}
+
+function DiffReview({ loading, files }: { loading: boolean; files: DiffFile[] }) {
+  if (loading) return <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">Diff wird geladen …</CardContent></Card>;
+  if (!files.length) return <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">Der Diff ist leer oder nicht mehr verfügbar.</CardContent></Card>;
+  return <div className="grid gap-4 lg:grid-cols-[15rem_minmax(0,1fr)]">
+    <Card className="h-fit"><CardHeader><CardTitle className="text-base">Dateien</CardTitle></CardHeader><CardContent className="p-2"><nav aria-label="Geänderte Dateien" className="grid gap-1">{files.map((file) => <a key={file.path} href={`#change-${file.path}`} className="rounded-md px-3 py-2 text-left text-sm hover:bg-muted"><span className="block truncate font-medium">{file.path}</span><span className="text-xs text-muted-foreground"><span className="text-emerald-700 dark:text-emerald-400">+{file.additions}</span> <span className="text-red-700 dark:text-red-400">−{file.deletions}</span></span></a>)}</nav></CardContent></Card>
+    <div className="min-w-0 space-y-3">{files.map((file, index) => <details key={file.path} id={`change-${file.path}`} open={index === 0} className="overflow-hidden rounded-lg border"><summary className="cursor-pointer list-inside bg-muted px-4 py-3 text-sm font-medium"><span>{file.path}</span><span className="ml-3 text-xs font-normal text-muted-foreground">{file.additions + file.deletions} Änderungen</span></summary><div className="overflow-auto bg-muted/40 font-mono text-xs leading-6">{file.lines.map((line, lineIndex) => <div key={lineIndex} className={`min-w-max px-4 ${line.startsWith("+") ? "bg-emerald-500/15 text-emerald-900 dark:text-emerald-200" : line.startsWith("-") ? "bg-red-500/15 text-red-900 dark:text-red-200" : "text-muted-foreground"}`}><span aria-hidden="true" className="mr-3 inline-block w-3 select-none text-center">{line[0] || " "}</span>{line.slice(1)}</div>)}</div></details>)}</div>
+  </div>;
+}
+
+function ChangesTab({ changes, onMessage }: { changes: any[]; onMessage: (message: string) => void }) {
+  const [rawDiff, setRawDiff] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [applyError, setApplyError] = useState("");
+  const candidate = changes.find((change) => change.Status === "succeeded" && change.GateStatus === "passed" && change.DiffSummary && !change.AppliedAt);
+  const latest = changes[0];
+  const selected = candidate || latest;
+  const candidateID = candidate?.ID;
+  const files = parseDiff(rawDiff);
+  const additions = files.reduce((sum, file) => sum + file.additions, 0);
+  const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setRawDiff("");
+    if (!candidateID) return;
+    setLoading(true);
+    fetch(`/runs/${candidateID}/diff`, { credentials: "same-origin" })
+      .then((response) => response.ok ? response.text() : Promise.reject(new Error("Diff konnte nicht geladen werden.")))
+      .then((value) => { if (!cancelled) setRawDiff(value); })
+      .catch((error) => { if (!cancelled) onMessage(error.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [candidateID, onMessage]);
+
+  const apply = async () => {
+    if (!candidate) return;
+    setBusy(true);
+    setApplyError("");
+    try {
+      await mutation(`/runs/${candidate.ID}/apply`, { method: "POST" });
+      setConfirmOpen(false);
+      refreshData();
+    } catch (error) {
+      setApplyError(String(error));
+      setBusy(false);
+    }
+  };
+
+  if (!changes.length) return <Card><CardContent className="py-12 text-center"><p className="font-medium">Noch kein Delivery-Run vorhanden.</p><p className="mt-2 text-sm text-muted-foreground">Sobald ein Agent Änderungen erstellt, erscheinen sie hier.</p></CardContent></Card>;
+  return <div className="grid gap-4">
+    <Card>
+      <CardHeader className="flex flex-row items-start justify-between gap-4">
+        <div><CardTitle>Änderungen</CardTitle><CardDescription>{selected ? `Run ${selected.ID.slice(0, 8)} · ${selected.GateStatus === "passed" ? "Gate bestanden" : selected.Status}` : "Kein übernehmbarer Run"}</CardDescription></div>
+        <Button disabled={!candidate || loading || !rawDiff} onClick={() => setConfirmOpen(true)}>Änderungen übernehmen</Button>
+      </CardHeader>
+      <CardContent>
+        <p className={`text-sm ${candidate ? "text-muted-foreground" : "text-amber-700 dark:text-amber-300"}`} role="status">{candidate ? "Dieser Diff ist geprüft und kann in das zugewiesene Repository übernommen werden." : changeState(latest)}</p>
+        {applyError && <p className="mt-3 text-sm text-destructive" role="alert">Übernahme fehlgeschlagen: {applyError}</p>}
+        {candidate && <div className="mt-5 flex flex-wrap gap-3 border-t pt-4 text-sm"><span><strong>{files.length || "–"}</strong> Dateien</span><span className="text-emerald-700 dark:text-emerald-400">+{additions} hinzugefügt</span><span className="text-red-700 dark:text-red-400">−{deletions} gelöscht</span></div>}
+      </CardContent>
+    </Card>
+    {candidate && <DiffReview loading={loading} files={files} />}
+    <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}><DialogContent><DialogHeader><DialogTitle>Änderungen übernehmen?</DialogTitle><DialogDescription>Die geprüften Änderungen werden in das zugewiesene Repository integriert. Danach wechselt der Task nach Review.</DialogDescription></DialogHeader><div className="rounded-md bg-muted p-3 text-sm"><p><strong>{files.length}</strong> Dateien · <span className="text-emerald-700 dark:text-emerald-400">+{additions}</span> / <span className="text-red-700 dark:text-red-400">−{deletions}</span></p><ul className="mt-2 max-h-32 list-disc overflow-auto pl-5">{files.map((file) => <li key={file.path}>{file.path}</li>)}</ul></div><DialogFooter><Button variant="outline" onClick={() => setConfirmOpen(false)}>Abbrechen</Button><Button disabled={busy} onClick={apply}>Bestätigen und übernehmen</Button></DialogFooter></DialogContent></Dialog>
+  </div>;
+}
+
 function TaskDetail({ id }: { id: string }) {
   const { data, error } = useAPI<any>("/api/v1/tasks/" + id);
   const [comment, setComment] = useState("");
@@ -2827,7 +2927,13 @@ function TaskDetail({ id }: { id: string }) {
           {message && (
             <p className="mt-3 text-sm text-destructive">{message}</p>
           )}
-          <Card className="mt-6">
+          <Tabs defaultValue="conversation" className="mt-6">
+            <TabsList variant="line" aria-label="Task-Ansichten">
+              <TabsTrigger value="conversation">Conversation</TabsTrigger>
+              <TabsTrigger value="changes">Changes</TabsTrigger>
+            </TabsList>
+            <TabsContent value="conversation">
+          <Card>
             <CardHeader>
               <CardTitle>Kommentare & Entscheidungen</CardTitle>
             </CardHeader>
@@ -2947,6 +3053,11 @@ function TaskDetail({ id }: { id: string }) {
               </form>
             </CardContent>
           </Card>
+            </TabsContent>
+            <TabsContent value="changes">
+              <ChangesTab changes={data.Changes || []} onMessage={setMessage} />
+            </TabsContent>
+          </Tabs>
           <Card className="mt-4">
             <CardHeader>
               <CardTitle>Verlauf</CardTitle>

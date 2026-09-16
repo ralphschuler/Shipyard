@@ -63,13 +63,28 @@ type taskPage struct {
 	Comments       []domain.Comment
 	BoardLabels    []domain.Label
 	Error          string
-	Runs           []domain.AgentRun
+	Runs           []taskRunView
 	Agents         []domain.Agent
 	Projects       []domain.Project
 	Groups         []domain.ProjectGroup
 	TargetProjects []domain.Project
 	TargetGroups   []domain.ProjectGroup
 	Interactions   []interactionView
+	Changes        []taskChangeView
+}
+
+// taskChangeView deliberately excludes prompt and workspace snapshots: those
+// fields can contain provider details or environment values.
+type taskChangeView struct {
+	ID, Status, Summary, ErrorMessage, DiffSummary, GateStatus string
+	CreatedAt                                                  time.Time
+	FinishedAt, AppliedAt                                      *time.Time
+}
+
+type taskRunView struct {
+	ID, TaskID, AgentID, Status, Summary, ErrorMessage string
+	StartedAt, FinishedAt                              *time.Time
+	CreatedAt                                          time.Time
 }
 
 type runLogView struct {
@@ -1968,6 +1983,22 @@ func (a *App) taskData(ctx context.Context, id string) (taskPage, error) {
 	if e != nil {
 		return taskPage{}, e
 	}
+	publicRuns := make([]taskRunView, 0, len(runs))
+	changes := make([]taskChangeView, 0, len(runs))
+	for _, run := range runs {
+		publicRuns = append(publicRuns, taskRunView{ID: run.ID, TaskID: run.TaskID, AgentID: run.AgentID, Status: run.Status, Summary: run.Summary, ErrorMessage: run.ErrorMessage, StartedAt: run.StartedAt, FinishedAt: run.FinishedAt, CreatedAt: run.CreatedAt})
+		delivery, deliveryErr := a.store.RunDelivery(ctx, run.ID)
+		if deliveryErr != nil {
+			return taskPage{}, deliveryErr
+		}
+		changes = append(changes, taskChangeView{
+			ID: run.ID, Status: run.Status, Summary: run.Summary,
+			ErrorMessage: run.ErrorMessage, DiffSummary: delivery.DiffSummary,
+			GateStatus: delivery.GateStatus,
+			CreatedAt:  run.CreatedAt, FinishedAt: run.FinishedAt,
+			AppliedAt: delivery.AppliedAt,
+		})
+	}
 	agents, e := a.store.Agents(ctx)
 	if e != nil {
 		return taskPage{}, e
@@ -1988,7 +2019,7 @@ func (a *App) taskData(ctx context.Context, id string) (taskPage, error) {
 	if e != nil {
 		return taskPage{}, e
 	}
-	return taskPage{ID: t.ID, Task: t, Allowed: allowed, Columns: names, History: h, Comments: displayComments(comments), Interactions: views, BoardLabels: boardLabels, Runs: runs, Agents: agents, Projects: projects, Groups: groups, TargetProjects: targetProjects, TargetGroups: targetGroups}, nil
+	return taskPage{ID: t.ID, Task: t, Allowed: allowed, Columns: names, History: h, Comments: displayComments(comments), Interactions: views, BoardLabels: boardLabels, Runs: publicRuns, Changes: changes, Agents: agents, Projects: projects, Groups: groups, TargetProjects: targetProjects, TargetGroups: targetGroups}, nil
 }
 func (a *App) startRun(w http.ResponseWriter, r *http.Request) {
 	runs, e := a.store.CreateManualRuns(r.Context(), r.PathValue("id"), r.FormValue("agent_id"))
