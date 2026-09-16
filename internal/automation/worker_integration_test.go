@@ -61,11 +61,12 @@ func TestProcessStartsDeliveryAgentExactlyOnceAndRejectsUnknownTarget(t *testing
 	triageScript := fakeProviderScript(t, triageCount, "```taskboard-transition\n"+fmt.Sprintf(`{"target_column_id":"%s"}`, development.ID)+"\n```\n")
 	unknownScript := fakeProviderScript(t, triageCount, "```taskboard-transition\n{\"target_column_id\":\"00000000-0000-0000-0000-000000000000\"}\n```\n")
 	deliveryScript := fakeProviderScript(t, deliveryCount, "")
-	triageAgent, err := s.CreateAgent(ctx, "Triage Agent", "integration", "", "", "", repository, 1)
+	suffix := time.Now().Format("20060102150405.000000000")
+	triageAgent, err := s.CreateAgent(ctx, "Triage Agent "+t.Name()+" "+suffix, "integration", "", "", "", repository, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	deliveryAgent, err := s.CreateAgent(ctx, "Delivery Agent", "integration", "", "", "", repository, 1)
+	deliveryAgent, err := s.CreateAgent(ctx, "Delivery Agent "+t.Name()+" "+suffix, "integration", "", "", "", repository, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,11 +102,11 @@ func TestProcessStartsDeliveryAgentExactlyOnceAndRejectsUnknownTarget(t *testing
 	}
 
 	worker := &Worker{Store: s}
-	task, err := s.CreateTask(ctx, board.ID, "Successful triage", "test", "normal", "", "", "integration")
+	task, err := s.CreateTask(ctx, board.ID, "Successful triage", "test", "normal", "", "", "mcp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "integration"); err != nil {
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "mcp"); err != nil {
 		t.Fatal(err)
 	}
 	waitForWorkerCondition(t, worker, func() bool {
@@ -117,11 +118,11 @@ func TestProcessStartsDeliveryAgentExactlyOnceAndRejectsUnknownTarget(t *testing
 		t.Fatalf("successful triage must start exactly one delivery agent, got %d", got)
 	}
 
-	unknownTask, err := s.CreateTask(ctx, board.ID, "Unknown target", "test", "normal", "", "", "integration")
+	unknownTask, err := s.CreateTask(ctx, board.ID, "Unknown target", "test", "normal", "", "", "mcp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.MoveTaskToColumnID(ctx, unknownTask.ID, backlog.ID, "integration"); err != nil {
+	if _, err = s.MoveTaskToColumnID(ctx, unknownTask.ID, backlog.ID, "mcp"); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.SaveProvider(ctx, "codex", codex.Model, unknownScript, codex.SecretEnv, codex.BaseURL, codex.Options, true); err != nil {
@@ -148,7 +149,7 @@ func fakeProviderScript(t *testing.T, countPath, transition string, target ...st
 	if len(target) > 0 {
 		output = fmt.Sprintf(output, target[0])
 	}
-	contents := "#!/bin/sh\ncount=0\nif [ -f " + shellQuoteForTest(countPath) + " ]; then count=$(cat " + shellQuoteForTest(countPath) + "); fi\nprintf '%s' $((count + 1)) > " + shellQuoteForTest(countPath) + "\nprintf '%s' " + shellQuoteForTest(output) + "\n"
+	contents := "#!/bin/sh\ncount=0\nif [ -f " + shellQuoteForTest(countPath) + " ]; then count=$(cat " + shellQuoteForTest(countPath) + "); fi\nprintf '%s' $((count + 1)) > " + shellQuoteForTest(countPath) + "\nprevious=''\nfor argument in \"$@\"; do\n  if [ \"$previous\" = \"--output-last-message\" ]; then printf '%s' " + shellQuoteForTest(output) + " > \"$argument\"; fi\n  previous=\"$argument\"\ndone\nprintf '%s' " + shellQuoteForTest(output) + "\n"
 	if err := os.WriteFile(script, []byte(contents), 0o700); err != nil {
 		t.Fatal(err)
 	}
