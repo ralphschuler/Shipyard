@@ -2162,7 +2162,7 @@ func (s *Store) RefreshRunBatch(c context.Context, id string) (domain.AgentRunBa
 		FROM counts WHERE b.id=$1 RETURNING b.id,b.task_id,b.agent_id,COALESCE(b.rule_id::text,''),COALESCE(b.event_id::text,''),b.status,b.total_targets,b.succeeded_targets,b.failed_targets,b.cancelled_targets,b.created_at,b.updated_at)
 		SELECT * FROM updated`, id).Scan(&batch.ID, &batch.TaskID, &batch.AgentID, &batch.RuleID, &batch.EventID, &batch.Status, &batch.TotalTargets, &batch.SucceededTargets, &batch.FailedTargets, &batch.CancelledTargets, &batch.CreatedAt, &batch.UpdatedAt)
 	if err == nil {
-		_, err = s.DB.Exec(c, `UPDATE automation_event_claims SET status=CASE WHEN $2='partial' THEN 'failed' ELSE $2 END,updated_at=now() WHERE batch_id=$1`, id, batch.Status)
+		_, err = s.DB.Exec(c, `UPDATE automation_event_claims SET status=CASE WHEN $2='partial' THEN 'failed' WHEN $2='cancelled' THEN 'blocked' ELSE $2 END,updated_at=now() WHERE batch_id=$1`, id, batch.Status)
 	}
 	return batch, err
 }
@@ -2602,10 +2602,31 @@ func (s *Store) CreateRunsForEvent(c context.Context, event domain.AutomationEve
 		return nil, e
 	}
 	var claimID string
+	canonicalPayload := canonicalAutomationPayloadValue(event.Payload)
+	returnGeneration := automationReturnGeneration(canonicalPayload)
+	// Claims backfilled from pre-fingerprint batches use a namespaced legacy
+	// fingerprint. Match them semantically before inserting the new SHA claim
+	// so a changed transport ID cannot start a second run after migration.
+	var existingStatus string
+	legacyErr := tx.QueryRow(c, `SELECT status FROM automation_event_claims
+		WHERE task_id=$1 AND rule_id=NULLIF($2,'')::uuid
+		  AND target_column_id IS NOT DISTINCT FROM NULLIF($3,'')::uuid
+		  AND return_generation=$4
+		  AND canonical_automation_payload(payload)=canonical_automation_payload($5::jsonb)
+		ORDER BY created_at LIMIT 1`, event.TaskID, rule.ID, rule.TargetColumnID, returnGeneration, event.Payload).Scan(&existingStatus)
+	if legacyErr == nil {
+		if existingStatus == "queued" || existingStatus == "running" {
+			return nil, ErrAutomationActive
+		}
+		return nil, ErrNoRunCreated
+	}
+	if !errors.Is(legacyErr, pgx.ErrNoRows) {
+		return nil, legacyErr
+	}
 	e = tx.QueryRow(c, `INSERT INTO automation_event_claims(fingerprint,event_id,task_id,rule_id,target_column_id,return_generation,payload)
 		VALUES($1,NULLIF($2,'')::uuid,$3,NULLIF($4,'')::uuid,NULLIF($5,'')::uuid,$6,$7)
 		ON CONFLICT (fingerprint) DO NOTHING RETURNING id`, fingerprint, event.ID, event.TaskID, rule.ID, rule.TargetColumnID,
-		automationReturnGeneration(canonicalAutomationPayloadValue(event.Payload)), event.Payload).Scan(&claimID)
+		returnGeneration, canonicalPayload).Scan(&claimID)
 	if errors.Is(e, pgx.ErrNoRows) {
 		var claimStatus string
 		if statusErr := tx.QueryRow(c, "SELECT status FROM automation_event_claims WHERE fingerprint=$1", fingerprint).Scan(&claimStatus); statusErr != nil {

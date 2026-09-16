@@ -97,7 +97,7 @@ func TestAutomationFingerprintMigrationHasAtomicDurableClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(body)
-	for _, required := range []string{"automation_event_claims", "fingerprint TEXT NOT NULL UNIQUE", "status TEXT NOT NULL", "attempts INTEGER", "batch_id UUID"} {
+	for _, required := range []string{"automation_event_claims", "fingerprint TEXT NOT NULL UNIQUE", "status TEXT NOT NULL", "attempts INTEGER", "batch_id UUID", "canonical_automation_payload", "legacy:' || b.id::text", "legacy:run:' || r.id::text", "agent_runs", "ON CONFLICT (fingerprint) DO NOTHING"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("fingerprint migration is missing %q", required)
 		}
