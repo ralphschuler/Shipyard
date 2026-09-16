@@ -193,6 +193,7 @@ type AgentRunBatch struct {
 }
 type RunDelivery struct {
 	DiffSummary, GateStatus, GateOutput                    string
+	AcceptedCommitSHA                                      string
 	InputTokens, OutputTokens, TokenUsage, DurationSeconds int
 	EstimatedCostMicrousd                                  int64
 	AppliedAt                                              *time.Time

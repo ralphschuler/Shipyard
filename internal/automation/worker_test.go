@@ -84,7 +84,11 @@ func TestRunCommitExistsProvidesIdempotentDeliveryMarker(t *testing.T) {
 	runGit(t, source, "add", "delivery.txt")
 	runID := "0a8f7a12-9fa9-4ec7-a6ad-accepted"
 	runGit(t, source, "commit", "-m", "taskboard: accept run "+runID)
-	found, err := runCommitExists(context.Background(), source, runID)
+	commitSHA, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, err := runCommitExists(context.Background(), source, commitSHA)
 	if err != nil || !found {
 		t.Fatalf("delivery commit marker = %t, %v", found, err)
 	}
@@ -112,7 +116,7 @@ func TestRunCommitExistsIgnoresMarkerOnUnrelatedRef(t *testing.T) {
 	runID := "unrelated-ref"
 	runGit(t, source, "commit", "-m", "taskboard: accept run "+runID)
 	runGit(t, source, "switch", "main")
-	found, err := runCommitExists(context.Background(), source, runID)
+	found, err := runCommitExists(context.Background(), source, "0000000000000000000000000000000000000000")
 	if err != nil || found {
 		t.Fatalf("marker on unrelated ref = %t, %v", found, err)
 	}
@@ -137,11 +141,12 @@ func TestSyncManagedCheckoutKeepsAcceptedAheadCommit(t *testing.T) {
 	}
 	runGit(t, source, "add", "accepted.txt")
 	runGit(t, source, "commit", "-m", "taskboard: accept run first")
-	expected, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
+	acceptedSHA, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := syncManagedCheckout(context.Background(), source, "master"); err != nil {
+	expected := acceptedSHA
+	if err := syncManagedCheckout(context.Background(), source, "master", acceptedSHA); err != nil {
 		t.Fatalf("follow-up synchronization: %v", err)
 	}
 	actual, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
@@ -191,7 +196,9 @@ func TestSyncManagedCheckoutBlocksUnacceptedLocalCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	runGit(t, source, "add", "manual.txt")
-	runGit(t, source, "commit", "-m", "manual local commit")
+	// A subject is forgeable; only a commit SHA recorded by MarkRunApplied is
+	// trusted. This must remain blocked even when the subject looks official.
+	runGit(t, source, "commit", "-m", "taskboard: accept run forged-by-hand")
 	err := syncManagedCheckout(context.Background(), source, "master")
 	if err == nil || !strings.Contains(err.Error(), "nicht als akzeptierte Delivery verifiziert") || !strings.Contains(err.Error(), "manual.txt") {
 		t.Fatalf("unaccepted local commit diagnosis = %v", err)

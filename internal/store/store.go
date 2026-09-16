@@ -2052,8 +2052,29 @@ func (s *Store) Run(c context.Context, id string) (domain.AgentRun, error) {
 }
 func (s *Store) RunDelivery(c context.Context, id string) (domain.RunDelivery, error) {
 	var d domain.RunDelivery
-	err := s.DB.QueryRow(c, "SELECT diff_summary,gate_status,gate_output,input_tokens,output_tokens,token_usage,estimated_cost_microusd,duration_seconds,applied_at FROM agent_runs WHERE id=$1", id).Scan(&d.DiffSummary, &d.GateStatus, &d.GateOutput, &d.InputTokens, &d.OutputTokens, &d.TokenUsage, &d.EstimatedCostMicrousd, &d.DurationSeconds, &d.AppliedAt)
+	err := s.DB.QueryRow(c, "SELECT diff_summary,gate_status,gate_output,input_tokens,output_tokens,token_usage,estimated_cost_microusd,duration_seconds,COALESCE(accepted_commit_sha,''),applied_at FROM agent_runs WHERE id=$1", id).Scan(&d.DiffSummary, &d.GateStatus, &d.GateOutput, &d.InputTokens, &d.OutputTokens, &d.TokenUsage, &d.EstimatedCostMicrousd, &d.DurationSeconds, &d.AcceptedCommitSHA, &d.AppliedAt)
 	return d, err
+}
+
+// AcceptedRunCommitSHAs is the trust boundary for follow-up delivery runs.
+// Only commits recorded by a successful acceptance for this exact managed
+// checkout are allowed to remain ahead of origin.
+func (s *Store) AcceptedRunCommitSHAs(c context.Context, source string) ([]string, error) {
+	rows, err := s.DB.Query(c, `SELECT accepted_commit_sha FROM agent_runs
+		WHERE source_workspace=$1 AND accepted_commit_sha IS NOT NULL AND accepted_commit_sha <> ''`, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var shas []string
+	for rows.Next() {
+		var sha string
+		if err := rows.Scan(&sha); err != nil {
+			return nil, err
+		}
+		shas = append(shas, sha)
+	}
+	return shas, rows.Err()
 }
 
 func (s *Store) RunUsage(c context.Context, id string) (domain.UsageReport, error) {
@@ -2099,8 +2120,8 @@ func (s *Store) ReclaimableRunWorktrees(c context.Context, before time.Time, lim
 	defer rows.Close()
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[domain.WorktreeCleanupCandidate])
 }
-func (s *Store) MarkRunApplied(c context.Context, id string) (bool, error) {
-	tag, err := s.DB.Exec(c, "UPDATE agent_runs SET applied_at=now(),summary='Änderungen übernommen' WHERE id=$1 AND applied_at IS NULL", id)
+func (s *Store) MarkRunApplied(c context.Context, id, commitSHA string) (bool, error) {
+	tag, err := s.DB.Exec(c, "UPDATE agent_runs SET accepted_commit_sha=$2,applied_at=now(),summary='Änderungen übernommen' WHERE id=$1 AND applied_at IS NULL AND $2 <> ''", id, commitSHA)
 	return tag.RowsAffected() == 1, err
 }
 func (s *Store) MarkRunDiscarded(c context.Context, id string) error {

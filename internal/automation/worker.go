@@ -533,16 +533,15 @@ func lockRepository(ctx context.Context, source string) (func(), error) {
 // a Git commit and the following database write. If a database connection
 // fails after the commit, retrying a delivery records that existing commit
 // instead of trying to apply the same worktree diff a second time.
-func runCommitExists(ctx context.Context, source, runID string) (bool, error) {
-	message := "taskboard: accept run " + runID
-	// Only commits reachable from the managed checkout's current HEAD count.
-	// Searching --all also sees abandoned agent branches and unrelated refs,
-	// which could incorrectly make a delivery appear idempotently applied.
-	out, err := exec.CommandContext(ctx, "git", "-C", source, "log", "HEAD", "--format=%B", "--fixed-strings", "--grep="+message, "-n", "1").Output()
-	if err != nil {
-		return false, err
+func runCommitExists(ctx context.Context, source, commitSHA string) (bool, error) {
+	if strings.TrimSpace(commitSHA) == "" {
+		return false, nil
 	}
-	return strings.TrimSpace(string(out)) == message, nil
+	if _, err := gitOutput(ctx, source, "merge-base", "--is-ancestor", commitSHA, "HEAD"); err != nil {
+		return false, nil
+	}
+	actual, err := gitOutput(ctx, source, "rev-parse", commitSHA+"^{commit}")
+	return err == nil && actual == commitSHA, nil
 }
 
 func gitOutput(ctx context.Context, directory string, args ...string) (string, error) {
@@ -563,7 +562,7 @@ func managedCheckoutProblem(kind, files, detail string) error {
 	return errors.New(message)
 }
 
-func syncManagedCheckout(ctx context.Context, path, branch string) error {
+func syncManagedCheckout(ctx context.Context, path, branch string, acceptedCommitSHAs ...string) error {
 	status, err := gitOutput(ctx, path, "status", "--porcelain")
 	if err != nil {
 		return fmt.Errorf("Git-Status konnte nicht gelesen werden: %w", err)
@@ -589,14 +588,20 @@ func syncManagedCheckout(ctx context.Context, path, branch string) error {
 	if _, err := gitOutput(ctx, path, "merge-base", "--is-ancestor", remoteRef, "HEAD"); err == nil {
 		// The local branch contains accepted commits not present remotely. Keep
 		// that exact accepted HEAD for follow-up runs; never pull/rebase it.
-		localCommits, logErr := gitOutput(ctx, path, "log", "--format=%s", remoteRef+"..HEAD")
+		accepted := make(map[string]bool, len(acceptedCommitSHAs))
+		for _, sha := range acceptedCommitSHAs {
+			if resolved, resolveErr := gitOutput(ctx, path, "rev-parse", sha+"^{commit}"); resolveErr == nil {
+				accepted[resolved] = true
+			}
+		}
+		localSHAs, logErr := gitOutput(ctx, path, "log", "--format=%H", remoteRef+"..HEAD")
 		if logErr != nil {
 			return fmt.Errorf("lokale Checkout-Commits konnten nicht geprüft werden: %w", logErr)
 		}
-		for _, subject := range strings.Split(localCommits, "\n") {
-			if strings.TrimSpace(subject) != "" && !strings.HasPrefix(subject, "taskboard: accept run ") {
+		for _, sha := range strings.Split(localSHAs, "\n") {
+			if strings.TrimSpace(sha) != "" && !accepted[strings.TrimSpace(sha)] {
 				files, _ := gitOutput(ctx, path, "diff", "--name-only", remoteRef+"..HEAD")
-				return managedCheckoutProblem("nicht als akzeptierte Delivery verifiziert", files, "lokale Commits enthalten manuelle oder fremde Änderungen")
+				return managedCheckoutProblem("nicht als akzeptierte Delivery verifiziert", files, "lokaler Commit ist in keinem akzeptierten Run verzeichnet")
 			}
 		}
 		return nil
@@ -1226,7 +1231,7 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	}
 	defer unlock()
 
-	alreadyCommitted, err := runCommitExists(ctx, source, runID)
+	alreadyCommitted, err := runCommitExists(ctx, source, delivery.AcceptedCommitSHA)
 	if err != nil {
 		return err
 	}
@@ -1274,7 +1279,15 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	} else {
 		_ = w.Store.AddRunLog(ctx, runID, "warning", "Vorhandener Übernahme-Commit erkannt; Delivery wird ohne erneutes Anwenden wiederhergestellt.")
 	}
-	applied, err := w.Store.MarkRunApplied(ctx, runID)
+	commitSHA := delivery.AcceptedCommitSHA
+	if commitSHA == "" {
+		var commitErr error
+		commitSHA, commitErr = gitOutput(ctx, source, "rev-parse", "HEAD")
+		if commitErr != nil {
+			return fmt.Errorf("Übernahme-Commit konnte nicht verifiziert werden: %w", commitErr)
+		}
+	}
+	applied, err := w.Store.MarkRunApplied(ctx, runID, commitSHA)
 	if err != nil {
 		return err
 	}
@@ -1474,7 +1487,11 @@ func (w *Worker) syncManagedProject(ctx context.Context, project domain.Project)
 			return fmt.Errorf("Projekt-Checkout konnte nicht für die Synchronisierung gesperrt werden: %w", lockErr)
 		}
 		defer unlock()
-		problemErr := syncManagedCheckout(syncCtx, path, project.DefaultBranch)
+		acceptedCommits, acceptedErr := w.Store.AcceptedRunCommitSHAs(syncCtx, path)
+		if acceptedErr != nil {
+			return fmt.Errorf("akzeptierte Delivery-Commits konnten nicht geprüft werden: %w", acceptedErr)
+		}
+		problemErr := syncManagedCheckout(syncCtx, path, project.DefaultBranch, acceptedCommits...)
 		problem := ""
 		if problemErr != nil {
 			problem = problemErr.Error()

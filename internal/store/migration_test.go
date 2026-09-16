@@ -77,3 +77,16 @@ func TestSessionHygieneMigrationSupportsBoundedCleanup(t *testing.T) {
 		}
 	}
 }
+
+func TestAcceptedDeliveryCommitMigrationStoresGitObjectIdentity(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/041_accepted_delivery_commits.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"accepted_commit_sha TEXT", "source_workspace, accepted_commit_sha", "user-controlled"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("accepted delivery migration is missing %q", required)
+		}
+	}
+}
