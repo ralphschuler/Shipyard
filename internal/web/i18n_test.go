@@ -81,3 +81,24 @@ func TestLocalizeHTMLIsStableForDynamicUserContent(t *testing.T) {
 		t.Fatalf("complete visible text node was not translated: %s", english)
 	}
 }
+
+func TestLocalizeHTMLTranslatesNestedControlLabels(t *testing.T) {
+	html := `<form><label>E-Mail-Adresse<input name="email"></label><label>Passwort<input type="password"></label><button>Workspace erstellen</button></form>`
+	english := localizeHTML(html, languageEnglish)
+	for _, want := range []string{"Email address", "Password", "Create workspace"} {
+		if !strings.Contains(english, want) {
+			t.Fatalf("nested control missing %q: %s", want, english)
+		}
+	}
+}
+
+func TestLocalizeHTMLLeavesPartialDynamicTextUntouched(t *testing.T) {
+	html := `<p>Mein Board: Neue Aufgabe</p><p>Neue Aufgabe</p>`
+	english := localizeHTML(html, languageEnglish)
+	if !strings.Contains(english, "Mein Board: Neue Aufgabe") {
+		t.Fatalf("partial dynamic text was changed: %s", english)
+	}
+	if !strings.Contains(english, "New task") {
+		t.Fatalf("complete static text was not translated: %s", english)
+	}
+}

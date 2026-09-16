@@ -80,6 +80,30 @@ var legacyPhrases = map[string]string{
 	"Erscheinungsbild · Shipyard": "Appearance · Shipyard", "Lege fest, wie Shipyard dargestellt wird und ob Tastaturhinweise sichtbar sind.": "Choose how Shipyard is displayed and whether keyboard hints are visible.", "Tab, Enter, Leertaste und die Sidebar-Pfeiltasten bleiben immer verfügbar.": "Tab, Enter, Space and sidebar arrow keys are always available.",
 }
 
+// The legacy templates are still intentionally readable in German. These
+// entries keep their visible vocabulary in the same central dictionary until
+// each template can be migrated to an explicit tr key.
+var additionalLegacyPhrases = map[string]string{
+	"Shipyard einrichten": "Set up Shipyard", "Lege das erste Owner-Konto für diesen Arbeitsbereich an.": "Create the first owner account for this workspace.", "Workspace erstellen": "Create workspace", "Mindestens 12 Zeichen.": "At least 12 characters.",
+	"Live-Überblick": "Live overview", "Der aktuelle Zustand über Boards, Projekte und Agent-Ausführungen.": "The current state of boards, projects, and agent runs.", "Im System": "In the system", "In Arbeit": "In progress", "Abgeschlossen": "Completed", "Erstellt und abgeschlossen": "Created and completed", "Alle Runs öffnen": "Open all runs", "Tasks im Workflow": "Tasks in workflow", "Nach Board und Status": "By board and status", "Noch keine Tasks im Workflow.": "No tasks in the workflow yet.", "Der Arbeitsfluss beginnt mit einem Board.": "The workflow starts with a board.", "Lege einen Bereich und einen Workflow an. Danach erscheinen Durchsatz, Status und Agent-Ausführungen automatisch hier.": "Create a workspace and workflow. Throughput, status, and agent runs will appear here automatically.", "Erstes Board anlegen": "Create first board", "Noch keine Kostenraten oder API-Runs erfasst.": "No cost rates or API runs recorded yet.", "Gelesen": "Read",
+	"Agent-Run": "Agent run", "← Zur Aufgabe": "← Back to task", "Run-Protokoll": "Run log", "Live-Terminal per SSH:": "Live terminal over SSH:", "Auslieferung": "Delivery", "Qualitäts-Gate": "Quality gate", "Laufzeit": "Duration", "Tokens": "Tokens", "Änderungen verwerfen": "Discard changes", "Worktree bereinigen": "Clean worktree", "Run abbrechen": "Cancel run", "Mit aktuellen Einstellungen neu starten": "Restart with current settings", "Diff &amp; Qualitäts-Gate": "Diff &amp; quality gate", "Diff-Übersicht": "Diff overview", "Gate-Ausgabe": "Gate output", "Usage &amp; Kosten": "Usage &amp; costs", "Provider / Modell": "Provider / model", "Service-Tier": "Service tier", "API-Aufrufe": "API calls", "Cache-Input": "Cache input", "Cache-Schreiben": "Cache write", "Reasoning": "Reasoning", "Usage-Status": "Usage status", "Kostenquelle": "Cost source", "Preisversion": "Price version", "Berechnet am": "Calculated at", "Protokoll": "Log", "Es werden jeweils": "Showing", "Einträge angezeigt.": "entries.", "Ältere Ausgabe laden": "Load older output", "Vollständige Ausgabe laden": "Load full output", "Noch keine Ausgabe.": "No output yet.",
+	"Quellcode": "Source code", "Repositorys gruppieren, Boards zuordnen und lokal synchron halten.": "Group repositories, assign boards, and keep them synced locally.", "Projekt anlegen": "Create project", "Repository-Katalog": "Repository catalog", "Gruppe:": "Group:", "Board:": "Board:", "Bearbeiten": "Edit", "Projekt bearbeiten": "Edit project", "Git-Repository URL": "Git repository URL", "Standard-Branch": "Default branch", "Lokaler Clone-Pfad": "Local clone path", "Gruppen": "Groups", "Neue Gruppe": "New group", "Projekt löschen": "Delete project", "Noch keine Projekte. Lege das erste Repository an.": "No projects yet. Create the first repository.", "Neue Gruppen bekommen automatisch eine Farbe und verschwinden, wenn kein Projekt sie nutzt.": "New groups receive a color automatically and disappear when no project uses them.",
+	"Agentenrichtlinien": "Agent policies", "Diese Abschnitte umschließen jede Agentenanweisung. Plattformregeln bleiben unveränderlich.": "These sections wrap every agent instruction. Platform rules remain immutable.", "Globaler Prefix": "Global prefix", "Globaler Suffix": "Global suffix", "Richtlinien speichern": "Save policies", "Workflow-Editor": "Workflow editor", "+ Spalte": "+ Column", "Transitionen": "Transitions", "Transition bearbeiten": "Edit transition", "Aktionsname": "Action name", "Transition löschen": "Delete transition", "Inhalt anpassen": "Adjust content", "Ansicht zurücksetzen": "Reset view", "Canvas maximieren": "Maximize canvas", "Spalte bearbeiten": "Edit column", "Spaltentyp": "Column type", "Standard": "Default", "Inbox – neue Tasks": "Inbox – new tasks", "Needs action – Rückfrage / Blockade": "Needs action – question / blocked", "Done – erledigt": "Done – completed", "Jeder besondere Typ darf pro Board nur einmal vorkommen.": "Each special type may occur only once per board.", "Spalte löschen": "Delete column", "Spalte anlegen": "Create column", "Spalte erstellen": "Create column", "Transition anlegen": "Create transition",
+	"Conversation": "Conversation", "Info": "Info", "Changes": "Changes", "Verlauf": "History", "Kommentare": "Comments", "Entscheidung benötigt": "Decision required", "Bitte wählen …": "Please choose …", "Nach der Antwort": "After the answer", "In Blocked bleiben": "Stay blocked", "Antwort speichern": "Save answer", "Kommentar speichern": "Save comment", "Nächster Schritt": "Next step", "Details": "Details", "Zielbereiche": "Target areas", "Projekte:": "Projects:", "Gruppen:": "Groups:", "Ziele bearbeiten": "Edit targets", "Agent starten": "Start agent", "Ein isolierter Run pro aufgelöstem Repository.": "One isolated run per resolved repository.", "Runs starten": "Start runs", "Beschreibung": "Description", "Metadaten": "Metadata", "Labels": "Labels", "Run-Diffs": "Run diffs", "Akzeptierte und ausstehende Änderungen dieses Tasks.": "Accepted and pending changes for this task.", "Keine Run-Änderungen vorhanden.": "No run changes available.", "Übernahme": "Apply", "Änderungen übernehmen": "Apply changes", "Ziele speichern": "Save targets", "Aufgabe bearbeiten": "Edit task", "Fachgebiet": "Area", "Aufgabe erstellen": "Create task", "Tag anlegen": "Create label", "Farbe": "Color", "Board löschen": "Delete board", "Fällig": "Due",
+	"Organisation": "Organization", "Arbeitsbereiche bündeln Aufgaben, Workflows und zugehörige Projekte.": "Workspaces bring together tasks, workflows, and related projects.", "Neues Board": "New board", "Arbeitsbereich": "Workspace", "Board öffnen": "Open board", "Noch kein Board": "No board yet", "Lege einen Arbeitsbereich für dein erstes Projekt an.": "Create a workspace for your first project.", "Wähle eine Vorlage. Der Workflow bleibt danach im Editor vollständig anpassbar.": "Choose a template. The workflow remains fully customizable in the editor.", "Board erstellen": "Create board", "Schließen": "Close", "Abmelden": "Sign out", "Neuer MCP-Token": "New MCP token", "Kopiere ihn jetzt. Er wird nicht erneut angezeigt.": "Copy it now. It will not be shown again.", "MCP-Token erstellen": "Create MCP token", "Tokens geben einem Coding-Agent Zugriff im Namen deines Kontos.": "Tokens give a coding agent access on behalf of your account.", "Token erzeugen": "Generate token", "Aktive Token": "Active tokens", "Widerrufen": "Revoke", "Noch kein MCP-Token.": "No MCP token yet.",
+	"Orchestrierung": "Orchestration", "Profile mit klaren Workspaces, Arbeitsrahmen und Skill-Grenzen.": "Profiles with clear workspaces, operating boundaries, and skill limits.", "Agent anlegen": "Create agent", "Pausiert": "Paused", "Max. parallele Runs": "Max. parallel runs", "Agent aktiv": "Agent active", "Erinnerungen und Rollenkontext vor der Arbeitsanweisung.": "Reminders and role context before the work instruction.", "Arbeitsanweisung": "Work instruction", "Abschluss- und Übergabeanweisungen.": "Completion and handoff instructions.", "Profil speichern": "Save profile", "Erlaubte Skills": "Allowed skills", "Skills speichern": "Save skills", "Agent löschen": "Delete agent", "Noch keine Agent-Profile": "No agent profiles yet", "Lege ein Profil an, bevor Automationen Agents starten können.": "Create a profile before automations can start agents.",
+	"Provider speichern": "Save provider", "Keine Provider konfiguriert.": "No providers configured.", "Agent-Provider": "Agent provider", "Secrets bleiben als Umgebungsvariablen außerhalb der Datenbank. Optionen werden je Provider validiert gespeichert.": "Secrets remain as environment variables outside the database. Options are validated and saved per provider.", "Provider aktiv": "Provider active", "Zusatzoptionen (JSON)": "Additional options (JSON)", "Integrationen": "Integrations", "Quelle hinzufügen": "Add source", "Entfernen": "Remove", "Noch keine Projektquellen": "No project sources yet", "Projektquelle hinzufügen": "Add project source", "Bezeichnung": "Label", "Eigene Basis-URL (optional)": "Custom base URL (optional)", "Quelle vorbereiten": "Prepare source",
+	"Nachvollziehbarkeit": "Traceability", "Audit-Protokoll": "Audit log", "Aktionen aus dem Control Panel und MCP. MCP-Einträge zeigen das verwendete Token, die vollständigen Metadaten bleiben aufklappbar.": "Actions from the control panel and MCP. MCP entries show the token used; full metadata remains expandable.", "Zeitpunkt": "Timestamp", "Aktion": "Action", "Akteur": "Actor", "Ergebnis": "Result", "Ressource": "Resource", "Noch keine protokollierten Aktionen.": "No actions logged yet.", "Neueste Aktionen": "Newest actions", "Ältere Aktionen": "Older actions", "Agent-Orchestrierung": "Agent orchestration", "Alle gestarteten Agent-Ausführungen, inklusive Status, Laufzeit und Ergebnis.": "All started agent runs, including status, duration, and result.", "Gestartet": "Started", "Beendet": "Finished", "Noch keine Agent-Runs.": "No agent runs yet.",
+	"Agenten-Bibliothek": "Agent library", "Suche im globalen skills.sh-Katalog und erlaube nur geprüfte Fähigkeiten für deine Agents.": "Search the global skills.sh catalog and allow only reviewed skills for your agents.", "Fähigkeit finden": "Find a skill", "Skills suchen": "Search skills", "Installieren": "Install", "Keine passenden Skills gefunden. Versuche einen allgemeineren Begriff.": "No matching skills found. Try a broader term.", "Installiert": "Installed", "Für Agents verfügbar": "Available to agents", "Noch keine Skills installiert.": "No skills installed yet.", "Details und Prüfungen auf skills.sh": "Details and checks on skills.sh",
+	"Zeitregeln": "Schedules", "Prüfe fällige Aufgaben nach einem verlässlichen Intervall.": "Check due tasks at a reliable interval.", "Zeitregel anlegen": "Create schedule", "Ereignisregeln": "Event rules", "Prüft alle": "Checks every", "Noch keine Zeitregeln": "No schedules yet", "Lege eine Regel an, damit ein Agent Aufgaben vor dem Fälligkeitsdatum prüfen kann.": "Create a rule so an agent can check tasks before their due date.", "Erste Zeitregel anlegen": "Create first schedule", "Alle Boards": "All boards", "Fällig innerhalb Stunden": "Due within hours", "Prüfintervall Minuten": "Check interval in minutes", "Zeitregel speichern": "Save schedule", "Webhooks": "Webhooks", "Informiere externe Systeme über Agent-Run-Ergebnisse.": "Notify external systems about agent run results.", "Webhook hinzufügen": "Add webhook", "Noch keine Webhooks": "No webhooks yet", "Webhook speichern": "Save webhook",
+}
+
+func init() {
+	for key, value := range additionalLegacyPhrases {
+		legacyPhrases[key] = value
+	}
+}
+
 func legacyDictionary(lang string) map[string]string {
 	if normalizeLanguage(lang) != languageEnglish {
 		return map[string]string{}
@@ -115,7 +139,47 @@ func localizeHTML(html, lang string) string {
 			html = strings.ReplaceAll(html, old, replacement)
 		}
 	}
-	return html
+	return localizeTextNodes(html, dictionary)
+}
+
+// localizeTextNodes handles prose nested in labels and controls, such as
+// <label>Name<input ...>. It deliberately translates only a complete text
+// node (after trimming whitespace), never an arbitrary substring. As a
+// result a user-created title containing a translated phrase remains intact.
+func localizeTextNodes(html string, dictionary map[string]string) string {
+	var out strings.Builder
+	textStart := 0
+	for textStart < len(html) {
+		rel := strings.IndexByte(html[textStart:], '<')
+		if rel < 0 {
+			out.WriteString(translateTextNode(html[textStart:], dictionary))
+			break
+		}
+		textEnd := textStart + rel
+		out.WriteString(translateTextNode(html[textStart:textEnd], dictionary))
+		tagEnd := strings.IndexByte(html[textEnd:], '>')
+		if tagEnd < 0 {
+			out.WriteString(html[textEnd:])
+			break
+		}
+		tagEnd += textEnd
+		out.WriteString(html[textEnd : tagEnd+1])
+		textStart = tagEnd + 1
+	}
+	return out.String()
+}
+
+func translateTextNode(node string, dictionary map[string]string) string {
+	trimmed := strings.TrimSpace(node)
+	if trimmed == "" {
+		return node
+	}
+	value, ok := dictionary[trimmed]
+	if !ok {
+		return node
+	}
+	start := strings.Index(node, trimmed)
+	return node[:start] + value + node[start+len(trimmed):]
 }
 
 func translate(lang, key, fallback string) string {
