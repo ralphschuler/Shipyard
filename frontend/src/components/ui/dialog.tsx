@@ -37,7 +37,7 @@ function DialogOverlay({
     <DialogPrimitive.Overlay
       data-slot="dialog-overlay"
       className={cn(
-        "fixed inset-0 isolate z-50 bg-black/55 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
+        "fixed inset-0 isolate z-50 bg-black/70 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
         className
       )}
       {...props}
@@ -67,6 +67,19 @@ function DialogContent({
   const body = dialogChildren.filter(
     (child) => !["dialog-header", "dialog-footer"].includes(slotOf(child) ?? "")
   )
+  const focusDialog: NonNullable<
+    React.ComponentProps<typeof DialogPrimitive.Content>["onOpenAutoFocus"]
+  > = (event) => {
+    event.preventDefault()
+    const dialog = event.currentTarget as HTMLElement
+    const target =
+      dialog.querySelector<HTMLElement>("[autofocus]") ??
+      dialog.querySelector<HTMLElement>(
+        "[data-slot=dialog-body] button:not([data-slot=dialog-close]), [data-slot=dialog-body] input, [data-slot=dialog-body] select, [data-slot=dialog-body] textarea, [data-slot=dialog-body] [tabindex]:not([tabindex='-1'])"
+      ) ??
+      dialog.querySelector<HTMLElement>("[data-slot=dialog-close]")
+    target?.focus()
+  }
 
   return (
     <DialogPortal>
@@ -77,6 +90,7 @@ function DialogContent({
           "fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 flex-col gap-4 overflow-hidden rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className
         )}
+        onOpenAutoFocus={focusDialog}
         {...props}
       >
         {header}

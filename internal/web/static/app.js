@@ -22,7 +22,15 @@ document.addEventListener('change',event=>{if(!(event.target instanceof HTMLSele
 // dialogs. Native showModal() supplies the remaining focus containment.
 const modalReturnFocus=new WeakMap();
 const nativeShowModal=HTMLDialogElement.prototype.showModal;
-const openModal=(dialog,trigger=document.activeElement)=>{if(!dialog)return;if(trigger instanceof HTMLElement)modalReturnFocus.set(dialog,trigger);if(!dialog.open)nativeShowModal.call(dialog);requestAnimationFrame(()=>dialog.querySelector('[autofocus],button,input,select,textarea,[tabindex]:not([tabindex="-1"])')?.focus())};
+const enhanceLegacyDialog=dialog=>{
+ const article=dialog.querySelector(':scope > article');if(!article||article.querySelector(':scope > .dialog-body'))return;
+ const header=article.querySelector(':scope > header'),footer=article.querySelector(':scope > footer');
+ const body=[...article.children].filter(child=>child!==header&&child!==footer);
+ if(!body.length)return;
+ const wrapper=document.createElement('div');wrapper.className='dialog-body';body[0].before(wrapper);body.forEach(child=>wrapper.append(child));
+};
+const dialogFocusTarget=dialog=>dialog.querySelector('[autofocus]')||dialog.querySelector('.dialog-body button:not(.close):not([data-close-modal]),.dialog-body input,.dialog-body select,.dialog-body textarea,.dialog-body [tabindex]:not([tabindex="-1"])')||dialog.querySelector('.close,[data-close-modal],button[type="button"]');
+const openModal=(dialog,trigger=document.activeElement)=>{if(!dialog)return;if(trigger instanceof HTMLElement)modalReturnFocus.set(dialog,trigger);enhanceLegacyDialog(dialog);if(!dialog.open)nativeShowModal.call(dialog);requestAnimationFrame(()=>dialogFocusTarget(dialog)?.focus())};
 HTMLDialogElement.prototype.showModal=function(){openModal(this)};
 document.addEventListener('cancel',event=>{const dialog=event.target.closest?.('dialog');if(dialog&&!dialog.querySelector('.close,[data-close-modal],button[type="button"]'))event.preventDefault()},true);
 document.addEventListener('close',event=>{const dialog=event.target;if(!(dialog instanceof HTMLDialogElement))return;const trigger=modalReturnFocus.get(dialog);modalReturnFocus.delete(dialog);if(trigger?.isConnected)requestAnimationFrame(()=>trigger.focus())},true);
