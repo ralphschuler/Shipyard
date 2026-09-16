@@ -53,6 +53,7 @@ Die Vorlage liegt unter `deploy/taskboard-sso.conf.example`. `TASKBOARD_PROXY_SS
   werden als Blockierung am Task kommentiert.
 - Der gestartete Agent-Prozess erhält keine vollständige Service-Umgebung: Datenbank- und andere Infrastrukturvariablen werden nicht geerbt. Nur `HOME`, `PATH`, Locale-Werte und das explizit konfigurierte Provider-Secret werden weitergereicht.
 - Tool-Befehle des OpenAI-Responses-Adapters benötigen `bubblewrap` (`bwrap`). Sie laufen in einem eigenen Dateisystem-, Prozess- und Netzwerk-Namespace: Nur der zugewiesene Git-Worktree ist schreibbar, Systembibliotheken sind read-only und es gibt keine Netzwerkschnittstelle. Fehlt `bwrap`, lehnt Shipyard OpenAI-Runs vor dem API-Aufruf ab, statt eine schwächere Isolation zu verwenden.
+- Der Host-Preflight `./deploy/bubblewrap-healthcheck.sh` startet diese Sandbox ohne Worktree- oder Datenbankänderung. Er läuft vor OpenAI-Runs (mit `TASKBOARD_BWRAP_PREFLIGHT=0` abschaltbar) und im Produktionscheck. Die systemd-Unit muss `AF_NETLINK` zusätzlich zu `AF_UNIX AF_INET AF_INET6` erlauben; diese Freigabe gilt nur für `taskboard.service`, weil Bubblewrap beim Aufbau des privaten Netzwerks `NETLINK_ROUTE` benötigt. Nach einer Unit-Änderung: `systemctl daemon-reload && systemctl restart taskboard.service`.
 - Der OpenAI-Responses-Adapter nutzt die offizielle Responses-API mit `store:false`. Er kann im zugewiesenen Git-Worktree über ein dokumentiertes Kommando-Werkzeug arbeiten; Modell, API-Key-Umgebungsvariable und optionale Base-URL werden in den Provider-Einstellungen gesetzt. Die API meldet echte Token-Nutzung zurück, die bei einem Run gespeichert wird.
 
 ## Integrationen
@@ -78,7 +79,7 @@ ablehnen kann.
 
 ## Backups und Restore-Drill
 
-`deploy/backup-postgres.sh` erzeugt atomare PostgreSQL-Archive mit SHA-256-Manifest. `deploy/verify-production.sh` prüft Alter, Prüfsumme und Lesbarkeit des jüngsten Archivs bei jedem lokalen Deployment.
+`deploy/backup-postgres.sh` erzeugt atomare PostgreSQL-Archive mit SHA-256-Manifest. `deploy/verify-production.sh` prüft Alter, Prüfsumme und Lesbarkeit des jüngsten Archivs bei jedem lokalen Deployment und führt standardmäßig den Bubblewrap-Preflight aus. Für eine Installation ohne OpenAI kann er mit `TASKBOARD_VERIFY_BWRAP=0` übersprungen werden. Ein manueller Regressionstest ist `./deploy/bubblewrap-healthcheck.sh`; ein Fehler mit `NETLINK_ROUTE` verweist direkt auf die begrenzte `AF_NETLINK`-Freigabe in `deploy/taskboard.service`.
 
 Ein echter Restore wird bewusst nur gegen eine vorher angelegte, **leere** Testdatenbank ausgeführt. Das Drill-Skript lehnt die Live-Datenbank und jedes Ziel mit vorhandenen Tabellen ab:
 

@@ -20,6 +20,44 @@ import (
 
 const maxOpenAIToolRounds = 24
 
+// bubblewrapPreflight starts the same namespace shape used for tool commands
+// without touching the worktree or contacting a provider. Keeping this check
+// before the API request makes host/systemd regressions fail cheaply.
+func bubblewrapPreflight(ctx context.Context) error {
+	bwrap, err := exec.LookPath("bwrap")
+	if err != nil {
+		return errors.New("OpenAI-Agenten benötigen bubblewrap (bwrap); installiere das Paket bubblewrap auf dem Server und starte taskboard.service neu")
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	args := []string{"--die-with-parent", "--unshare-all", "--new-session"}
+	for _, directory := range []string{"/usr", "/bin", "/lib", "/lib64"} {
+		if _, statErr := os.Stat(directory); statErr == nil {
+			args = append(args, "--ro-bind", directory, directory)
+		}
+	}
+	args = append(args, "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--setenv", "PATH", "/usr/bin:/bin", "/bin/sh", "-c", "test ! -s /proc/net/route && printf sandbox-ok")
+	out, err := exec.CommandContext(checkCtx, bwrap, args...).CombinedOutput()
+	if err == nil && strings.TrimSpace(string(out)) == "sandbox-ok" {
+		return nil
+	}
+	detail := strings.TrimSpace(string(out))
+	if strings.Contains(detail, "NETLINK_ROUTE") || strings.Contains(detail, "loopback") {
+		return errors.New("Bubblewrap-Sandbox konnte keinen NETLINK_ROUTE-Socket anlegen; erlaube AF_NETLINK ausschließlich in taskboard.service (RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK), führe daemon-reload aus und starte den Dienst neu")
+	}
+	if checkCtx.Err() != nil {
+		return fmt.Errorf("Bubblewrap-Sandbox-Preflight ist abgelaufen; prüfe bwrap und die Systemd-Sandbox: %w", checkCtx.Err())
+	}
+	if detail == "" {
+		if err != nil {
+			detail = err.Error()
+		} else {
+			detail = "unbekannter Fehler"
+		}
+	}
+	return fmt.Errorf("Bubblewrap-Sandbox-Preflight fehlgeschlagen: %s; prüfe installierte bwrap-Version, User-/Mount-Namespaces und taskboard.service", detail)
+}
+
 type responseRequest struct {
 	Model              string   `json:"model"`
 	Instructions       string   `json:"instructions,omitempty"`
@@ -153,15 +191,18 @@ func openAISandboxArgs(worktree, command string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []string{
-		"--die-with-parent", "--unshare-all", "--new-session",
-		"--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin",
-		"--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64",
+	args := []string{"--die-with-parent", "--unshare-all", "--new-session"}
+	for _, directory := range []string{"/usr", "/bin", "/lib", "/lib64"} {
+		if _, statErr := os.Stat(directory); statErr == nil {
+			args = append(args, "--ro-bind", directory, directory)
+		}
+	}
+	return append(args,
 		"--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
 		"--bind", abs, "/workspace", "--chdir", "/workspace",
 		"--setenv", "HOME", "/workspace", "--setenv", "PATH", "/usr/bin:/bin",
 		"--setenv", "LANG", "C", "/bin/sh", "-lc", command,
-	}, nil
+	), nil
 }
 
 func runToolCommand(ctx context.Context, worktree, command string) string {
@@ -181,7 +222,7 @@ func runToolCommand(ctx context.Context, worktree, command string) string {
 	// outside this sandbox; only model-issued shell commands are contained.
 	bwrap, err := exec.LookPath("bwrap")
 	if err != nil {
-		return "error: command sandbox unavailable (bubblewrap is required)"
+		return "error: command sandbox unavailable: OpenAI-Agenten benötigen bubblewrap (bwrap); installiere das Paket bubblewrap auf dem Server und starte taskboard.service neu"
 	}
 	cmd := exec.CommandContext(ctx, bwrap, args...)
 	cmd.Env = agentEnvironment("")
@@ -203,8 +244,12 @@ func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, pr
 	if strings.TrimSpace(provider.SecretEnv) == "" {
 		return "", openAIUsage{}, errors.New("OpenAI Secret-Umgebungsvariable fehlt")
 	}
-	if _, err := exec.LookPath("bwrap"); err != nil {
-		return "", openAIUsage{}, errors.New("OpenAI-Agenten benötigen bubblewrap für den isolierten Worktree; installiere bubblewrap auf dem Server und starte den Dienst neu")
+	if os.Getenv("TASKBOARD_BWRAP_PREFLIGHT") != "0" {
+		if err := bubblewrapPreflight(ctx); err != nil {
+			return "", openAIUsage{}, err
+		}
+	} else if _, err := exec.LookPath("bwrap"); err != nil {
+		return "", openAIUsage{}, errors.New("OpenAI-Agenten benötigen bubblewrap (bwrap); installiere das Paket bubblewrap auf dem Server und starte taskboard.service neu")
 	}
 	apiKey := os.Getenv(provider.SecretEnv)
 	if apiKey == "" {

@@ -36,7 +36,9 @@ RestrictRealtime=true
 RemoveIPC=true
 SystemCallArchitectures=native
 CapabilityBoundingSet=
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Bubblewrap creates the isolated loopback interface through NETLINK_ROUTE.
+# Keep this as the only additional address family granted to this service.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=multi-user.target

@@ -48,9 +48,8 @@ func TestRunToolCommandUsesWorktree(t *testing.T) {
 	}
 	dir := t.TempDir()
 	output := runToolCommand(context.Background(), dir, "pwd")
-	abs, _ := filepath.Abs(dir)
-	if !strings.Contains(output, abs) {
-		t.Fatalf("command did not execute in worktree: %q", output)
+	if strings.TrimSpace(output) != "/workspace" {
+		t.Fatalf("command did not execute in isolated worktree mount: %q", output)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "check.txt"), []byte("ok"), 0600); err != nil {
 		t.Fatal(err)
