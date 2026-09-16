@@ -195,6 +195,7 @@ type runPage struct {
 	Logs     runLogView
 	Task     domain.Task
 	Delivery domain.RunDelivery
+	Usage    domain.UsageReport
 }
 type integrationsPage struct {
 	Connections []domain.IntegrationConnection
@@ -380,7 +381,20 @@ func webTemplateFunctions() template.FuncMap {
 		}
 		return string(runes[:limit]) + " …"
 	}, "usd": func(micros int64) string {
+		if micros == 0 {
+			return "nicht bestimmbar"
+		}
 		return fmt.Sprintf("$%.2f", float64(micros)/1_000_000)
+	}, "int64ptr": func(value *int64) any {
+		if value == nil {
+			return "unbekannt"
+		}
+		return *value
+	}, "deref": func(value *int64) int64 {
+		if value == nil {
+			return 0
+		}
+		return *value
 	}, "costPct": func(value, max int64) int {
 		if max < 1 {
 			return 0
@@ -1730,10 +1744,15 @@ func (a *App) runAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delivery, err := a.store.RunDelivery(r.Context(), run.ID)
+	usage, usageErr := a.store.RunUsage(r.Context(), run.ID)
+	if usageErr != nil {
+		writeAPI(w, nil, usageErr)
+		return
+	}
 	for index := range logs {
 		logs[index].Message = automation.RedactSensitiveText(logs[index].Message)
 	}
-	writeAPI(w, map[string]any{"run": safeRunView(run), "task": task, "delivery": delivery, "logs": logs, "logsTruncated": truncated}, err)
+	writeAPI(w, map[string]any{"run": safeRunView(run), "task": task, "delivery": delivery, "usage": usage, "logs": logs, "logsTruncated": truncated}, err)
 }
 func safeRunView(run domain.AgentRun) map[string]any {
 	return map[string]any{"ID": run.ID, "TaskID": run.TaskID, "AgentID": run.AgentID, "RuleID": run.RuleID, "BatchID": run.BatchID, "Status": run.Status, "TargetProject": run.TargetProject, "Summary": automation.RedactSensitiveText(run.Summary), "ErrorMessage": automation.RedactSensitiveText(run.ErrorMessage), "StartedAt": run.StartedAt, "FinishedAt": run.FinishedAt, "CreatedAt": run.CreatedAt}
@@ -2243,7 +2262,12 @@ func (a *App) run(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	a.render(r, w, "run.html", runPage{Run: run, Logs: newRunLogView(logs, truncated, run.ID), Task: task, Delivery: delivery})
+	usage, e := a.store.RunUsage(r.Context(), run.ID)
+	if e != nil {
+		http.Error(w, e.Error(), 500)
+		return
+	}
+	a.render(r, w, "run.html", runPage{Run: run, Logs: newRunLogView(logs, truncated, run.ID), Task: task, Delivery: delivery, Usage: usage})
 }
 func (a *App) runLogs(w http.ResponseWriter, r *http.Request) {
 	run, err := a.store.Run(r.Context(), r.PathValue("id"))

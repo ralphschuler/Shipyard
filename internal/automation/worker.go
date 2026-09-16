@@ -1674,12 +1674,14 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	var out []byte
 	var structuredOutput string
 	var tokenUsage int
-	var inputTokens, outputTokens, cachedInputTokens, reasoningTokens int
+	var inputTokens, outputTokens, cachedInputTokens, cacheWriteTokens, reasoningTokens, apiCalls int
 	var estimatedCostMicrousd int64
+	var nativeCostMicrousd *int64
 	if provider.Provider == "openai" {
 		text, usage, responseErr := runOpenAIResponses(runCtx, provider, prompt, run.WorkspaceSnapshot)
 		out, tokenUsage, inputTokens, outputTokens, estimatedCostMicrousd, err = []byte(text), usage.TotalTokens, usage.InputTokens, usage.OutputTokens, usage.EstimatedCostMicrousd, responseErr
-		cachedInputTokens, reasoningTokens = usage.CachedInputTokens, usage.ReasoningTokens
+		cachedInputTokens, cacheWriteTokens, reasoningTokens = usage.CachedInputTokens, usage.CacheWriteTokens, usage.ReasoningTokens
+		apiCalls, nativeCostMicrousd = usage.APICalls, usage.NativeCostMicrousd
 	} else {
 		command, args, stdin, commandErr := cliInvocation(provider, prompt)
 		if commandErr != nil {
@@ -1709,6 +1711,45 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			}
 		}
 	}
+	// Persist the adapter report before lifecycle handling so a timeout or
+	// provider error still leaves the measured partial usage available.
+	partial := domain.UsageReport{Provider: provider.Provider, Model: provider.Model, Status: "unknown", CostSource: "unknown", NativeCostMicrousd: nativeCostMicrousd}
+	if apiCalls > 0 {
+		partial.APICalls = int64Ptr(int64(apiCalls))
+	}
+	if inputTokens > 0 {
+		partial.InputTokens = measuredInt64Ptr(inputTokens)
+	}
+	if outputTokens > 0 {
+		partial.OutputTokens = measuredInt64Ptr(outputTokens)
+	}
+	if cachedInputTokens > 0 {
+		partial.CachedInputTokens = measuredInt64Ptr(cachedInputTokens)
+	}
+	if cacheWriteTokens > 0 {
+		partial.CacheWriteTokens = measuredInt64Ptr(cacheWriteTokens)
+	}
+	if reasoningTokens > 0 {
+		partial.ReasoningTokens = measuredInt64Ptr(reasoningTokens)
+	}
+	if tokenUsage > 0 {
+		partial.TotalTokens = int64Ptr(int64(tokenUsage))
+	}
+	partial.RawUsage, _ = json.Marshal(map[string]any{"api_calls": apiCalls, "input_tokens": partial.InputTokens, "output_tokens": partial.OutputTokens, "cached_input_tokens": partial.CachedInputTokens, "cache_write_tokens": partial.CacheWriteTokens, "reasoning_tokens": partial.ReasoningTokens, "total_tokens": partial.TotalTokens})
+	if nativeCostMicrousd != nil {
+		partial.CostSource = "reported"
+		partial.CalculatedCostMicrousd = nativeCostMicrousd
+	}
+	if err != nil {
+		partial.Status = "incomplete"
+	} else if partial.TotalTokens != nil {
+		partial.Status = "complete"
+	}
+	if err == nil && nativeCostMicrousd == nil && provider.Provider == "openai" && estimatedCostMicrousd > 0 {
+		partial.CostSource = "estimated"
+		partial.CalculatedCostMicrousd = &estimatedCostMicrousd
+	}
+	_ = w.Store.SetRunUsage(ctx, run.ID, partial)
 	// CLI output has already been copied into append-only run-log records by
 	// tmux. API providers return one response and are recorded here instead.
 	if provider.Provider == "openai" {
@@ -1867,23 +1908,6 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		gateStatus = "failed"
 	}
 	_ = w.Store.SetRunDelivery(ctx, run.ID, strings.TrimSpace(string(diffOut)), gateStatus, strings.TrimSpace(string(gateOut)), inputTokens, outputTokens, tokenUsage, estimatedCostMicrousd, int(time.Since(started).Seconds()))
-	// Persist the adapter boundary report separately from legacy delivery data.
-	// A zero token value is not written as a measurement for CLI adapters.
-	report := domain.UsageReport{Provider: provider.Provider, Model: provider.Model, Status: "unknown", CostSource: "unknown"}
-	if provider.Provider == "openai" {
-		report.Status = "complete"
-		report.CostSource = "estimated"
-		report.InputTokens = measuredInt64Ptr(inputTokens)
-		report.OutputTokens = measuredInt64Ptr(outputTokens)
-		report.TotalTokens = measuredInt64Ptr(tokenUsage)
-		report.CachedInputTokens = measuredInt64Ptr(cachedInputTokens)
-		report.ReasoningTokens = measuredInt64Ptr(reasoningTokens)
-		report.CalculatedCostMicrousd = &estimatedCostMicrousd
-	} else if tokenUsage > 0 {
-		report.Status = "complete"
-		report.TotalTokens = int64Ptr(int64(tokenUsage))
-	}
-	_ = w.Store.SetRunUsage(ctx, run.ID, report)
 	if gateErr != nil {
 		_ = w.Store.AddRunLog(ctx, run.ID, "error", "Qualitäts-Gate fehlgeschlagen: "+strings.TrimSpace(string(gateOut)))
 		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Qualitäts-Gate fehlgeschlagen", gateErr.Error())

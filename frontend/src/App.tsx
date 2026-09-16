@@ -4338,6 +4338,7 @@ function RunDetail({ id }: { id: string }) {
   if (error) return <Failure />;
   if (!data) return <Loading />;
   const terminal = !["running", "queued"].includes(data.run.Status);
+  const money = (microusd: number) => new Intl.NumberFormat("de-DE", { style: "currency", currency: "USD" }).format(microusd / 1e6);
   const action = async (path: string, body?: FormData) => {
     setBusy(true);
     try {
@@ -4423,6 +4424,18 @@ function RunDetail({ id }: { id: string }) {
             </CardContent>
           </Card>
         </section>
+        <Card className="mt-6">
+          <CardHeader>
+            <CardTitle>Usage & Kosten</CardTitle>
+            <CardDescription>{data.usage?.Provider || "unbekannter Provider"} · {data.usage?.Model || "unbekanntes Modell"}</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-2 text-sm sm:grid-cols-2">
+            {([['Input', data.usage?.InputTokens], ['Output', data.usage?.OutputTokens], ['Cache-Input', data.usage?.CachedInputTokens], ['Cache-Schreiben', data.usage?.CacheWriteTokens], ['Reasoning', data.usage?.ReasoningTokens], ['Gesamt', data.usage?.TotalTokens]] as [string, number | null | undefined][]).map(([label, value]) => <p key={label}><span className="text-muted-foreground">{label}: </span>{value == null ? 'unbekannt' : value.toLocaleString('de-DE')}</p>)}
+            <p><span className="text-muted-foreground">Kostenquelle: </span>{data.usage?.CostSource === 'reported' ? 'Provider gemeldet' : data.usage?.CostSource === 'estimated' ? 'Geschätzt' : data.usage?.CostSource === 'included' ? 'Inklusive' : 'Unbekannt'}</p>
+            <p><span className="text-muted-foreground">Kosten: </span>{data.usage?.CalculatedCostMicrousd == null ? 'nicht bestimmbar' : money(data.usage.CalculatedCostMicrousd)}</p>
+            <p className="sm:col-span-2 text-xs text-muted-foreground">Status: {data.usage?.Status || 'unknown'} · Preisversion: {data.usage?.PriceVersion || 'keine'}{data.usage?.CostCalculatedAt ? ` · ${new Date(data.usage.CostCalculatedAt).toLocaleString('de-DE')}` : ''}</p>
+          </CardContent>
+        </Card>
         {diff && (
           <Card className="mt-6">
             <CardHeader>

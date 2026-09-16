@@ -34,15 +34,19 @@ type responseRequest struct {
 	Store              bool     `json:"store"`
 }
 type responseUsage struct {
-	InputTokens       int `json:"input_tokens"`
-	OutputTokens      int `json:"output_tokens"`
-	TotalTokens       int `json:"total_tokens"`
-	CachedInputTokens int `json:"cached_input_tokens"`
-	ReasoningTokens   int `json:"reasoning_tokens"`
+	InputTokens       int    `json:"input_tokens"`
+	OutputTokens      int    `json:"output_tokens"`
+	TotalTokens       int    `json:"total_tokens"`
+	CachedInputTokens int    `json:"cached_input_tokens"`
+	CacheWriteTokens  int    `json:"cache_write_tokens"`
+	ReasoningTokens   int    `json:"reasoning_tokens"`
+	CostMicrousd      *int64 `json:"cost_microusd"`
 }
 type openAIUsage struct {
-	InputTokens, OutputTokens, CachedInputTokens, ReasoningTokens, TotalTokens int
-	EstimatedCostMicrousd                                                      int64
+	InputTokens, OutputTokens, CachedInputTokens, CacheWriteTokens, ReasoningTokens, TotalTokens int
+	EstimatedCostMicrousd                                                                        int64
+	NativeCostMicrousd                                                                           *int64
+	APICalls                                                                                     int
 }
 type responseOutput struct {
 	Type      string `json:"type"`
@@ -251,10 +255,15 @@ func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, pr
 			return strings.Join(transcript, "\n"), usage, err
 		}
 		usage.InputTokens += result.Usage.InputTokens
+		usage.APICalls++
 		usage.OutputTokens += result.Usage.OutputTokens
 		usage.CachedInputTokens += result.Usage.CachedInputTokens
+		usage.CacheWriteTokens += result.Usage.CacheWriteTokens
 		usage.ReasoningTokens += result.Usage.ReasoningTokens
 		usage.TotalTokens += result.Usage.TotalTokens
+		if result.Usage.CostMicrousd != nil {
+			usage.NativeCostMicrousd = result.Usage.CostMicrousd
+		}
 		var outputs []map[string]string
 		for _, item := range result.Output {
 			if item.Type != "function_call" || item.Name != "run_command" {

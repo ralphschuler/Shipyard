@@ -682,7 +682,7 @@ func (s *Store) Dashboard(c context.Context) (domain.Dashboard, error) {
 	if err = s.DB.QueryRow(c, `SELECT COALESCE(sum(calculated_cost_microusd) FILTER (WHERE cost_source='reported'),0), COALESCE(sum(calculated_cost_microusd) FILTER (WHERE cost_source='estimated'),0), count(*) FILTER (WHERE cost_source IN ('included','unknown')), COALESCE(sum(COALESCE(usage_total_tokens, token_usage)) FILTER (WHERE cost_source IN ('included','unknown')),0) FROM agent_runs`).Scan(&d.KnownActualCostMicrousd, &d.EstimatedCostMicrousdV2, &d.IncludedOrUnknownRuns, &d.IncludedOrUnknownTokens); err != nil {
 		return d, err
 	}
-	costs, err := s.DB.Query(c, `SELECT a.name,COALESCE(sum(r.estimated_cost_microusd),0) FROM agent_runs r JOIN agents a ON a.id=r.agent_id GROUP BY a.id,a.name HAVING COALESCE(sum(r.estimated_cost_microusd),0)>0 ORDER BY 2 DESC,1`)
+	costs, err := s.DB.Query(c, `SELECT a.name,COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source IN ('reported','estimated')),0) FROM agent_runs r JOIN agents a ON a.id=r.agent_id GROUP BY a.id,a.name HAVING COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source IN ('reported','estimated')),0)>0 ORDER BY 2 DESC,1`)
 	if err != nil {
 		return d, err
 	}
