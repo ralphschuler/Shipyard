@@ -130,6 +130,18 @@ func targetColumnHasType(columns []domain.Column, name, typeName string) bool {
 	return false
 }
 
+func requestedRouteTargetsColumnType(columns []domain.Column, route transitionRequest, typeName string) bool {
+	if route.TargetColumnID != "" {
+		for _, column := range columns {
+			if column.ID == route.TargetColumnID && column.Type == typeName {
+				return true
+			}
+		}
+		return false
+	}
+	return targetColumnHasType(columns, route.Target, typeName)
+}
+
 func withoutReleaseInteraction(interactions []interactionRequest) []interactionRequest {
 	filtered := interactions[:0]
 	for _, interaction := range interactions {
@@ -1413,7 +1425,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			if taskErr == nil && isQAColumn(task) && hasRequestedRoute {
 				releaseRoute = true // fail closed: no metadata must never bypass QA.
 				if columns, columnsErr := w.Store.Columns(ctx, task.BoardID); columnsErr == nil {
-					releaseRoute = targetColumnHasType(columns, requestedRoute.Target, "done")
+					releaseRoute = requestedRouteTargetsColumnType(columns, requestedRoute, "done")
 				}
 				if !releaseRoute {
 					interactions = withoutReleaseInteraction(interactions)

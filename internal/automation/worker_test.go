@@ -351,6 +351,22 @@ func TestQANacharbeitDoesNotLeaveAReleaseQuestionOpen(t *testing.T) {
 	}
 }
 
+func TestQAReleaseGateUsesTargetColumnIDBeforeLegacyLabel(t *testing.T) {
+	columns := []domain.Column{
+		{ID: "done-id", Name: "Erledigt", Type: "done"},
+		{ID: "review-id", Name: "Review", Type: "standard"},
+	}
+	if !requestedRouteTargetsColumnType(columns, transitionRequest{TargetColumnID: "done-id"}, "done") {
+		t.Fatal("ID-based QA release route should resolve to the done column")
+	}
+	if requestedRouteTargetsColumnType(columns, transitionRequest{TargetColumnID: "review-id", Target: "Erledigt"}, "done") {
+		t.Fatal("a supplied non-done ID must not fall back to a matching legacy label")
+	}
+	if !requestedRouteTargetsColumnType(columns, transitionRequest{Target: "Erledigt"}, "done") {
+		t.Fatal("legacy label-based QA release route should remain compatible")
+	}
+}
+
 func TestReportedCLITokenUsageUsesCodexSummaryInsteadOfTerminalBytes(t *testing.T) {
 	logs := []domain.RunLog{
 		{Message: "large lockfile output tokens used 9"},
