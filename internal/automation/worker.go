@@ -34,7 +34,7 @@ type Worker struct {
 }
 
 const agentRunTimeout = 20 * time.Minute
-const maxAutomationEventAttempts = 5
+const defaultMaxAutomationEventAttempts = 3
 const maxWebhookDeliveryAttempts = 5
 const worktreeRetention = 7 * 24 * time.Hour
 const worktreeCleanupInterval = 15 * time.Minute
@@ -48,7 +48,61 @@ var taskCommentFence = regexp.MustCompile("(?s)```taskboard-comment\\s*(.*?)\\s*
 var transitionFence = regexp.MustCompile("(?s)```taskboard-transition\\s*(\\{.*?\\})\\s*```")
 var taskUpdateFence = regexp.MustCompile("(?s)```taskboard-update\\s*(\\{.*?\\})\\s*```")
 var taskTargetsFence = regexp.MustCompile("(?s)```taskboard-targets\\s*(\\{.*?\\})\\s*```")
+var selfReviewFence = regexp.MustCompile("(?s)```taskboard-self-review\\s*(\\{.*?\\})\\s*```")
 var cliTokenUsage = regexp.MustCompile(`(?i)\btokens\s+used\s*[:\s]+([0-9][0-9,._ ]*)`)
+
+type taskboardSelfReview struct {
+	Status    string           `json:"status"`
+	Checklist []selfReviewItem `json:"checklist"`
+	Tests     json.RawMessage  `json:"tests"`
+	OpenRisks json.RawMessage  `json:"open_risks"`
+}
+
+type selfReviewItem struct {
+	Check  string `json:"check"`
+	Result string `json:"result"`
+}
+
+func requestedSelfReview(logs []domain.RunLog) (taskboardSelfReview, error) {
+	matches := selfReviewFence.FindAllStringSubmatch(joinRunLogs(logs), -1)
+	if len(matches) != 1 {
+		return taskboardSelfReview{}, errors.New("genau ein taskboard-self-review-Block ist erforderlich")
+	}
+	var review taskboardSelfReview
+	if err := json.Unmarshal([]byte(matches[0][1]), &review); err != nil {
+		return taskboardSelfReview{}, errors.New("taskboard-self-review ist kein gültiges JSON")
+	}
+	if strings.ToLower(strings.TrimSpace(review.Status)) != "passed" {
+		return review, errors.New("taskboard-self-review muss status=passed enthalten")
+	}
+	if len(review.Checklist) < 5 {
+		return review, errors.New("taskboard-self-review benötigt mindestens fünf Checklistenpunkte")
+	}
+	for _, item := range review.Checklist {
+		if strings.TrimSpace(item.Check) == "" || strings.TrimSpace(item.Result) == "" {
+			return review, errors.New("taskboard-self-review enthält einen unvollständigen Checklistenpunkt")
+		}
+	}
+	if len(review.Tests) == 0 || string(review.Tests) == "null" || len(review.OpenRisks) == 0 || string(review.OpenRisks) == "null" {
+		return review, errors.New("taskboard-self-review benötigt Testnachweise und offene Risiken")
+	}
+	return review, nil
+}
+
+func maxAutomationEventAttempts() int {
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("SHIPYARD_MAX_AUTOMATION_EVENT_ATTEMPTS")))
+	if err != nil || value < 1 {
+		return defaultMaxAutomationEventAttempts
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+func requiresSelfReview(agentName string) bool {
+	return !strings.EqualFold(strings.TrimSpace(agentName), "triage agent") && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(agentName)), "triage agent ")
+}
 
 func int64Ptr(value int64) *int64 { return &value }
 
@@ -909,7 +963,7 @@ func (w *Worker) Process(ctx context.Context) {
 				deferEvent = true
 				return
 			}
-			if attempts >= maxAutomationEventAttempts {
+			if attempts >= maxAutomationEventAttempts() {
 				_, _ = w.Store.AbandonEvent(ctx, event, reason)
 				return
 			}
@@ -1367,6 +1421,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	}
 	prompt += "\n\nFühre die projektspezifischen Tests für deine Änderung aus und dokumentiere das Ergebnis im Abschluss. Begrenze jeden einzelnen Test-, Build- oder Installationsbefehl als direkten Befehl mit `timeout 120s <befehl>` (oder dem passenden Mechanismus der Plattform). Schreibe keinen verschachtelten `bash -lc`-Aufruf, setze keine zusätzlichen Shell-Anführungszeichen und werte `$?` nicht selbst aus; die Ausführungsumgebung meldet Status und Ausgabe. Hängt ein Befehl oder läuft er in das Limit, dokumentiere das als offenes Risiko und fahre mit anderen aussagekräftigen Prüfungen fort. Entferne vor dem Abschluss generierte Entwicklungsartefakte wie __pycache__, *.pyc, Coverage-Dateien und temporäre Daten. Beende alle temporären Server und Browser-Prozesse vor dem Abschluss; verwende keine interaktiven oder dauerhaft wartenden Befehle. Erstelle keinen Push, Merge, Release oder Deployment."
 	prompt += "\n\nDokumentiere am Ende Ergebnis, geänderte Bereiche, ausgeführte Tests und offene Risiken für Menschen als ```taskboard-comment\n…\n```. Wenn eine neue Entscheidung nötig ist, gib am Ende einen taskboard-interaction-Block aus: {\"key\":\"stabiler_schluessel\",\"title\":\"Kurze Frage\",\"body\":\"Kontext\",\"fields\":[...]}. Unterstützt: text, textarea, select, buttons. Frage keine verbindliche Nutzerentscheidung erneut ab. Öffne sie nur mit reopen:true und reason, wenn sich die Sachlage wesentlich geändert hat. Nach einer Antwort startet genau ein Folge-Run. Wenn du als Reviewer Nacharbeit verlangst, verwende zusätzlich genau einen ```taskboard-transition\n{\"target\":\"In Progress\",\"comment\":\"konkrete Nacharbeit\"}\n```-Block. Die Transition wird nur ausgeführt, wenn sie im Board erlaubt ist. Nur der Triage Agent darf zusätzlich genau einen ```taskboard-update\n{\"title\":\"…\",\"description\":\"…\"}\n```-Block und einen ```taskboard-targets\n{\"project_ids\":[\"uuid\"],\"group_ids\":[]}\n```-Block ausgeben."
+	prompt += "\n\nVor dem Abschlusskommentar und jeder Übergabe muss genau ein gültiger Block ```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"Scope/Akzeptanz\",\"result\":\"...\"},{\"check\":\"Diff/Secrets\",\"result\":\"...\"},{\"check\":\"Tests/Fehler\",\"result\":\"...\"},{\"check\":\"Sicherheits-/Betriebsrisiken\",\"result\":\"...\"},{\"check\":\"Rückwärtskompatibilität\",\"result\":\"...\"}],\"tests\":\"Nachweis\",\"open_risks\":\"Keine\"}\n``` ausgegeben werden. Bei fehlendem, ungültigem oder fehlgeschlagenem Self-Review wird nichts übernommen und keine Transition ausgeführt."
 	if skills, err := w.Store.AgentSkills(ctx, run.AgentID); err == nil && len(skills) > 0 {
 		paths := make([]string, 0, len(skills))
 		for _, skill := range skills {
@@ -1440,6 +1495,15 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	hasRequestedRoute := false
 	if err == nil {
 		if logs, logErr := w.Store.RunLogs(ctx, run.ID); logErr == nil {
+			if requiresSelfReview(agent.Name) {
+				if _, reviewErr := requestedSelfReview(logs); reviewErr != nil {
+					reason := "Self-Review abgelehnt: " + reviewErr.Error()
+					_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+					_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Self-Review fehlgeschlagen", reason)
+					_ = w.finish(ctx, run, "failed")
+					return
+				}
+			}
 			if provider.Provider == "codex" {
 				if reported, ok := reportedCLITokenUsage(logs); ok {
 					tokenUsage = reported

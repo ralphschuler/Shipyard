@@ -218,6 +218,37 @@ func TestRequestedInteractionsParsesButtons(t *testing.T) {
 	}
 }
 
+func TestRequestedSelfReviewAcceptsPassedStructuredReview(t *testing.T) {
+	logs := []domain.RunLog{{Message: "```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"scope\",\"result\":\"ok\"},{\"check\":\"diff\",\"result\":\"ok\"},{\"check\":\"tests\",\"result\":\"ok\"},{\"check\":\"security\",\"result\":\"ok\"},{\"check\":\"compatibility\",\"result\":\"ok\"}],\"tests\":\"go test ./...\",\"open_risks\":\"none\"}\n```"}}
+	if review, err := requestedSelfReview(logs); err != nil || review.Status != "passed" {
+		t.Fatalf("passed self-review rejected: %#v, %v", review, err)
+	}
+}
+
+func TestRequestedSelfReviewRejectsMissingFailedAndIncompleteReviews(t *testing.T) {
+	cases := []string{
+		"",
+		"```taskboard-self-review\n{\"status\":\"failed\",\"checklist\":[],\"tests\":\"x\",\"open_risks\":\"x\"}\n```",
+		"```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[],\"tests\":\"x\",\"open_risks\":\"x\"}\n```",
+	}
+	for _, message := range cases {
+		if _, err := requestedSelfReview([]domain.RunLog{{Message: message}}); err == nil {
+			t.Fatalf("invalid self-review accepted: %q", message)
+		}
+	}
+}
+
+func TestMaxAutomationEventAttemptsDefaultsToThreeAndIsConfigurable(t *testing.T) {
+	t.Setenv("SHIPYARD_MAX_AUTOMATION_EVENT_ATTEMPTS", "")
+	if got := maxAutomationEventAttempts(); got != 3 {
+		t.Fatalf("default attempts = %d, want 3", got)
+	}
+	t.Setenv("SHIPYARD_MAX_AUTOMATION_EVENT_ATTEMPTS", "7")
+	if got := maxAutomationEventAttempts(); got != 7 {
+		t.Fatalf("configured attempts = %d, want 7", got)
+	}
+}
+
 func TestRequestedTriageControlsAcceptOneBoundedRequest(t *testing.T) {
 	logs := []domain.RunLog{{Message: "```taskboard-update\n{\"title\":\"Klarer Titel\",\"description\":\"Konkrete Anforderungen\"}\n```\n```taskboard-targets\n{\"project_ids\":[\"project-1\"],\"group_ids\":[]}\n```"}}
 	update, ok := requestedTaskUpdate(logs)
