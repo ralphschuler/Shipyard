@@ -1137,7 +1137,7 @@ func moveTaskTx(c context.Context, tx pgx.Tx, id, target, source string) error {
 		}
 	}
 	_, err = tx.Exec(c, `INSERT INTO automation_events(type,task_id,board_id,payload)
-		VALUES($1,$2,$3,jsonb_build_object('target_column_id',$4::text,'qa_return',$5,'change_available',$6))`, eventType, id, board, target, returnColumn, changeAvailable)
+		VALUES($1,$2,$3,jsonb_build_object('target_column_id',$4::text,'qa_return',$5::boolean,'change_available',$6::boolean))`, eventType, id, board, target, returnColumn, changeAvailable)
 	return err
 }
 
