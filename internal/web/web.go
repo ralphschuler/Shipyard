@@ -63,13 +63,28 @@ type taskPage struct {
 	Comments       []domain.Comment
 	BoardLabels    []domain.Label
 	Error          string
-	Runs           []domain.AgentRun
+	Runs           []taskRunView
 	Agents         []domain.Agent
 	Projects       []domain.Project
 	Groups         []domain.ProjectGroup
 	TargetProjects []domain.Project
 	TargetGroups   []domain.ProjectGroup
 	Interactions   []interactionView
+	Changes        []taskChangeView
+}
+
+// taskChangeView deliberately excludes prompt and workspace snapshots: those
+// fields can contain provider details or environment values.
+type taskChangeView struct {
+	ID, Status, Summary, ErrorMessage, DiffSummary, GateStatus string
+	CreatedAt                                                  time.Time
+	FinishedAt, AppliedAt                                      *time.Time
+}
+
+type taskRunView struct {
+	ID, TaskID, AgentID, Status, Summary, ErrorMessage string
+	StartedAt, FinishedAt                              *time.Time
+	CreatedAt                                          time.Time
 }
 
 type runLogView struct {
@@ -1680,8 +1695,15 @@ func (a *App) runAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delivery, err := a.store.RunDelivery(r.Context(), run.ID)
-	writeAPI(w, map[string]any{"run": run, "task": task, "delivery": delivery, "logs": logs, "logsTruncated": truncated}, err)
+	for index := range logs {
+		logs[index].Message = automation.RedactSensitiveText(logs[index].Message)
+	}
+	writeAPI(w, map[string]any{"run": safeRunView(run), "task": task, "delivery": delivery, "logs": logs, "logsTruncated": truncated}, err)
 }
+func safeRunView(run domain.AgentRun) map[string]any {
+	return map[string]any{"ID": run.ID, "TaskID": run.TaskID, "AgentID": run.AgentID, "RuleID": run.RuleID, "BatchID": run.BatchID, "Status": run.Status, "TargetProject": run.TargetProject, "Summary": automation.RedactSensitiveText(run.Summary), "ErrorMessage": automation.RedactSensitiveText(run.ErrorMessage), "StartedAt": run.StartedAt, "FinishedAt": run.FinishedAt, "CreatedAt": run.CreatedAt}
+}
+
 func (a *App) runLogsAPI(w http.ResponseWriter, r *http.Request) {
 	run, err := a.store.Run(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -1699,6 +1721,9 @@ func (a *App) runLogsAPI(w http.ResponseWriter, r *http.Request) {
 		entries, truncated, err = a.store.RunLogsBefore(r.Context(), run.ID, before, browserRunLogLimit)
 	} else {
 		entries, truncated, err = a.store.RecentRunLogs(r.Context(), run.ID, browserRunLogLimit)
+	}
+	for index := range entries {
+		entries[index].Message = automation.RedactSensitiveText(entries[index].Message)
 	}
 	writeAPI(w, map[string]any{"entries": entries, "truncated": truncated, "status": run.Status}, err)
 }
@@ -1968,6 +1993,22 @@ func (a *App) taskData(ctx context.Context, id string) (taskPage, error) {
 	if e != nil {
 		return taskPage{}, e
 	}
+	publicRuns := make([]taskRunView, 0, len(runs))
+	changes := make([]taskChangeView, 0, len(runs))
+	for _, run := range runs {
+		publicRuns = append(publicRuns, taskRunView{ID: run.ID, TaskID: run.TaskID, AgentID: run.AgentID, Status: run.Status, Summary: automation.RedactSensitiveText(run.Summary), ErrorMessage: automation.RedactSensitiveText(run.ErrorMessage), StartedAt: run.StartedAt, FinishedAt: run.FinishedAt, CreatedAt: run.CreatedAt})
+		delivery, deliveryErr := a.store.RunDelivery(ctx, run.ID)
+		if deliveryErr != nil {
+			return taskPage{}, deliveryErr
+		}
+		changes = append(changes, taskChangeView{
+			ID: run.ID, Status: run.Status, Summary: automation.RedactSensitiveText(run.Summary),
+			ErrorMessage: automation.RedactSensitiveText(run.ErrorMessage), DiffSummary: delivery.DiffSummary,
+			GateStatus: delivery.GateStatus,
+			CreatedAt:  run.CreatedAt, FinishedAt: run.FinishedAt,
+			AppliedAt: delivery.AppliedAt,
+		})
+	}
 	agents, e := a.store.Agents(ctx)
 	if e != nil {
 		return taskPage{}, e
@@ -1988,7 +2029,7 @@ func (a *App) taskData(ctx context.Context, id string) (taskPage, error) {
 	if e != nil {
 		return taskPage{}, e
 	}
-	return taskPage{ID: t.ID, Task: t, Allowed: allowed, Columns: names, History: h, Comments: displayComments(comments), Interactions: views, BoardLabels: boardLabels, Runs: runs, Agents: agents, Projects: projects, Groups: groups, TargetProjects: targetProjects, TargetGroups: targetGroups}, nil
+	return taskPage{ID: t.ID, Task: t, Allowed: allowed, Columns: names, History: h, Comments: displayComments(comments), Interactions: views, BoardLabels: boardLabels, Runs: publicRuns, Changes: changes, Agents: agents, Projects: projects, Groups: groups, TargetProjects: targetProjects, TargetGroups: targetGroups}, nil
 }
 func (a *App) startRun(w http.ResponseWriter, r *http.Request) {
 	runs, e := a.store.CreateManualRuns(r.Context(), r.PathValue("id"), r.FormValue("agent_id"))
@@ -2218,7 +2259,7 @@ func (a *App) runLogEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = io.WriteString(w, entry.Message)
+	_, _ = io.WriteString(w, automation.RedactSensitiveText(entry.Message))
 }
 func (a *App) runTrace(w http.ResponseWriter, r *http.Request) {
 	trace, err := a.store.RunTrace(r.Context(), r.PathValue("id"))
@@ -2273,6 +2314,10 @@ func (a *App) discardRun(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/runs/"+r.PathValue("id"), 303)
 }
 func (a *App) runDiff(w http.ResponseWriter, r *http.Request) {
+	if _, err := a.store.Run(r.Context(), r.PathValue("id")); err != nil {
+		http.NotFound(w, r)
+		return
+	}
 	diff, err := a.worker.Diff(r.Context(), r.PathValue("id"))
 	if err != nil {
 		http.Error(w, "Diff ist für diesen Run nicht verfügbar.", http.StatusConflict)

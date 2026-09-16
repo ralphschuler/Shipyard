@@ -416,3 +416,15 @@ func TestProviderCommandKeepsAdapterArguments(t *testing.T) {
 		t.Fatalf("unexpected command: %q %#v", command, args)
 	}
 }
+func TestRedactSensitiveDiffRemovesCredentialValues(t *testing.T) {
+	diff := "api_key=super-secret-value\nAuthorization: Bearer bearer-secret-value\naws=AKIA1234567890ABCDEF\n-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----"
+	redacted := redactSensitiveDiff(diff)
+	for _, secret := range []string{"super-secret-value", "bearer-secret-value", "AKIA1234567890ABCDEF", "private-material"} {
+		if strings.Contains(redacted, secret) {
+			t.Fatalf("secret %q remained", secret)
+		}
+	}
+	if !strings.Contains(redacted, "[REDACTED]") || !strings.Contains(redacted, "[REDACTED PRIVATE KEY]") {
+		t.Fatalf("redaction marker missing: %s", redacted)
+	}
+}
