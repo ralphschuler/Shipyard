@@ -18,6 +18,22 @@ func TestNormalizeLanguageDefaultsToGerman(t *testing.T) {
 	}
 }
 
+func TestSecureCookieMatchesDirectAndForwardedHTTPS(t *testing.T) {
+	httpRequest := httptest.NewRequest(http.MethodGet, "http://example.test/", nil)
+	if secureCookie(httpRequest) {
+		t.Fatal("plain HTTP request must not receive a Secure preference cookie")
+	}
+	httpsRequest := httptest.NewRequest(http.MethodGet, "https://example.test/", nil)
+	if !secureCookie(httpsRequest) {
+		t.Fatal("HTTPS request must receive a Secure preference cookie")
+	}
+	forwardedHTTPS := httptest.NewRequest(http.MethodGet, "http://example.test/", nil)
+	forwardedHTTPS.Header.Set("X-Forwarded-Proto", "https, http")
+	if !secureCookie(forwardedHTTPS) {
+		t.Fatal("TLS-terminated HTTPS request must receive a Secure preference cookie")
+	}
+}
+
 func TestAccountLanguageOverridesBrowserAndFallbackUsesEnglish(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.Header.Set("Accept-Language", "en-US")
@@ -58,7 +74,10 @@ func TestLocalizeHTMLCoversAuthBoardAndTaskSurfaces(t *testing.T) {
 func TestLocalizeHTMLIsStableForDynamicUserContent(t *testing.T) {
 	html := `<main><h1>Board bearbeiten</h1><p>Ein eigener Titel: Neue Aufgabe</p></main>`
 	english := localizeHTML(html, languageEnglish)
-	if !strings.Contains(english, "Ein eigener Titel: New task") {
-		t.Fatalf("expected known phrase to translate without dropping user text: %s", english)
+	if !strings.Contains(english, "Ein eigener Titel: Neue Aufgabe") {
+		t.Fatalf("dynamic user content was changed: %s", english)
+	}
+	if !strings.Contains(english, "<h1>Edit board</h1>") {
+		t.Fatalf("complete visible text node was not translated: %s", english)
 	}
 }

@@ -20,6 +20,17 @@ func normalizeLanguage(value string) string {
 	return languageGerman
 }
 
+// secureCookie follows the connection as seen by the application. Shipyard
+// commonly runs behind TLS-terminating nginx, so X-Forwarded-Proto is needed
+// there; local HTTP development must remain able to read the preference cookie.
+func secureCookie(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	forwarded := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0])
+	return strings.EqualFold(forwarded, "https")
+}
+
 // resolveLanguage applies the browser preference only when no durable account
 // preference is available. The account value is supplied by the auth layer.
 func resolveLanguage(accountPreference string, r *http.Request) string {
@@ -86,11 +97,25 @@ func localizeHTML(html, lang string) string {
 		keys = append(keys, key)
 	}
 	sort.Slice(keys, func(i, j int) bool { return len(keys[i]) > len(keys[j]) })
-	var replacements []string
+	// Legacy templates are progressively being converted to translation keys.
+	// Until that is complete, only replace complete text nodes and complete
+	// presentation attributes. Replacing arbitrary substrings is unsafe: a
+	// user may legitimately name a board or task "Neue Aufgabe" and that data
+	// must never be translated by the renderer.
 	for _, key := range keys {
-		replacements = append(replacements, key, dictionary[key])
+		value := dictionary[key]
+		for _, delimiter := range []struct{ open, close string }{
+			{">", "<"},
+			{" title=\"", "\""},
+			{" aria-label=\"", "\""},
+			{" placeholder=\"", "\""},
+		} {
+			old := delimiter.open + key + delimiter.close
+			replacement := delimiter.open + value + delimiter.close
+			html = strings.ReplaceAll(html, old, replacement)
+		}
 	}
-	return strings.NewReplacer(replacements...).Replace(html)
+	return html
 }
 
 func translate(lang, key, fallback string) string {

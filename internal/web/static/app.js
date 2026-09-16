@@ -4,7 +4,8 @@ const navigationEntries=[['/','▦','Übersicht'],['/projects','◫','Projekte']
 // The server owns the translation vocabulary. Fetching it keeps legacy pages
 // and dynamically inserted controls on one source of truth.
 let shipyardTranslations={de:{},en:{}};
-const shipyardLanguage=()=>cookieValue('shipyard_language')==='en'?'en':'de';
+let activeShipyardLanguage=cookieValue('shipyard_language')==='en'?'en':'de';
+const shipyardLanguage=()=>activeShipyardLanguage;
 const translationOriginals=new WeakMap();
 const applyLanguage=()=>{const lang=shipyardLanguage();document.documentElement.lang=lang;const dictionary=shipyardTranslations[lang]||{};const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);const nodes=[];while(walker.nextNode())nodes.push(walker.currentNode);nodes.forEach(node=>{const original=translationOriginals.get(node)||node.nodeValue;translationOriginals.set(node,original);const value=original.trim();if(dictionary[value])node.nodeValue=original.replace(value,dictionary[value]);});document.querySelectorAll('[title],[aria-label],[placeholder]').forEach(node=>['title','aria-label','placeholder'].forEach(attribute=>{const originalKey=`${attribute}`;const original=translationOriginals.get(node)?.[originalKey]||node.getAttribute(attribute);const values=translationOriginals.get(node)||{};values[originalKey]=original;translationOriginals.set(node,values);if(original&&dictionary[original])node.setAttribute(attribute,dictionary[original]);}));document.querySelectorAll('[data-i18n-key]').forEach(node=>{const key=node.dataset.i18nKey;const visible=dictionary[key]||key;node.querySelector('span')?.replaceChildren(document.createTextNode(visible));node.title=visible;});};
 // Local preferences are deliberately progressive enhancement: the server UI
@@ -16,8 +17,8 @@ const applyTheme=()=>{const selected=shipyardPrefs.theme||'system';document.docu
 applyTheme();
 systemDark.addEventListener?.('change',()=>{if((shipyardPrefs.theme||'system')==='system')applyTheme()});
 document.title=document.title.replace(/Taskboard/g,'Shipyard');
-const loadTranslations=fetch('/api/i18n',{credentials:'same-origin'}).then(response=>response.ok?response.json():null).then(data=>{if(data?.translations)shipyardTranslations.en=data.translations;applyLanguage();return data}).catch(()=>{applyLanguage();return null});
-document.addEventListener('change',event=>{if(!(event.target instanceof HTMLSelectElement)||event.target.name!=='language')return;const value=event.target.value==='en'?'en':'de';document.cookie=`shipyard_language=${value}; path=/; max-age=31536000; SameSite=Lax`;try{localStorage.setItem('shipyard.language',value)}catch(_){}if(value==='de'||Object.keys(shipyardTranslations.en).length)applyLanguage();else loadTranslations.then(applyLanguage);});
+const loadTranslations=fetch('/api/i18n',{credentials:'same-origin'}).then(response=>response.ok?response.json():null).then(data=>{if(data?.translations)shipyardTranslations.en=data.translations;if(data?.language==='de'||data?.language==='en')activeShipyardLanguage=data.language;applyLanguage();return data}).catch(()=>{applyLanguage();return null});
+document.addEventListener('change',event=>{if(!(event.target instanceof HTMLSelectElement)||event.target.name!=='language')return;activeShipyardLanguage=event.target.value==='en'?'en':'de';const value=activeShipyardLanguage;document.cookie=`shipyard_language=${value}; path=/; max-age=31536000; SameSite=Lax`;try{localStorage.setItem('shipyard.language',value)}catch(_){}if(value==='de'||Object.keys(shipyardTranslations.en).length)applyLanguage();else loadTranslations.then(applyLanguage);});
 // Keep focus on the invoking control and make Escape opt-in for closable
 // dialogs. Native showModal() supplies the remaining focus containment.
 const modalReturnFocus=new WeakMap();

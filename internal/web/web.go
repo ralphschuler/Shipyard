@@ -1295,13 +1295,13 @@ func (a *App) saveAppearance(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "shipyard_theme", Value: theme, Path: "/", MaxAge: 31536000, Secure: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "shipyard_theme", Value: theme, Path: "/", MaxAge: 31536000, Secure: secureCookie(r), SameSite: http.SameSiteLaxMode})
 	hintValue := "false"
 	if hints {
 		hintValue = "true"
 	}
-	http.SetCookie(w, &http.Cookie{Name: "shipyard_shortcut_hints", Value: hintValue, Path: "/", MaxAge: 31536000, Secure: true, SameSite: http.SameSiteLaxMode})
-	http.SetCookie(w, &http.Cookie{Name: "shipyard_language", Value: language, Path: "/", MaxAge: 31536000, Secure: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "shipyard_shortcut_hints", Value: hintValue, Path: "/", MaxAge: 31536000, Secure: secureCookie(r), SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "shipyard_language", Value: language, Path: "/", MaxAge: 31536000, Secure: secureCookie(r), SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, "/settings/appearance", http.StatusSeeOther)
 }
 func (a *App) saveProvider(w http.ResponseWriter, r *http.Request) {
