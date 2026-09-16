@@ -176,6 +176,17 @@ func requestedTransition(logs []domain.RunLog) (transitionRequest, bool) {
 	return result, found
 }
 
+// suppressAutomationOutcome prevents a rule's configured success transition
+// from becoming an implicit fallback for an explicit agent transition. This
+// is important for rejected and self-transitions: both must leave the task in
+// its current column instead of silently applying a different workflow move.
+func suppressAutomationOutcome(run domain.AgentRun, requested, awaitingDecision bool) domain.AgentRun {
+	if requested && !awaitingDecision {
+		run.RuleID = ""
+	}
+	return run
+}
+
 func requestedTaskUpdate(logs []domain.RunLog) (taskUpdateRequest, bool) {
 	var result taskUpdateRequest
 	found := false
@@ -1540,6 +1551,10 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	}
 	_ = w.Store.SetRunStatus(ctx, run.ID, "succeeded", "Codex-Agent erfolgreich beendet", "")
 	if hasRequestedRoute && !awaitingDecision {
+		// An explicit route owns the workflow outcome, even when the resolver
+		// returns a no-op or a deterministic rejection. Never fall back to the
+		// automation rule's success column in those cases.
+		run = suppressAutomationOutcome(run, true, awaitingDecision)
 		targetID := requestedRoute.TargetColumnID
 		var moved bool
 		var moveErr error
@@ -1560,9 +1575,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			// The explicit, workflow-validated route is the run outcome. Prevent
 			// the automation rule from consuming its normal success transition a
 			// second time (for example Review → QA after Review → In Progress).
-			routedRun := run
-			routedRun.RuleID = ""
-			_ = w.finish(ctx, routedRun, "succeeded")
+			_ = w.finish(ctx, run, "succeeded")
 			return
 		}
 	}
