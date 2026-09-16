@@ -595,6 +595,7 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("POST /settings/secrets/{id}/agents", a.assignSecretAgents)
 	m.HandleFunc("GET /settings/prices", a.usagePrices)
 	m.HandleFunc("POST /settings/prices", a.saveUsagePrice)
+	m.HandleFunc("POST /settings/prices/{id}", a.updateUsagePrice)
 	m.HandleFunc("POST /settings/prices/{id}/delete", a.deleteUsagePrice)
 	m.HandleFunc("GET /settings/agent-policy", a.agentPolicy)
 	m.HandleFunc("POST /settings/agent-policy", a.saveAgentPolicy)
@@ -1337,6 +1338,14 @@ func (a *App) usagePrices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) saveUsagePrice(w http.ResponseWriter, r *http.Request) {
+	a.persistUsagePrice(w, r, "")
+}
+
+func (a *App) updateUsagePrice(w http.ResponseWriter, r *http.Request) {
+	a.persistUsagePrice(w, r, r.PathValue("id"))
+}
+
+func (a *App) persistUsagePrice(w http.ResponseWriter, r *http.Request, id string) {
 	from, err := time.Parse("2006-01-02", strings.TrimSpace(r.FormValue("valid_from")))
 	if err != nil {
 		http.Error(w, "Gültig ab muss ein Datum sein.", 400)
@@ -1351,7 +1360,7 @@ func (a *App) saveUsagePrice(w http.ResponseWriter, r *http.Request) {
 		}
 		until = &parsed
 	}
-	p := domain.UsagePrice{Provider: strings.TrimSpace(r.FormValue("provider")), Model: strings.TrimSpace(r.FormValue("model")), ServiceTier: strings.TrimSpace(r.FormValue("service_tier")), Version: strings.TrimSpace(r.FormValue("version")), ValidFrom: from}
+	p := domain.UsagePrice{ID: id, Provider: strings.TrimSpace(r.FormValue("provider")), Model: strings.TrimSpace(r.FormValue("model")), ServiceTier: strings.TrimSpace(r.FormValue("service_tier")), Version: strings.TrimSpace(r.FormValue("version")), ValidFrom: from}
 	p.ValidUntil = until
 	if p.Provider == "" || p.Model == "" || p.Version == "" {
 		http.Error(w, "Provider, Modell und Version sind Pflichtfelder.", 400)
@@ -1375,12 +1384,22 @@ func (a *App) saveUsagePrice(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Mindestens eine Tokenrate ist erforderlich.", 400)
 		return
 	}
-	if err := a.store.SaveUsagePrice(r.Context(), p); err != nil {
-		http.Error(w, "Preis konnte nicht gespeichert werden: "+err.Error(), 400)
+	var saveErr error
+	if id == "" {
+		saveErr = a.store.SaveUsagePrice(r.Context(), p)
+	} else {
+		saveErr = a.store.UpdateUsagePrice(r.Context(), p)
+	}
+	if saveErr != nil {
+		http.Error(w, "Preis konnte nicht gespeichert werden: "+saveErr.Error(), 400)
 		return
 	}
 	if user, ok := currentUser(r.Context()); ok {
-		_ = a.store.RecordAudit(r.Context(), user.ID, "usage_price.created", "usage_price", p.Version, map[string]string{"provider": p.Provider, "model": p.Model, "version": p.Version})
+		kind := "usage_price.created"
+		if id != "" {
+			kind = "usage_price.updated"
+		}
+		_ = a.store.RecordAudit(r.Context(), user.ID, kind, "usage_price", p.Version, map[string]string{"provider": p.Provider, "model": p.Model, "version": p.Version})
 	}
 	http.Redirect(w, r, "/settings/prices", 303)
 }
@@ -1766,7 +1785,12 @@ func (a *App) syncProjectsLoop() {
 	}
 }
 func (a *App) dashboard(w http.ResponseWriter, r *http.Request) {
-	d, e := a.store.Dashboard(r.Context())
+	from, to, e := dashboardRange(r)
+	if e != nil {
+		http.Error(w, e.Error(), http.StatusBadRequest)
+		return
+	}
+	d, e := a.store.DashboardFiltered(r.Context(), from, to, r.URL.Query().Get("provider"), r.URL.Query().Get("model"), r.URL.Query().Get("agent"), r.URL.Query().Get("board"))
 	if e != nil {
 		http.Error(w, e.Error(), 500)
 		return

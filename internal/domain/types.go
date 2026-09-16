@@ -103,6 +103,7 @@ type Dashboard struct {
 	IncludedOrUnknownTokens        int64
 	UsageByDimension               []UsageMetric
 	CostByAgent                    []CostMetric
+	TelemetrySeries                []TelemetryPoint
 	Notifications                  []Notification
 }
 
@@ -121,6 +122,10 @@ type UsageMetric struct {
 	Tokens            int64
 	ActualMicrousd    int64
 	EstimatedMicrousd int64
+}
+type TelemetryPoint struct {
+	Day                                       string
+	ActualMicrousd, EstimatedMicrousd, Tokens int64
 }
 type Notification struct {
 	ID, TaskID, AgentRunID, Kind, Message string

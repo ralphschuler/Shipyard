@@ -37,6 +37,7 @@ type DashboardData = {
   IncludedOrUnknownRuns: number;
   IncludedOrUnknownTokens: number;
   UsageByDimension: { Dimension: string; Name: string; Tokens: number; ActualMicrousd: number; EstimatedMicrousd: number }[];
+  TelemetrySeries: { Day: string; ActualMicrousd: number; EstimatedMicrousd: number; Tokens: number }[];
   Notifications: { ID: string; Kind: string; Message: string }[];
 };
 type Attention = {
@@ -46,7 +47,7 @@ type Attention = {
   DueNext24h: number;
 };
 
-function useDashboard(range: string) {
+function useDashboard(range: string, from: string, to: string) {
   const [data, setData] = useState<DashboardData>();
   const [attention, setAttention] = useState<Attention>();
   const [error, setError] = useState(false);
@@ -58,7 +59,9 @@ function useDashboard(range: string) {
     const load = () => {
       controller?.abort();
       controller = new AbortController();
-      fetch(`/api/v1/dashboard?range=${encodeURIComponent(range)}`, { credentials: "same-origin", signal: controller.signal })
+      const query = new URLSearchParams({ range });
+      if (range === "custom") { query.set("from", from); query.set("to", to); }
+      fetch(`/api/v1/dashboard?${query}`, { credentials: "same-origin", signal: controller.signal })
         .then((response) => (response.ok ? response.json() : Promise.reject()))
         .then((value) => {
           if (!stopped) {
@@ -97,7 +100,7 @@ function useDashboard(range: string) {
       window.clearTimeout(timer);
       window.removeEventListener("taskboard:data-change", refresh);
     };
-  }, [range]);
+  }, [range, from, to]);
   return { data, attention, error };
 }
 
@@ -139,7 +142,9 @@ function Notifications({ items }: { items: DashboardData["Notifications"] }) {
 
 export default function Dashboard() {
   const [range, setRange] = useState("30d");
-  const { data, attention, error } = useDashboard(range);
+  const [customFrom, setCustomFrom] = useState(() => new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10));
+  const [customTo, setCustomTo] = useState(() => new Date().toISOString().slice(0, 10));
+  const { data, attention, error } = useDashboard(range, customFrom, customTo);
   if (error) return <Card><CardContent className="py-12 text-center text-sm text-destructive">Daten konnten nicht geladen werden. Bitte erneut versuchen.</CardContent></Card>;
   if (!data) return <Card><CardContent className="flex min-h-56 items-center justify-center gap-3 text-sm text-muted-foreground"><LoaderCircle className="size-5 animate-spin" />Lade Betriebsdaten …</CardContent></Card>;
   const series = data.CreatedSeries.map((metric, index) => ({ day: metric.Name, created: metric.Count, completed: data.CompletedSeries[index]?.Count ?? 0 }));
@@ -155,11 +160,13 @@ export default function Dashboard() {
   return <>
     <div className="mb-6 flex flex-wrap items-center gap-2" aria-label="Zeitraum für Kosten und Usage">
       <span className="mr-2 text-sm text-muted-foreground">Zeitraum</span>
-      {[['today','Heute'],['7d','7 Tage'],['30d','30 Tage'],['all','Gesamte Historie']].map(([value, label]) => <Button key={value} size="sm" variant={range === value ? "default" : "outline"} onClick={() => setRange(value)}>{label}</Button>)}
+      {[['today','Heute'],['7d','7 Tage'],['30d','30 Tage'],['all','Gesamte Historie'],['custom','Benutzerdefiniert']].map(([value, label]) => <Button key={value} size="sm" variant={range === value ? "default" : "outline"} onClick={() => setRange(value)}>{label}</Button>)}
+      {range === "custom" && <><label className="ml-2 text-sm">Von <input aria-label="Startdatum" type="date" value={customFrom} onChange={(event) => setCustomFrom(event.target.value)} /></label><label className="text-sm">Bis <input aria-label="Enddatum" type="date" value={customTo} onChange={(event) => setCustomTo(event.target.value)} /></label></>}
     </div>
     <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">{stats.map(([name, value, detail]) => <Card key={name as string}><CardHeader className="pb-2"><CardDescription>{name}</CardDescription><CardTitle className="text-2xl">{value}</CardTitle></CardHeader><CardContent className="text-xs text-muted-foreground">{detail}</CardContent></Card>)}</section>
     {priorityItems.length > 0 && <Card className="mt-6"><CardHeader><CardTitle>Braucht Aufmerksamkeit</CardTitle><CardDescription>Offene Punkte, die als Nächstes eine Entscheidung oder Prüfung brauchen.</CardDescription></CardHeader><CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{priorityItems.map(([label, count, href]) => <a key={label as string} href={href as string} className="rounded-lg border p-4 transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><strong className="block text-2xl">{count}</strong><span className="mt-1 block text-sm text-muted-foreground">{label}</span></a>)}</CardContent></Card>}
     <section className="mt-6 grid gap-6 lg:grid-cols-5"><Card className="lg:col-span-3"><CardHeader><CardTitle>Durchsatz</CardTitle><CardDescription>Erstellt und abgeschlossen in den letzten 14 Tagen.</CardDescription></CardHeader><CardContent className="h-72"><MeasuredChart><LineChart data={series}><CartesianGrid vertical={false} strokeDasharray="3 3" /><XAxis dataKey="day" tickLine={false} axisLine={false} /><YAxis allowDecimals={false} tickLine={false} axisLine={false} /><Tooltip /><Line type="monotone" dataKey="created" stroke="var(--chart-1)" strokeWidth={2} dot={false} /><Line type="monotone" dataKey="completed" stroke="var(--chart-2)" strokeWidth={2} dot={false} /></LineChart></MeasuredChart></CardContent></Card><RunStatus runs={data.Runs} /></section>
+    <section className="mt-6 grid gap-6 lg:grid-cols-5"><Card className="lg:col-span-3"><CardHeader><CardTitle>Kostenverlauf</CardTitle><CardDescription>Istkosten und Schätzungen pro Tag im gewählten Zeitraum.</CardDescription></CardHeader><CardContent className="h-72"><MeasuredChart><LineChart data={data.TelemetrySeries ?? []}><CartesianGrid vertical={false} strokeDasharray="3 3" /><XAxis dataKey="Day" tickLine={false} axisLine={false} /><YAxis tickLine={false} axisLine={false} tickFormatter={(value) => money(value)} /><Tooltip formatter={(value, name) => [money(Number(value)), name === "ActualMicrousd" ? "Istkosten" : "Schätzung"]} /><Line type="monotone" dataKey="ActualMicrousd" stroke="var(--chart-2)" strokeWidth={2} dot={false} /><Line type="monotone" dataKey="EstimatedMicrousd" stroke="var(--chart-1)" strokeWidth={2} dot={false} /></LineChart></MeasuredChart></CardContent></Card><Card><CardHeader><CardTitle>Tokenverlauf</CardTitle><CardDescription>Gesamter gemeldeter oder historischer Umfang.</CardDescription></CardHeader><CardContent className="h-72"><MeasuredChart><LineChart data={data.TelemetrySeries ?? []}><CartesianGrid vertical={false} strokeDasharray="3 3" /><XAxis dataKey="Day" hide /><YAxis allowDecimals={false} tickLine={false} axisLine={false} /><Tooltip /><Line type="monotone" dataKey="Tokens" stroke="var(--chart-3)" strokeWidth={2} dot={false} /></LineChart></MeasuredChart></CardContent></Card></section>
     <section className="mt-6 grid gap-6 lg:grid-cols-5"><Card className="lg:col-span-3"><CardHeader><CardTitle>Arbeit im Workflow</CardTitle><CardDescription>Aktive Aufgaben nach Board und Spalte.</CardDescription></CardHeader><CardContent className="h-64"><MeasuredChart><BarChart data={data.ByColumn}><CartesianGrid vertical={false} strokeDasharray="3 3" /><XAxis dataKey="Name" hide /><YAxis allowDecimals={false} tickLine={false} axisLine={false} /><Tooltip /><Bar dataKey="Count" fill="var(--chart-1)" radius={[5, 5, 0, 0]} /></BarChart></MeasuredChart></CardContent></Card><Notifications items={data.Notifications} /></section>
     <Card className="mt-6"><CardHeader><CardTitle>Usage nach Dimension</CardTitle><CardDescription>Tokenumfang sowie Istkosten und Schätzungen im gewählten Zeitraum.</CardDescription></CardHeader><CardContent><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead><tr className="border-b"><th className="py-2 pr-4">Dimension</th><th className="py-2 pr-4">Name</th><th className="py-2 pr-4">Tokens</th><th className="py-2 pr-4">Istkosten</th><th className="py-2">Schätzung</th></tr></thead><tbody>{dimensions.map((item) => <tr key={`${item.Dimension}-${item.Name}`} className="border-b last:border-0"><td className="py-2 pr-4 text-muted-foreground">{item.Dimension}</td><td className="py-2 pr-4">{item.Name}</td><td className="py-2 pr-4">{item.Tokens.toLocaleString("de-DE")}</td><td className="py-2 pr-4">{money(item.ActualMicrousd)}</td><td className="py-2">{money(item.EstimatedMicrousd)}</td></tr>)}</tbody></table></div></CardContent></Card>
   </>;

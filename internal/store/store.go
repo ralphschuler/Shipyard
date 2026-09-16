@@ -283,6 +283,11 @@ func (s *Store) SaveUsagePrice(ctx context.Context, p domain.UsagePrice) error {
 	return err
 }
 
+func (s *Store) UpdateUsagePrice(ctx context.Context, p domain.UsagePrice) error {
+	_, err := s.DB.Exec(ctx, `UPDATE usage_price_catalog SET provider=$2,model=$3,service_tier=$4,valid_from=$5,valid_until=$6,input_microusd_per_million=$7,output_microusd_per_million=$8,cached_input_microusd_per_million=$9,cache_write_microusd_per_million=$10,reasoning_microusd_per_million=$11,version=$12 WHERE id=$1`, p.ID, p.Provider, p.Model, p.ServiceTier, p.ValidFrom, p.ValidUntil, p.Input, p.Output, p.CachedInput, p.CacheWrite, p.Reasoning, p.Version)
+	return err
+}
+
 func (s *Store) DeleteUsagePrice(ctx context.Context, id string) error {
 	_, err := s.DB.Exec(ctx, `DELETE FROM usage_price_catalog WHERE id=$1`, id)
 	return err
@@ -836,6 +841,9 @@ func (s *Store) DashboardFiltered(c context.Context, from, to *time.Time, provid
 	}
 	where := `WHERE ($1::timestamptz IS NULL OR r.created_at >= $1) AND ($2::timestamptz IS NULL OR r.created_at < $2) AND ($3='' OR r.usage_provider=$3) AND ($4='' OR r.usage_model=$4) AND (NULLIF($5,'')::uuid IS NULL OR r.agent_id=NULLIF($5,'')::uuid) AND (NULLIF($6,'')::uuid IS NULL OR r.task_id IN (SELECT id FROM tasks WHERE board_id=NULLIF($6,'')::uuid))`
 	args := []any{from, to, provider, model, agent, board}
+	if err = s.DB.QueryRow(c, `SELECT count(*) FILTER (WHERE r.status='queued'),count(*) FILTER (WHERE r.status='running'),count(*) FILTER (WHERE r.status='succeeded'),count(*) FILTER (WHERE r.status='failed') FROM agent_runs r `+where, args...).Scan(&d.Runs.Queued, &d.Runs.Running, &d.Runs.Succeeded, &d.Runs.Failed); err != nil {
+		return d, err
+	}
 	if err = s.DB.QueryRow(c, `SELECT COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='reported'),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='estimated'),0),count(*) FILTER (WHERE r.cost_source IN ('included','unknown')),COALESCE(sum(COALESCE(r.usage_total_tokens,r.token_usage)) FILTER (WHERE r.cost_source IN ('included','unknown')),0) FROM agent_runs r `+where, args...).Scan(&d.KnownActualCostMicrousd, &d.EstimatedCostMicrousdV2, &d.IncludedOrUnknownRuns, &d.IncludedOrUnknownTokens); err != nil {
 		return d, err
 	}
@@ -845,6 +853,33 @@ func (s *Store) DashboardFiltered(c context.Context, from, to *time.Time, provid
 	}
 	defer rows.Close()
 	d.UsageByDimension, err = pgx.CollectRows(rows, pgx.RowToStructByPos[domain.UsageMetric])
+	if err != nil {
+		return d, err
+	}
+	costRows, err := s.DB.Query(c, `SELECT a.name,COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source IN ('reported','estimated')),0) FROM agent_runs r JOIN agents a ON a.id=r.agent_id `+where+` GROUP BY a.id,a.name HAVING COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source IN ('reported','estimated')),0)>0 ORDER BY 2 DESC,1`, args...)
+	if err != nil {
+		return d, err
+	}
+	defer costRows.Close()
+	d.CostByAgent, err = pgx.CollectRows(costRows, pgx.RowToStructByPos[domain.CostMetric])
+	if err != nil {
+		return d, err
+	}
+	seriesFrom, seriesTo := from, to
+	if seriesFrom == nil {
+		start := time.Now().AddDate(0, 0, -29)
+		seriesFrom = &start
+	}
+	if seriesTo == nil {
+		end := time.Now().AddDate(0, 0, 1)
+		seriesTo = &end
+	}
+	series, err := s.DB.Query(c, `SELECT to_char(day,'YYYY-MM-DD'),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='reported'),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='estimated'),0),COALESCE(sum(COALESCE(r.usage_total_tokens,r.token_usage)),0) FROM generate_series($1::timestamptz,$2::timestamptz-interval '1 day',interval '1 day') day LEFT JOIN agent_runs r ON r.created_at >= day AND r.created_at < day + interval '1 day' AND r.created_at >= $1 AND r.created_at < $2 AND ($3='' OR r.usage_provider=$3) AND ($4='' OR r.usage_model=$4) AND (NULLIF($5,'')::uuid IS NULL OR r.agent_id=NULLIF($5,'')::uuid) AND (NULLIF($6,'')::uuid IS NULL OR r.task_id IN (SELECT id FROM tasks WHERE board_id=NULLIF($6,'')::uuid)) GROUP BY day ORDER BY day`, seriesFrom, seriesTo, provider, model, agent, board)
+	if err != nil {
+		return d, err
+	}
+	defer series.Close()
+	d.TelemetrySeries, err = pgx.CollectRows(series, pgx.RowToStructByPos[domain.TelemetryPoint])
 	return d, err
 }
 
