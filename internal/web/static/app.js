@@ -10,6 +10,14 @@ const applyTheme=()=>{const selected=shipyardPrefs.theme||'system';document.docu
 applyTheme();
 systemDark.addEventListener?.('change',()=>{if((shipyardPrefs.theme||'system')==='system')applyTheme()});
 document.title=document.title.replace(/Taskboard/g,'Shipyard');
+// Keep focus on the invoking control and make Escape opt-in for closable
+// dialogs. Native showModal() supplies the remaining focus containment.
+const modalReturnFocus=new WeakMap();
+const nativeShowModal=HTMLDialogElement.prototype.showModal;
+const openModal=(dialog,trigger=document.activeElement)=>{if(!dialog)return;if(trigger instanceof HTMLElement)modalReturnFocus.set(dialog,trigger);if(!dialog.open)nativeShowModal.call(dialog);requestAnimationFrame(()=>dialog.querySelector('[autofocus],button,input,select,textarea,[tabindex]:not([tabindex="-1"])')?.focus())};
+HTMLDialogElement.prototype.showModal=function(){openModal(this)};
+document.addEventListener('cancel',event=>{const dialog=event.target.closest?.('dialog');if(dialog&&!dialog.querySelector('.close,[data-close-modal],button[type="button"]'))event.preventDefault()},true);
+document.addEventListener('close',event=>{const dialog=event.target;if(!(dialog instanceof HTMLDialogElement))return;const trigger=modalReturnFocus.get(dialog);modalReturnFocus.delete(dialog);if(trigger?.isConnected)requestAnimationFrame(()=>trigger.focus())},true);
 document.querySelectorAll('.brand-mark').forEach(mark=>{mark.textContent='SY';mark.title='Shipyard'});
 // Older server-rendered views predate the Shipyard favicon. Keep branding a
 // shell responsibility so newly added extension pages cannot accidentally
@@ -88,7 +96,7 @@ if(document.body.classList.contains('task-page')){
  const hero=document.querySelector('.task-hero');
  document.querySelectorAll('.agent-interaction').forEach(card=>hero?.after(card));
 }
-const shortcutHelp=()=>{let dialog=document.getElementById('shipyard-shortcuts');if(!dialog){dialog=document.createElement('dialog');dialog.id='shipyard-shortcuts';dialog.innerHTML='<article><header><button class="close" aria-label="Schließen"></button><h2>Tastatursteuerung</h2></header><dl><dt>Tab / Umschalt+Tab</dt><dd>Zum nächsten oder vorherigen Bedienelement</dd><dt>Eingabe / Leertaste</dt><dd>Link, Button oder Auswahl auslösen</dd><dt>↑ / ↓, Pos1 / Ende</dt><dd>Navigation in der Seitenleiste</dd><dt>Escape</dt><dd>Dialog oder mobile Navigation schließen</dd></dl><label><input type="checkbox" data-shortcut-hints> Hinweise zu Shortcuts anzeigen</label></article>';document.body.append(dialog);dialog.querySelector('.close').addEventListener('click',()=>dialog.close());dialog.querySelector('[data-shortcut-hints]').checked=shipyardPrefs.shortcutHints!==false;dialog.querySelector('[data-shortcut-hints]').addEventListener('change',e=>{shipyardPrefs.shortcutHints=e.target.checked;try{localStorage.setItem('shipyard.preferences',JSON.stringify(shipyardPrefs))}catch(_){}})}dialog.showModal()};
+const shortcutHelp=()=>{let dialog=document.getElementById('shipyard-shortcuts');if(!dialog){dialog=document.createElement('dialog');dialog.id='shipyard-shortcuts';dialog.innerHTML='<article><header><button class="close" aria-label="Schließen"></button><h2>Tastatursteuerung</h2></header><dl><dt>Tab / Umschalt+Tab</dt><dd>Zum nächsten oder vorherigen Bedienelement</dd><dt>Eingabe / Leertaste</dt><dd>Link, Button oder Auswahl auslösen</dd><dt>↑ / ↓, Pos1 / Ende</dt><dd>Navigation in der Seitenleiste</dd><dt>Escape</dt><dd>Dialog oder mobile Navigation schließen</dd></dl><label><input type="checkbox" data-shortcut-hints> Hinweise zu Shortcuts anzeigen</label></article>';document.body.append(dialog);dialog.querySelector('.close').addEventListener('click',()=>dialog.close());dialog.querySelector('[data-shortcut-hints]').checked=shipyardPrefs.shortcutHints!==false;dialog.querySelector('[data-shortcut-hints]').addEventListener('change',e=>{shipyardPrefs.shortcutHints=e.target.checked;try{localStorage.setItem('shipyard.preferences',JSON.stringify(shipyardPrefs))}catch(_){}})}openModal(dialog)};
 document.addEventListener('keydown',event=>{if(event.key==='?'&&!/input|textarea|select/i.test(event.target.tagName)){event.preventDefault();shortcutHelp()}});
 document.querySelectorAll('.app-sidebar').forEach(sidebar=>{
  const shell=sidebar.closest('.app-shell');
@@ -188,14 +196,14 @@ if(window.EventSource){
    refresh(change);
  });
 }
-document.querySelectorAll('[data-open-modal]').forEach(button=>button.addEventListener('click',()=>{const modal=document.getElementById(button.dataset.openModal);if(modal){const node=button.closest('.flow-node');if(node){modal.querySelector('[name=x]').value=node.dataset.x;modal.querySelector('[name=y]').value=node.dataset.y}modal.showModal()}}));
+document.querySelectorAll('[data-open-modal]').forEach(button=>button.addEventListener('click',()=>{const modal=document.getElementById(button.dataset.openModal);if(modal){const node=button.closest('.flow-node');if(node){modal.querySelector('[name=x]').value=node.dataset.x;modal.querySelector('[name=y]').value=node.dataset.y}openModal(modal,button)}}));
 document.querySelectorAll('[data-close-modal]').forEach(button=>button.addEventListener('click',()=>button.closest('dialog').close()));
 document.querySelectorAll('[data-template-detail]').forEach(button=>button.addEventListener('click',()=>{
  const modal=document.querySelector('#template-details');if(!modal)return;
  modal.querySelector('[data-template-detail-title]').textContent=button.dataset.templateTitle||'';
  modal.querySelector('[data-template-detail-body]').textContent=button.dataset.templateDetailText||'';
  modal.querySelector('[data-template-detail-columns]').textContent=`Spalten: ${button.dataset.templateColumns||''}`;
- modal.showModal();
+ openModal(modal,button);
 }));
 // An automation owns one board. Filtering columns in the dialog keeps the
 // workflow graph understandable and mirrors the server-side integrity check.
@@ -243,7 +251,7 @@ if(canvas){
  let connecting,temporary;
  canvas.querySelectorAll('.node-handle').forEach(handle=>handle.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();connecting=handle.closest('.flow-node');const start=point(connecting,'right');temporary=document.createElementNS(svg.namespaceURI,'path');temporary.classList.add('temporary');temporary.setAttribute('d',path(start,{x:event.clientX-canvas.getBoundingClientRect().left,y:event.clientY-canvas.getBoundingClientRect().top}));svg.append(temporary);handle.setPointerCapture(event.pointerId)}));
  window.addEventListener('pointermove',event=>{if(!connecting)return;const r=canvas.getBoundingClientRect();temporary.setAttribute('d',path(point(connecting,'right'),{x:event.clientX-r.left,y:event.clientY-r.top}))});
- window.addEventListener('pointerup',event=>{if(!connecting)return;const target=document.elementFromPoint(event.clientX,event.clientY)?.closest('.flow-node');if(target&&target!==connecting){const modal=document.getElementById('new-transition');modal.querySelector('[name=from]').value=connecting.dataset.columnId;modal.querySelector('[name=to]').value=target.dataset.columnId;modal.querySelector('[data-transition-from]').textContent=connecting.querySelector('.node-body strong').textContent;modal.querySelector('[data-transition-to]').textContent=target.querySelector('.node-body strong').textContent;modal.showModal()}temporary?.remove();temporary=null;connecting=null});
+ window.addEventListener('pointerup',event=>{if(!connecting)return;const target=document.elementFromPoint(event.clientX,event.clientY)?.closest('.flow-node');if(target&&target!==connecting){const modal=document.getElementById('new-transition');modal.querySelector('[name=from]').value=connecting.dataset.columnId;modal.querySelector('[name=to]').value=target.dataset.columnId;modal.querySelector('[data-transition-from]').textContent=connecting.querySelector('.node-body strong').textContent;modal.querySelector('[data-transition-to]').textContent=target.querySelector('.node-body strong').textContent;openModal(modal)}temporary?.remove();temporary=null;connecting=null});
  draw();window.addEventListener('resize',draw);canvas.addEventListener('scroll',draw);
 }
 
