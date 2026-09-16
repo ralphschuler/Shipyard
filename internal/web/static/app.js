@@ -4,13 +4,13 @@ const navigationEntries=[['/','▦','Übersicht'],['/projects','◫','Projekte']
 // The server owns the translation vocabulary. Fetching it keeps legacy pages
 // and dynamically inserted controls on one source of truth.
 let shipyardTranslations={de:{},en:{}};
+const cookieValue=name=>document.cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`))?.[1];
 let activeShipyardLanguage=cookieValue('shipyard_language')==='en'?'en':'de';
 const shipyardLanguage=()=>activeShipyardLanguage;
 const translationOriginals=new WeakMap();
 const applyLanguage=()=>{const lang=shipyardLanguage();document.documentElement.lang=lang;const dictionary=shipyardTranslations[lang]||{};const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);const nodes=[];while(walker.nextNode())nodes.push(walker.currentNode);nodes.forEach(node=>{const original=translationOriginals.get(node)||node.nodeValue;translationOriginals.set(node,original);const value=original.trim();if(dictionary[value])node.nodeValue=original.replace(value,dictionary[value]);});document.querySelectorAll('[title],[aria-label],[placeholder]').forEach(node=>['title','aria-label','placeholder'].forEach(attribute=>{const originalKey=`${attribute}`;const original=translationOriginals.get(node)?.[originalKey]||node.getAttribute(attribute);const values=translationOriginals.get(node)||{};values[originalKey]=original;translationOriginals.set(node,values);if(original&&dictionary[original])node.setAttribute(attribute,dictionary[original]);}));document.querySelectorAll('[data-i18n-key]').forEach(node=>{const key=node.dataset.i18nKey;const visible=dictionary[key]||key;node.querySelector('span')?.replaceChildren(document.createTextNode(visible));node.title=visible;});};
 // Local preferences are deliberately progressive enhancement: the server UI
 // remains fully usable when storage is unavailable.
-const cookieValue=name=>document.cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`))?.[1];
 const shipyardPrefs=(()=>{try{const saved=JSON.parse(localStorage.getItem('shipyard.preferences')||'{"theme":"system","shortcutHints":true}');return {theme:cookieValue('shipyard_theme')||saved.theme||'system',shortcutHints:(cookieValue('shipyard_shortcut_hints')||String(saved.shortcutHints))!=='false'}}catch(_){return {theme:cookieValue('shipyard_theme')||'system',shortcutHints:cookieValue('shipyard_shortcut_hints')!=='false'}}})();
 const systemDark=matchMedia('(prefers-color-scheme:dark)');
 const applyTheme=()=>{const selected=shipyardPrefs.theme||'system';document.documentElement.dataset.theme=selected==='system'?(systemDark.matches?'dark':'light'):selected};

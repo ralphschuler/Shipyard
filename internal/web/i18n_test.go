@@ -3,9 +3,29 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
+
+func TestFrontendLanguageBootstrapDefinesCookieReaderBeforeUse(t *testing.T) {
+	script, err := os.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatalf("read frontend script: %v", err)
+	}
+	contents := string(script)
+	definition := strings.Index(contents, "const cookieValue=")
+	use := strings.Index(contents, "cookieValue('shipyard_language')")
+	if definition < 0 {
+		t.Fatal("frontend script does not define cookieValue")
+	}
+	if use < 0 {
+		t.Fatal("frontend script does not initialize the language from its cookie")
+	}
+	if definition > use {
+		t.Fatal("frontend script uses cookieValue before its const initialization")
+	}
+}
 
 func TestNormalizeLanguageDefaultsToGerman(t *testing.T) {
 	for _, value := range []string{"", "fr", "EN"} {
