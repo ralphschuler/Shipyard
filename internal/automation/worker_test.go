@@ -94,6 +94,110 @@ func TestRunCommitExistsProvidesIdempotentDeliveryMarker(t *testing.T) {
 	}
 }
 
+func TestRunCommitExistsIgnoresMarkerOnUnrelatedRef(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "main")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "switch", "-c", "abandoned")
+	if err := os.WriteFile(filepath.Join(source, "abandoned.txt"), []byte("not accepted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "abandoned.txt")
+	runID := "unrelated-ref"
+	runGit(t, source, "commit", "-m", "taskboard: accept run "+runID)
+	runGit(t, source, "switch", "main")
+	found, err := runCommitExists(context.Background(), source, runID)
+	if err != nil || found {
+		t.Fatalf("marker on unrelated ref = %t, %v", found, err)
+	}
+}
+
+func TestSyncManagedCheckoutKeepsAcceptedAheadCommit(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, t.TempDir(), "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+	if err := os.WriteFile(filepath.Join(source, "accepted.txt"), []byte("accepted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "accepted.txt")
+	runGit(t, source, "commit", "-m", "taskboard: accept run first")
+	expected, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syncManagedCheckout(context.Background(), source, "master"); err != nil {
+		t.Fatalf("follow-up synchronization: %v", err)
+	}
+	actual, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
+	if err != nil || actual != expected {
+		t.Fatalf("accepted HEAD changed during synchronization: got %s want %s (%v)", actual, expected, err)
+	}
+}
+
+func TestSyncManagedCheckoutReportsDirtyFilesWithoutChangingThem(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "tracked.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	if err := os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("manual\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := syncManagedCheckout(context.Background(), source, "master")
+	if err == nil || !strings.Contains(err.Error(), "tracked.txt") || !strings.Contains(err.Error(), "nichts zurückgesetzt") {
+		t.Fatalf("dirty checkout diagnosis = %v", err)
+	}
+	contents, readErr := os.ReadFile(filepath.Join(source, "tracked.txt"))
+	if readErr != nil || string(contents) != "manual\n" {
+		t.Fatalf("manual change was altered: %q, %v", contents, readErr)
+	}
+}
+
+func TestSyncManagedCheckoutBlocksUnacceptedLocalCommit(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, t.TempDir(), "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+	if err := os.WriteFile(filepath.Join(source, "manual.txt"), []byte("manual\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "manual.txt")
+	runGit(t, source, "commit", "-m", "manual local commit")
+	err := syncManagedCheckout(context.Background(), source, "master")
+	if err == nil || !strings.Contains(err.Error(), "nicht als akzeptierte Delivery verifiziert") || !strings.Contains(err.Error(), "manual.txt") {
+		t.Fatalf("unaccepted local commit diagnosis = %v", err)
+	}
+}
+
 func TestProviderCommandSplitsConfiguredAdapter(t *testing.T) {
 	command, args := providerCommand("codex exec")
 	if command != "codex" || !reflect.DeepEqual(args, []string{"exec"}) {

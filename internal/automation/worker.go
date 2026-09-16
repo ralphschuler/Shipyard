@@ -535,11 +535,74 @@ func lockRepository(ctx context.Context, source string) (func(), error) {
 // instead of trying to apply the same worktree diff a second time.
 func runCommitExists(ctx context.Context, source, runID string) (bool, error) {
 	message := "taskboard: accept run " + runID
-	out, err := exec.CommandContext(ctx, "git", "-C", source, "log", "--all", "--format=%B", "--fixed-strings", "--grep="+message, "-n", "1").Output()
+	// Only commits reachable from the managed checkout's current HEAD count.
+	// Searching --all also sees abandoned agent branches and unrelated refs,
+	// which could incorrectly make a delivery appear idempotently applied.
+	out, err := exec.CommandContext(ctx, "git", "-C", source, "log", "HEAD", "--format=%B", "--fixed-strings", "--grep="+message, "-n", "1").Output()
 	if err != nil {
 		return false, err
 	}
 	return strings.TrimSpace(string(out)) == message, nil
+}
+
+func gitOutput(ctx context.Context, directory string, args ...string) (string, error) {
+	command := exec.CommandContext(ctx, "git", append([]string{"-C", directory}, args...)...)
+	out, err := command.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+func managedCheckoutProblem(kind, files, detail string) error {
+	message := "Projekt-Checkout ist " + kind + "."
+	if files != "" {
+		message += " Betroffene Dateien:\n" + files
+	}
+	if detail != "" {
+		message += "\nUrsache: " + detail
+	}
+	message += "\nSichere nächste Schritte: Änderungen prüfen und manuell sichern oder bereinigen; danach den Run erneut starten. Es wurde nichts zurückgesetzt, überschrieben oder gelöscht."
+	return errors.New(message)
+}
+
+func syncManagedCheckout(ctx context.Context, path, branch string) error {
+	status, err := gitOutput(ctx, path, "status", "--porcelain")
+	if err != nil {
+		return fmt.Errorf("Git-Status konnte nicht gelesen werden: %w", err)
+	}
+	if status != "" {
+		return managedCheckoutProblem("nicht sauber", status, "lokale oder manuelle Änderungen sind vorhanden")
+	}
+	if _, err := gitOutput(ctx, path, "fetch", "--no-tags", "origin", branch); err != nil {
+		return fmt.Errorf("Remote-Stand konnte nicht sicher gelesen werden: %w", err)
+	}
+	remoteRef := "origin/" + branch
+	if _, err := gitOutput(ctx, path, "rev-parse", "--verify", remoteRef); err != nil {
+		return fmt.Errorf("Remote-Branch %s ist nach dem Fetch nicht verfügbar: %w", remoteRef, err)
+	}
+	if _, err := gitOutput(ctx, path, "merge-base", "--is-ancestor", "HEAD", remoteRef); err == nil {
+		// The managed checkout is equal to or behind origin. A fast-forward is
+		// the only update permitted here; it cannot overwrite local commits.
+		if _, err := gitOutput(ctx, path, "merge", "--ff-only", remoteRef); err != nil {
+			return fmt.Errorf("Checkout konnte nicht per Fast-Forward synchronisiert werden: %w", err)
+		}
+		return nil
+	}
+	if _, err := gitOutput(ctx, path, "merge-base", "--is-ancestor", remoteRef, "HEAD"); err == nil {
+		// The local branch contains accepted commits not present remotely. Keep
+		// that exact accepted HEAD for follow-up runs; never pull/rebase it.
+		localCommits, logErr := gitOutput(ctx, path, "log", "--format=%s", remoteRef+"..HEAD")
+		if logErr != nil {
+			return fmt.Errorf("lokale Checkout-Commits konnten nicht geprüft werden: %w", logErr)
+		}
+		for _, subject := range strings.Split(localCommits, "\n") {
+			if strings.TrimSpace(subject) != "" && !strings.HasPrefix(subject, "taskboard: accept run ") {
+				files, _ := gitOutput(ctx, path, "diff", "--name-only", remoteRef+"..HEAD")
+				return managedCheckoutProblem("nicht als akzeptierte Delivery verifiziert", files, "lokale Commits enthalten manuelle oder fremde Änderungen")
+			}
+		}
+		return nil
+	}
+	files, _ := gitOutput(ctx, path, "diff", "--name-only", "HEAD..."+remoteRef)
+	return managedCheckoutProblem("divergent", files, "lokaler HEAD und origin/"+branch+" haben keinen gemeinsamen geradlinigen Stand")
 }
 
 // runInTmux keeps a real interactive terminal for each CLI provider while
@@ -1171,7 +1234,7 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 		if dirty, checkErr := exec.Command("git", "-C", source, "status", "--porcelain").Output(); checkErr != nil {
 			return checkErr
 		} else if strings.TrimSpace(string(dirty)) != "" {
-			return errors.New("Quell-Workspace ist nicht sauber; übernehme oder räume bestehende Änderungen zuerst auf")
+			return managedCheckoutProblem("nicht sauber", strings.TrimSpace(string(dirty)), "fremde oder manuelle Änderungen würden von dieser Übernahme berührt")
 		}
 	}
 	worktree, err := w.Store.RunWorktree(ctx, runID)
@@ -1192,11 +1255,13 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 		check := exec.Command("git", "-C", source, "apply", "--check", "--3way", "-")
 		check.Stdin = strings.NewReader(string(diff))
 		if out, checkErr := check.CombinedOutput(); checkErr != nil {
-			return errors.New(strings.TrimSpace(string(out)))
+			files, _ := gitOutput(ctx, source, "diff", "--name-only", "HEAD")
+			return managedCheckoutProblem("nicht konfliktfrei übernehmbar", files, strings.TrimSpace(string(out)))
 		}
 		cmd.Stdin = strings.NewReader(string(diff))
 		if out, applyErr := cmd.CombinedOutput(); applyErr != nil {
-			return errors.New(strings.TrimSpace(string(out)))
+			files, _ := gitOutput(ctx, source, "diff", "--name-only", "HEAD")
+			return managedCheckoutProblem("in einem Drei-Wege-Konflikt", files, strings.TrimSpace(string(out)))
 		}
 		commit := exec.Command("git", "-C", source, "add", "-A")
 		if out, addErr := commit.CombinedOutput(); addErr != nil {
@@ -1401,7 +1466,21 @@ func (w *Worker) syncManagedProject(ctx context.Context, project domain.Project)
 	} else if statErr != nil {
 		return statErr
 	} else {
-		command = exec.CommandContext(syncCtx, "git", "-C", path, "pull", "--ff-only", "origin", project.DefaultBranch)
+		// Existing managed checkouts are synchronized below using fetch plus
+		// explicit ancestry checks. A pull cannot distinguish an accepted local
+		// commit from an unsafe divergence and would reject valid follow-up runs.
+		unlock, lockErr := lockRepository(syncCtx, path)
+		if lockErr != nil {
+			return fmt.Errorf("Projekt-Checkout konnte nicht für die Synchronisierung gesperrt werden: %w", lockErr)
+		}
+		defer unlock()
+		problemErr := syncManagedCheckout(syncCtx, path, project.DefaultBranch)
+		problem := ""
+		if problemErr != nil {
+			problem = problemErr.Error()
+		}
+		_ = w.Store.RecordProjectSync(context.Background(), project.ID, problem)
+		return problemErr
 	}
 	out, err := command.CombinedOutput()
 	problem := ""
