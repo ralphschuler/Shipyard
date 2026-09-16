@@ -144,9 +144,9 @@ type AutomationRule struct {
 	CreatedAt                                                                                          time.Time
 }
 type AgentRun struct {
-	ID, TaskID, AgentID, RuleID, BatchID, Status, PromptSnapshot, WorkspaceSnapshot, Summary, ErrorMessage string
-	StartedAt, FinishedAt                                                                                  *time.Time
-	CreatedAt                                                                                              time.Time
+	ID, TaskID, AgentID, RuleID, BatchID, Status, PromptSnapshot, WorkspaceSnapshot, TargetProject, Summary, ErrorMessage string
+	StartedAt, FinishedAt                                                                                                 *time.Time
+	CreatedAt                                                                                                             time.Time
 }
 
 // WorktreeCleanupCandidate identifies an isolated checkout that no longer

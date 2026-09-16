@@ -152,7 +152,11 @@ export default function App() {
   useEffect(() => {
     const update = () => setRoute(routeFromHash());
     addEventListener("hashchange", update);
-    return () => removeEventListener("hashchange", update);
+    addEventListener("popstate", update);
+    return () => {
+      removeEventListener("hashchange", update);
+      removeEventListener("popstate", update);
+    };
   }, []);
   useEffect(() => {
     if (!mobileNavOpen) return;
@@ -231,7 +235,9 @@ export default function App() {
   }, [appearance?.ShortcutHints]);
   const navigate = (path: string) => {
     setMobileNavOpen(false);
-    location.hash = path;
+    if (route === path) return;
+    window.history.pushState(null, "", `#${path}`);
+    setRoute(path);
   };
   const toggleNavigation = () => {
     if (window.matchMedia("(min-width: 768px)").matches) {
