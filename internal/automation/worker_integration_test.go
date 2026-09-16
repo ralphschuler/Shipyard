@@ -73,6 +73,10 @@ func TestProcessStartsDeliveryAgentExactlyOnceAndRejectsUnknownTarget(t *testing
 	if _, err = s.MoveTaskToColumnID(ctx, task.ID, development.ID, "integration"); err != nil {
 		t.Fatal(err)
 	}
+	// Two concurrent poller invocations must still reserve the queued run only
+	// once. This exercises the orchestration boundary rather than merely
+	// counting persisted runs after the fact.
+	go worker.Process(ctx)
 	worker.Process(ctx)
 	select {
 	case <-started:

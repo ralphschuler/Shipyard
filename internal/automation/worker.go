@@ -26,6 +26,7 @@ import (
 type Worker struct {
 	Store   *store.Store
 	cancels sync.Map
+	starts  sync.Map
 
 	// executeRun is injectable only for orchestration tests. Production workers
 	// leave it nil and use the real provider execution path below.
@@ -924,11 +925,24 @@ func (w *Worker) Process(ctx context.Context) {
 }
 
 func (w *Worker) startRun(ctx context.Context, run domain.AgentRun) {
-	if w.executeRun != nil {
-		go w.executeRun(ctx, run)
+	// Process may be called concurrently by the poller and an HTTP/MCP trigger.
+	// The database claim protects production execution, but reserving the run
+	// here also keeps test/injected executors and the small interval before the
+	// claim from starting the same delivery twice.
+	if _, loaded := w.starts.LoadOrStore(run.ID, struct{}{}); loaded {
 		return
 	}
-	go w.execute(ctx, run)
+	if w.executeRun != nil {
+		go func() {
+			defer w.starts.Delete(run.ID)
+			w.executeRun(ctx, run)
+		}()
+		return
+	}
+	go func() {
+		defer w.starts.Delete(run.ID)
+		w.execute(ctx, run)
+	}()
 }
 func (w *Worker) Cancel(ctx context.Context, runID string) error {
 	run, err := w.Store.Run(ctx, runID)
