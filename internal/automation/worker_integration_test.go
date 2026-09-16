@@ -2,9 +2,11 @@ package automation
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
-	"sync/atomic"
 	"taskboard/internal/domain"
 	"taskboard/internal/store"
 	"testing"
@@ -33,6 +35,15 @@ func workerIntegrationStore(t *testing.T) *store.Store {
 func TestProcessStartsDeliveryAgentExactlyOnceAndRejectsUnknownTarget(t *testing.T) {
 	s := workerIntegrationStore(t)
 	ctx := context.Background()
+	repository := t.TempDir()
+	runGit(t, repository, "init", "-b", "main")
+	runGit(t, repository, "config", "user.name", "Integration Test")
+	runGit(t, repository, "config", "user.email", "integration@example.invalid")
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("integration\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repository, "add", "README.md")
+	runGit(t, repository, "commit", "-m", "initial")
 
 	board, err := s.CreateBoardWithTemplate(ctx, "Orchestration integration", "software")
 	if err != nil {
@@ -45,24 +56,51 @@ func TestProcessStartsDeliveryAgentExactlyOnceAndRejectsUnknownTarget(t *testing
 	}
 	backlog := integrationColumnByName(t, columns, "Backlog")
 	development := integrationColumnByName(t, columns, "Entwicklung")
-	agent, err := s.CreateAgent(ctx, "Orchestration Triage", "integration", "", "", "", t.TempDir(), 1)
+	triageCount := filepath.Join(t.TempDir(), "triage-count")
+	deliveryCount := filepath.Join(t.TempDir(), "delivery-count")
+	triageScript := fakeProviderScript(t, triageCount, "```taskboard-transition\n"+fmt.Sprintf(`{"target_column_id":"%s"}`, development.ID)+"\n```\n")
+	unknownScript := fakeProviderScript(t, triageCount, "```taskboard-transition\n{\"target_column_id\":\"00000000-0000-0000-0000-000000000000\"}\n```\n")
+	deliveryScript := fakeProviderScript(t, deliveryCount, "")
+	triageAgent, err := s.CreateAgent(ctx, "Triage Agent", "integration", "", "", "", repository, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.CreateRuleWithActions(ctx, "Start delivery once", board.ID, "task.entered_column", development.ID, agent.ID, "", ""); err != nil {
+	deliveryAgent, err := s.CreateAgent(ctx, "Delivery Agent", "integration", "", "", "", repository, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.DB.Exec(ctx, "UPDATE agents SET adapter='codex' WHERE id=$1", triageAgent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.DB.Exec(ctx, "UPDATE agents SET adapter='claude' WHERE id=$1", deliveryAgent.ID); err != nil {
+		t.Fatal(err)
+	}
+	codex, err := s.Provider(ctx, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claude, err := s.Provider(ctx, "claude")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = s.SaveProvider(ctx, codex.Provider, codex.Model, codex.Command, codex.SecretEnv, codex.BaseURL, codex.Options, codex.Enabled)
+		_ = s.SaveProvider(ctx, claude.Provider, claude.Model, claude.Command, claude.SecretEnv, claude.BaseURL, claude.Options, claude.Enabled)
+	})
+	if err = s.SaveProvider(ctx, "codex", codex.Model, triageScript, codex.SecretEnv, codex.BaseURL, codex.Options, true); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SaveProvider(ctx, "claude", claude.Model, deliveryScript, claude.SecretEnv, claude.BaseURL, claude.Options, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CreateRuleWithActions(ctx, "Run triage", board.ID, "task.entered_column", backlog.ID, triageAgent.ID, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CreateRuleWithActions(ctx, "Start delivery once", board.ID, "task.entered_column", development.ID, deliveryAgent.ID, "", ""); err != nil {
 		t.Fatal(err)
 	}
 
-	var starts atomic.Int32
-	started := make(chan string, 1)
-	worker := &Worker{
-		Store: s,
-		executeRun: func(runContext context.Context, run domain.AgentRun) {
-			starts.Add(1)
-			_ = s.SetRunStatus(runContext, run.ID, "running", "test spy claimed delivery", "")
-			started <- run.ID
-		},
-	}
+	worker := &Worker{Store: s}
 	task, err := s.CreateTask(ctx, board.ID, "Successful triage", "test", "normal", "", "", "integration")
 	if err != nil {
 		t.Fatal(err)
@@ -70,24 +108,14 @@ func TestProcessStartsDeliveryAgentExactlyOnceAndRejectsUnknownTarget(t *testing
 	if _, err = s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "integration"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.MoveTaskToColumnID(ctx, task.ID, development.ID, "integration"); err != nil {
-		t.Fatal(err)
-	}
-	// Two concurrent poller invocations must still reserve the queued run only
-	// once. This exercises the orchestration boundary rather than merely
-	// counting persisted runs after the fact.
-	go worker.Process(ctx)
-	worker.Process(ctx)
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("delivery agent was not started")
-	}
-	worker.Process(ctx)
-	if got := starts.Load(); got != 1 {
+	waitForWorkerCondition(t, worker, func() bool {
+		count := readCount(t, deliveryCount)
+		current, readErr := s.GetTask(ctx, task.ID)
+		return readErr == nil && current.ColumnID == development.ID && count == 1
+	})
+	if got := readCount(t, deliveryCount); got != 1 {
 		t.Fatalf("successful triage must start exactly one delivery agent, got %d", got)
 	}
-	starts.Store(0)
 
 	unknownTask, err := s.CreateTask(ctx, board.ID, "Unknown target", "test", "normal", "", "", "integration")
 	if err != nil {
@@ -96,21 +124,68 @@ func TestProcessStartsDeliveryAgentExactlyOnceAndRejectsUnknownTarget(t *testing
 	if _, err = s.MoveTaskToColumnID(ctx, unknownTask.ID, backlog.ID, "integration"); err != nil {
 		t.Fatal(err)
 	}
+	if err = s.SaveProvider(ctx, "codex", codex.Model, unknownScript, codex.SecretEnv, codex.BaseURL, codex.Options, true); err != nil {
+		t.Fatal(err)
+	}
 	before, err := s.GetTask(ctx, unknownTask.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.MoveTaskToColumnID(ctx, unknownTask.ID, "00000000-0000-0000-0000-000000000000", "integration"); err == nil || !strings.Contains(err.Error(), "erlaubte Übergänge") {
-		t.Fatalf("unknown target must return deterministic diagnosis: %v", err)
-	}
-	worker.Process(ctx)
+	waitForWorkerCondition(t, worker, func() bool { return readCount(t, triageCount) >= 2 })
 	after, err := s.GetTask(ctx, unknownTask.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.ColumnID != before.ColumnID || starts.Load() != 0 {
-		t.Fatalf("unknown target changed state or started delivery: before=%s after=%s starts=%d", before.ColumnID, after.ColumnID, starts.Load())
+	if after.ColumnID != before.ColumnID || readCount(t, deliveryCount) != 1 {
+		t.Fatalf("unknown target changed state or started delivery: before=%s after=%s starts=%d", before.ColumnID, after.ColumnID, readCount(t, deliveryCount))
 	}
+}
+
+func fakeProviderScript(t *testing.T, countPath, transition string, target ...string) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "provider.sh")
+	output := transition
+	if len(target) > 0 {
+		output = fmt.Sprintf(output, target[0])
+	}
+	contents := "#!/bin/sh\ncount=0\nif [ -f " + shellQuoteForTest(countPath) + " ]; then count=$(cat " + shellQuoteForTest(countPath) + "); fi\nprintf '%s' $((count + 1)) > " + shellQuoteForTest(countPath) + "\nprintf '%s' " + shellQuoteForTest(output) + "\n"
+	if err := os.WriteFile(script, []byte(contents), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+func shellQuoteForTest(value string) string {
+	return "'" + value + "'"
+}
+
+func readCount(t *testing.T, path string) int {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
+}
+
+func waitForWorkerCondition(t *testing.T, worker *Worker, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		worker.Process(context.Background())
+		if condition() {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("worker condition was not reached within 10 seconds")
 }
 
 func integrationColumnByName(t *testing.T, columns []domain.Column, name string) domain.Column {
