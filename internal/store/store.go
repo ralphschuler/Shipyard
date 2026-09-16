@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"path/filepath"
 	"regexp"
@@ -256,11 +257,19 @@ func (s *Store) UserAndAPITokenForHash(ctx context.Context, hash string) (domain
 }
 
 func (s *Store) RecordAudit(ctx context.Context, userID, kind, resourceType, resourceID string, metadata map[string]string) error {
+	return recordAudit(ctx, s.DB, userID, kind, resourceType, resourceID, metadata)
+}
+
+type auditExecutor interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func recordAudit(ctx context.Context, exec auditExecutor, userID, kind, resourceType, resourceID string, metadata map[string]string) error {
 	raw, err := json.Marshal(metadata)
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.Exec(ctx, `INSERT INTO audit_events(user_id,kind,resource_type,resource_id,metadata) VALUES(NULLIF($1,'')::uuid,$2,$3,$4,$5)`, userID, kind, resourceType, resourceID, raw)
+	_, err = exec.Exec(ctx, `INSERT INTO audit_events(user_id,kind,resource_type,resource_id,metadata) VALUES(NULLIF($1,'')::uuid,$2,$3,$4,$5)`, userID, kind, resourceType, resourceID, raw)
 	return err
 }
 

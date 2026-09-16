@@ -79,12 +79,23 @@ func (s *Store) CreateSecret(ctx context.Context, actor, name, description, envN
 	if err != nil {
 		return domain.Secret{}, err
 	}
-	var out domain.Secret
-	err = s.DB.QueryRow(ctx, `INSERT INTO secrets(name,description,env_name,ciphertext,nonce) VALUES($1,$2,$3,$4,$5) RETURNING id,name,description,env_name,false,created_at,updated_at`, name, strings.TrimSpace(description), envName, ciphertext, nonce).Scan(&out.ID, &out.Name, &out.Description, &out.EnvName, &out.Revoked, &out.CreatedAt, &out.UpdatedAt)
-	if err == nil {
-		err = s.RecordAudit(ctx, actor, "secret.created", "secret", out.ID, map[string]string{"name": out.Name, "env_name": out.EnvName})
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return domain.Secret{}, err
 	}
-	return out, err
+	defer tx.Rollback(ctx)
+	var out domain.Secret
+	err = tx.QueryRow(ctx, `INSERT INTO secrets(name,description,env_name,ciphertext,nonce) VALUES($1,$2,$3,$4,$5) RETURNING id,name,description,env_name,false,created_at,updated_at`, name, strings.TrimSpace(description), envName, ciphertext, nonce).Scan(&out.ID, &out.Name, &out.Description, &out.EnvName, &out.Revoked, &out.CreatedAt, &out.UpdatedAt)
+	if err != nil {
+		return domain.Secret{}, err
+	}
+	if err = recordAudit(ctx, tx, actor, "secret.created", "secret", out.ID, map[string]string{"name": out.Name, "env_name": out.EnvName}); err != nil {
+		return domain.Secret{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return domain.Secret{}, err
+	}
+	return out, nil
 }
 func isSafeSecretName(v string) bool {
 	if len(v) == 0 || len(v) > 128 {
@@ -192,9 +203,6 @@ func (s *Store) SetSecretAgents(ctx context.Context, actor, secretID string, age
 			return err
 		}
 	}
-	if err = tx.Commit(ctx); err != nil {
-		return err
-	}
 	old := map[string]bool{}
 	for _, id := range previous {
 		old[id] = true
@@ -205,17 +213,20 @@ func (s *Store) SetSecretAgents(ctx context.Context, actor, secretID string, age
 	}
 	for id := range next {
 		if !old[id] {
-			if err := s.RecordAudit(ctx, actor, "secret.agent_assigned", "secret", secretID, map[string]string{"agent_id": id}); err != nil {
+			if err := recordAudit(ctx, tx, actor, "secret.agent_assigned", "secret", secretID, map[string]string{"agent_id": id}); err != nil {
 				return err
 			}
 		}
 	}
 	for id := range old {
 		if !next[id] {
-			if err := s.RecordAudit(ctx, actor, "secret.agent_unassigned", "secret", secretID, map[string]string{"agent_id": id}); err != nil {
+			if err := recordAudit(ctx, tx, actor, "secret.agent_unassigned", "secret", secretID, map[string]string{"agent_id": id}); err != nil {
 				return err
 			}
 		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return err
 	}
 	return nil
 }
@@ -227,25 +238,73 @@ func (s *Store) ReplaceSecret(ctx context.Context, actor, secretID, value string
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.Exec(ctx, "UPDATE secrets SET ciphertext=$2,nonce=$3,revoked_at=NULL,updated_at=now() WHERE id=$1", secretID, ciphertext, nonce)
-	if err == nil {
-		err = s.RecordAudit(ctx, actor, "secret.replaced", "secret", secretID, nil)
-	}
-	return err
-}
-func (s *Store) DeleteSecret(ctx context.Context, actor, secretID string) error {
-	if err := s.RecordAudit(ctx, actor, "secret.deleted", "secret", secretID, nil); err != nil {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
 		return err
 	}
-	_, err := s.DB.Exec(ctx, "DELETE FROM secrets WHERE id=$1", secretID)
-	return err
+	defer tx.Rollback(ctx)
+	var envName string
+	if err = tx.QueryRow(ctx, "SELECT env_name FROM secrets WHERE id=$1 FOR UPDATE", secretID).Scan(&envName); err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, "SELECT agent_id::text FROM secret_agents WHERE secret_id=$1 ORDER BY agent_id", secretID)
+	if err != nil {
+		return err
+	}
+	agentIDs, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	sort.Strings(agentIDs)
+	for _, agentID := range agentIDs {
+		if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", agentID+"\x00"+envName); err != nil {
+			return err
+		}
+		var conflict string
+		err = tx.QueryRow(ctx, `SELECT s.name FROM secrets s JOIN secret_agents a ON a.secret_id=s.id WHERE a.agent_id=$1 AND s.env_name=$2 AND s.id<>$3 AND s.revoked_at IS NULL LIMIT 1`, agentID, envName, secretID).Scan(&conflict)
+		if err == nil {
+			return errors.New("secret environment name is already assigned to this agent")
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+	}
+	if _, err = tx.Exec(ctx, "UPDATE secrets SET ciphertext=$2,nonce=$3,revoked_at=NULL,updated_at=now() WHERE id=$1", secretID, ciphertext, nonce); err != nil {
+		return err
+	}
+	if err = recordAudit(ctx, tx, actor, "secret.replaced", "secret", secretID, nil); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+func (s *Store) DeleteSecret(ctx context.Context, actor, secretID string) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := recordAudit(ctx, tx, actor, "secret.deleted", "secret", secretID, nil); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, "DELETE FROM secrets WHERE id=$1", secretID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 func (s *Store) RevokeSecret(ctx context.Context, actor, secretID string) error {
-	_, err := s.DB.Exec(ctx, "UPDATE secrets SET revoked_at=now(),updated_at=now() WHERE id=$1", secretID)
-	if err == nil {
-		err = s.RecordAudit(ctx, actor, "secret.revoked", "secret", secretID, nil)
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
 	}
-	return err
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, "UPDATE secrets SET revoked_at=now(),updated_at=now() WHERE id=$1", secretID); err != nil {
+		return err
+	}
+	if err = recordAudit(ctx, tx, actor, "secret.revoked", "secret", secretID, nil); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 func (s *Store) SecretValuesForAgent(ctx context.Context, agentID string) ([]domain.SecretValue, error) {
 	rows, err := s.DB.Query(ctx, `SELECT s.id::text,s.env_name,s.ciphertext,s.nonce FROM secrets s JOIN secret_agents a ON a.secret_id=s.id WHERE a.agent_id=$1 AND s.revoked_at IS NULL`, agentID)
