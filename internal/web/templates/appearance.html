@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="de">
+<html lang="{{.Preferences.Language}}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -31,6 +31,15 @@
       </nav>
       <article>
         <form method="post" action="/settings/appearance">
+          <fieldset>
+            <legend>Sprache</legend>
+            <label for="language">Oberflächensprache</label>
+            <select id="language" name="language">
+              <option value="de"{{if eq .Preferences.Language "de"}} selected{{end}}>Deutsch</option>
+              <option value="en"{{if eq .Preferences.Language "en"}} selected{{end}}>English</option>
+            </select>
+            <small>Die Auswahl wird für dein Benutzerkonto gespeichert.</small>
+          </fieldset>
           <fieldset>
             <legend>Darstellung</legend>
             <label><input type="radio" name="theme" value="system"{{if eq .Preferences.Theme "system"}} checked{{end}}> Systemdarstellung verwenden</label>

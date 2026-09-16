@@ -11,6 +11,7 @@ type User struct {
 type UserPreferences struct {
 	Theme         string
 	ShortcutHints bool
+	Language      string
 }
 type Session struct {
 	ID, UserID, CSRFToken string
