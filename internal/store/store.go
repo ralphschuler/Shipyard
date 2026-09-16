@@ -1173,20 +1173,14 @@ func (s *Store) allowedTransitionDiagnosis(c context.Context, taskID string) str
 func (s *Store) MoveTaskToNamedColumn(c context.Context, taskID, name, source string) (bool, error) {
 	var target string
 	err := s.DB.QueryRow(c, `SELECT c.id FROM tasks t JOIN workflow_columns c ON c.board_id=t.board_id
-		WHERE t.id=$1 AND lower(c.name)=lower($2) LIMIT 1`, taskID, strings.TrimSpace(name)).Scan(&target)
+		WHERE t.id=$1 AND lower(c.name)=lower($2) ORDER BY c.id LIMIT 1`, taskID, strings.TrimSpace(name)).Scan(&target)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return false, fmt.Errorf("unbekannte Zielspalte %q; erlaubte Übergänge: %s", strings.TrimSpace(name), s.allowedTransitionDiagnosis(c, taskID))
 	}
 	if err != nil {
 		return false, err
 	}
-	if _, err = s.MoveTask(c, taskID, target, source); err != nil {
-		if err.Error() == "transition is not allowed" {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
+	return s.MoveTaskToColumnID(c, taskID, target, source)
 }
 
 // MoveTaskToColumnType moves a task only through an explicitly configured
