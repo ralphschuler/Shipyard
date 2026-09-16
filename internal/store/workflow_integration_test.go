@@ -52,7 +52,7 @@ func TestWorkflowIntegrationGermanIDsIgnoreDisplayLabels(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
-	task, err := s.CreateTask(ctx, board.ID, "ID-Transition", "test", "normal", "", "", "integration")
+	task, err := s.CreateTask(ctx, board.ID, "ID-Transition", "test", "normal", "", "", "mcp")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,10 +62,10 @@ func TestWorkflowIntegrationGermanIDsIgnoreDisplayLabels(t *testing.T) {
 	}
 	backlog := columnByName(t, columns, "Backlog")
 	development := columnByName(t, columns, "Entwicklung")
-	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "integration"); err != nil || !moved {
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "mcp"); err != nil || !moved {
 		t.Fatalf("Inbox -> Backlog by ID: moved=%t err=%v", moved, err)
 	}
-	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, development.ID, "integration"); err != nil || !moved {
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, development.ID, "mcp"); err != nil || !moved {
 		t.Fatalf("Backlog -> Entwicklung by ID: moved=%t err=%v", moved, err)
 	}
 	current, err := s.GetTask(ctx, task.ID)
@@ -76,14 +76,14 @@ func TestWorkflowIntegrationGermanIDsIgnoreDisplayLabels(t *testing.T) {
 		t.Fatalf("unexpected German destination: %#v", current)
 	}
 	before := current.ColumnID
-	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, development.ID, "integration"); err != nil || moved {
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, development.ID, "mcp"); err != nil || moved {
 		t.Fatalf("self-transition must be a silent no-op: moved=%t err=%v", moved, err)
 	}
 	current, err = s.GetTask(ctx, task.ID)
 	if err != nil || current.ColumnID != before {
 		t.Fatalf("self-transition changed task: %#v err=%v", current, err)
 	}
-	if _, err := s.MoveTaskToColumnID(ctx, task.ID, "00000000-0000-0000-0000-000000000000", "integration"); err == nil || !strings.Contains(err.Error(), "erlaubte Übergänge") {
+	if _, err := s.MoveTaskToColumnID(ctx, task.ID, "00000000-0000-0000-0000-000000000000", "mcp"); err == nil || !strings.Contains(err.Error(), "erlaubte Übergänge") {
 		t.Fatalf("unknown ID must explain allowed transitions: %v", err)
 	}
 	current, err = s.GetTask(ctx, task.ID)
@@ -118,14 +118,14 @@ func TestWorkflowIntegrationEnglishIDsRemainCompatible(t *testing.T) {
 	if _, err = s.AddTransition(ctx, board.ID, backlog.ID, development.ID, "Start"); err != nil {
 		t.Fatal(err)
 	}
-	task, err := s.CreateTask(ctx, board.ID, "English ID transition", "test", "normal", "", "", "integration")
+	task, err := s.CreateTask(ctx, board.ID, "English ID transition", "test", "normal", "", "", "mcp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "integration"); err != nil {
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "mcp"); err != nil {
 		t.Fatal(err)
 	}
-	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, development.ID, "integration"); err != nil || !moved {
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, development.ID, "mcp"); err != nil || !moved {
 		t.Fatalf("Backlog -> Development by ID: moved=%t err=%v", moved, err)
 	}
 }
@@ -144,11 +144,11 @@ func TestWorkflowIntegrationTriageRunIsCreatedExactlyOnce(t *testing.T) {
 	}
 	backlog := columnByName(t, columns, "Backlog")
 	development := columnByName(t, columns, "Entwicklung")
-	task, err := s.CreateTask(ctx, board.ID, "Triage once", "test", "normal", "", "", "integration")
+	task, err := s.CreateTask(ctx, board.ID, "Triage once", "test", "normal", "", "", "mcp")
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := s.CreateAgent(ctx, "Triage Agent", "integration", "", "", "", t.TempDir(), 1)
+	agent, err := s.CreateAgent(ctx, "Triage Agent "+t.Name()+" "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,10 +156,10 @@ func TestWorkflowIntegrationTriageRunIsCreatedExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "integration"); err != nil {
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "mcp"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.MoveTaskToColumnID(ctx, task.ID, development.ID, "integration"); err != nil {
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, development.ID, "mcp"); err != nil {
 		t.Fatal(err)
 	}
 	events, err := s.PendingEvents(ctx)
