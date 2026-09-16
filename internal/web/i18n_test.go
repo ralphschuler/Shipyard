@@ -44,3 +44,21 @@ func TestLocalizeHTMLTranslatesLegacyViewAndKeepsGermanDefault(t *testing.T) {
 		t.Fatalf("German HTML changed unexpectedly: %s", got)
 	}
 }
+
+func TestLocalizeHTMLCoversAuthBoardAndTaskSurfaces(t *testing.T) {
+	html := `<html lang="dynamic"><h1>Anmelden · Shipyard</h1><p>Melde dich an, um deinen Shipyard zu öffnen.</p><button>Neue Aufgabe</button><button>Board bearbeiten</button><h2>Nächster Schritt</h2><p>Noch keine Kommentare.</p></html>`
+	english := localizeHTML(html, languageEnglish)
+	for _, want := range []string{"Sign in · Shipyard", "Sign in to open your Shipyard.", "New task", "Edit board", "Next step", "No comments yet."} {
+		if !strings.Contains(english, want) {
+			t.Fatalf("English surface missing %q: %s", want, english)
+		}
+	}
+}
+
+func TestLocalizeHTMLIsStableForDynamicUserContent(t *testing.T) {
+	html := `<main><h1>Board bearbeiten</h1><p>Ein eigener Titel: Neue Aufgabe</p></main>`
+	english := localizeHTML(html, languageEnglish)
+	if !strings.Contains(english, "Ein eigener Titel: New task") {
+		t.Fatalf("expected known phrase to translate without dropping user text: %s", english)
+	}
+}
