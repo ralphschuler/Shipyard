@@ -4289,8 +4289,8 @@ function RunConsole({ runID }: { runID: string }) {
   const [newLogsAvailable, setNewLogsAvailable] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
   const followLogs = useRef(true);
-  const latestSequence = useRef<number>();
-  const olderScrollHeight = useRef<number>();
+  const latestSequence = useRef<number | undefined>(undefined);
+  const olderScrollHeight = useRef<number | undefined>(undefined);
   const logs = data?.entries || [];
   const visibleLogs = [...olderLogs, ...logs];
   const canLoadOlder = olderAvailable ?? Boolean(data?.truncated);
