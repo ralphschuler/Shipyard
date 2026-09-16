@@ -45,6 +45,11 @@ var taskUpdateFence = regexp.MustCompile("(?s)```taskboard-update\\s*(\\{.*?\\})
 var taskTargetsFence = regexp.MustCompile("(?s)```taskboard-targets\\s*(\\{.*?\\})\\s*```")
 var cliTokenUsage = regexp.MustCompile(`(?i)\btokens\s+used\s*[:\s]+([0-9][0-9,._ ]*)`)
 
+// projectSyncLocks serializes a managed source checkout. Individual agent runs
+// never share a worktree, but they intentionally share this clean, read-only
+// source checkout from which their worktrees are created.
+var projectSyncLocks sync.Map
+
 type interactionOption struct {
 	Value string `json:"value"`
 	Label string `json:"label"`
@@ -1108,6 +1113,53 @@ func removeRunWorktree(ctx context.Context, runID, source, worktree string) erro
 	_ = exec.CommandContext(ctx, "git", "-C", source, "branch", "-D", "agent/run-"+runID).Run()
 	return nil
 }
+
+// syncManagedProject refreshes the controlled source checkout immediately
+// before a task starts. Worktrees are then created from that exact revision,
+// so no task can reuse another task's working directory.
+func (w *Worker) syncManagedProject(ctx context.Context, project domain.Project) error {
+	root := "/home/agent/.taskboard-projects"
+	path := filepath.Clean(project.LocalPath)
+	relative, err := filepath.Rel(root, path)
+	if err != nil || relative == "." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || relative == ".." {
+		return errors.New("Projekt-Checkout liegt nicht im verwalteten Projektbereich")
+	}
+	lockValue, _ := projectSyncLocks.LoadOrStore(project.ID, &sync.Mutex{})
+	lock := lockValue.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+
+	syncCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	var command *exec.Cmd
+	if _, statErr := os.Stat(filepath.Join(path, ".git")); errors.Is(statErr, os.ErrNotExist) {
+		command = exec.CommandContext(syncCtx, "git", "clone", "--branch", project.DefaultBranch, "--single-branch", project.RepositoryURL, path)
+	} else if statErr != nil {
+		return statErr
+	} else {
+		command = exec.CommandContext(syncCtx, "git", "-C", path, "pull", "--ff-only", "origin", project.DefaultBranch)
+	}
+	out, err := command.CombinedOutput()
+	problem := ""
+	if err != nil {
+		problem = strings.TrimSpace(string(out))
+		if len(problem) > 1000 {
+			problem = problem[:1000]
+		}
+	}
+	_ = w.Store.RecordProjectSync(context.Background(), project.ID, problem)
+	if err != nil {
+		if problem != "" {
+			return errors.New(problem)
+		}
+		return err
+	}
+	return nil
+}
+
 func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	started := time.Now()
 	claimed, err := w.Store.ClaimRun(ctx, run.ID)
@@ -1117,6 +1169,24 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	runCtx, cancel := context.WithTimeout(ctx, agentRunTimeout)
 	w.cancels.Store(run.ID, cancel)
 	defer func() { cancel(); w.cancels.Delete(run.ID) }()
+	if targets, targetsErr := w.Store.TaskRepositoryTargets(runCtx, run.TaskID); targetsErr == nil {
+		for _, target := range targets {
+			if target.RepositoryURL == "" || (target.LocalPath != run.WorkspaceSnapshot && len(targets) != 1) {
+				continue
+			}
+			project := domain.Project{ID: target.ProjectID, RepositoryURL: target.RepositoryURL, DefaultBranch: target.DefaultBranch, LocalPath: target.LocalPath}
+			if syncErr := w.syncManagedProject(runCtx, project); syncErr != nil {
+				reason := "Projekt-Repository konnte nicht aktualisiert werden: " + syncErr.Error()
+				_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+				_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
+				_ = w.finish(ctx, run, "failed")
+				return
+			}
+			run.WorkspaceSnapshot = project.LocalPath
+			_ = w.Store.AddRunLog(ctx, run.ID, "info", "Projekt-Checkout aktualisiert: "+project.LocalPath)
+			break
+		}
+	}
 	// Fail with an actionable project error before invoking git or a provider.
 	// A run is always isolated through git worktree, so an absent/uncloned
 	// project must never degrade into the opaque "exit status 128" message.
