@@ -123,7 +123,7 @@ func isQAColumn(task domain.Task) bool {
 
 func targetColumnHasType(columns []domain.Column, name, typeName string) bool {
 	for _, column := range columns {
-		if strings.EqualFold(strings.TrimSpace(column.Name), strings.TrimSpace(name)) && column.Type == typeName {
+		if (column.ID == strings.TrimSpace(name) || strings.EqualFold(strings.TrimSpace(column.Name), strings.TrimSpace(name))) && column.Type == typeName {
 			return true
 		}
 	}
@@ -1526,8 +1526,6 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			routedRun.RuleID = ""
 			_ = w.finish(ctx, routedRun, "succeeded")
 			return
-		} else if targetID == "" {
-			_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Angeforderte Workflow-Transition ist für die aktuelle Spalte nicht erlaubt: "+requestedRoute.Target)
 		}
 	}
 	_ = w.finish(ctx, run, "succeeded")

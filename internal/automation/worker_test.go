@@ -345,8 +345,8 @@ func TestQANacharbeitDoesNotLeaveAReleaseQuestionOpen(t *testing.T) {
 	if len(remaining) != 1 || remaining[0].Key != "other" {
 		t.Fatalf("remaining interactions = %#v", remaining)
 	}
-	columns := []domain.Column{{Name: "Done", Type: "done"}, {Name: "In Progress", Type: "standard"}}
-	if !targetColumnHasType(columns, "Done", "done") || targetColumnHasType(columns, "In Progress", "done") {
+	columns := []domain.Column{{ID: "done-id", Name: "Erledigt", Type: "done"}, {ID: "progress-id", Name: "In Progress", Type: "standard"}}
+	if !targetColumnHasType(columns, "done-id", "done") || !targetColumnHasType(columns, "Erledigt", "done") || targetColumnHasType(columns, "progress-id", "done") {
 		t.Fatal("QA delivery gate must use the semantic done column type")
 	}
 }
