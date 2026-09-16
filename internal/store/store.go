@@ -839,8 +839,41 @@ func (s *Store) DashboardFiltered(c context.Context, from, to *time.Time, provid
 	if err != nil || (from == nil && to == nil && provider == "" && model == "" && agent == "" && board == "") {
 		return d, err
 	}
+	// The legacy dashboard contains operational task metrics as well as
+	// telemetry. Keep those metrics on the same filtered run/task population;
+	// otherwise a date-filtered page mixes historic task counts with current
+	// cost data.
+	taskConditions := `EXISTS (SELECT 1 FROM agent_runs ar WHERE ar.task_id=t.id
+		AND ($1::timestamptz IS NULL OR ar.created_at >= $1)
+		AND ($2::timestamptz IS NULL OR ar.created_at < $2)
+		AND ($3='' OR ar.usage_provider=$3)
+		AND ($4='' OR ar.usage_model=$4)
+		AND (NULLIF($5,'')::uuid IS NULL OR ar.agent_id=NULLIF($5,'')::uuid))
+		AND (NULLIF($6,'')::uuid IS NULL OR t.board_id=NULLIF($6,'')::uuid)`
+	taskWhere := `WHERE ` + taskConditions
 	where := `WHERE ($1::timestamptz IS NULL OR r.created_at >= $1) AND ($2::timestamptz IS NULL OR r.created_at < $2) AND ($3='' OR r.usage_provider=$3) AND ($4='' OR r.usage_model=$4) AND (NULLIF($5,'')::uuid IS NULL OR r.agent_id=NULLIF($5,'')::uuid) AND (NULLIF($6,'')::uuid IS NULL OR r.task_id IN (SELECT id FROM tasks WHERE board_id=NULLIF($6,'')::uuid))`
 	args := []any{from, to, provider, model, agent, board}
+	if err = s.DB.QueryRow(c, `SELECT count(*),count(*) FILTER (WHERE t.completed_at IS NULL),count(*) FILTER (WHERE t.completed_at IS NOT NULL) FROM tasks t `+taskWhere, args...).Scan(&d.Total, &d.Active, &d.Completed); err != nil {
+		return d, err
+	}
+	columns, err := s.DB.Query(c, `SELECT b.name || ' / ' || c.name,count(t.id) FROM workflow_columns c JOIN boards b ON b.id=c.board_id LEFT JOIN tasks t ON t.column_id=c.id `+taskWhere+` GROUP BY b.name,c.id,c.name,c.position HAVING count(t.id)>0 ORDER BY b.name,c.position`, args...)
+	if err != nil {
+		return d, err
+	}
+	d.ByColumn, err = pgx.CollectRows(columns, pgx.RowToStructByPos[domain.Metric])
+	columns.Close()
+	if err != nil {
+		return d, err
+	}
+	priorities, err := s.DB.Query(c, `SELECT t.priority,count(*) FROM tasks t `+taskWhere+` GROUP BY t.priority ORDER BY t.priority`, args...)
+	if err != nil {
+		return d, err
+	}
+	d.ByPriority, err = pgx.CollectRows(priorities, pgx.RowToStructByPos[domain.Metric])
+	priorities.Close()
+	if err != nil {
+		return d, err
+	}
 	if err = s.DB.QueryRow(c, `SELECT count(*) FILTER (WHERE r.status='queued'),count(*) FILTER (WHERE r.status='running'),count(*) FILTER (WHERE r.status='succeeded'),count(*) FILTER (WHERE r.status='failed') FROM agent_runs r `+where, args...).Scan(&d.Runs.Queued, &d.Runs.Running, &d.Runs.Succeeded, &d.Runs.Failed); err != nil {
 		return d, err
 	}
@@ -880,6 +913,37 @@ func (s *Store) DashboardFiltered(c context.Context, from, to *time.Time, provid
 	}
 	defer series.Close()
 	d.TelemetrySeries, err = pgx.CollectRows(series, pgx.RowToStructByPos[domain.TelemetryPoint])
+	if err != nil {
+		return d, err
+	}
+	// Task throughput follows the same selected interval and dimensions. For
+	// an unbounded request retain the legacy 14-day chart window.
+	taskSeriesFrom, taskSeriesTo := from, to
+	if taskSeriesFrom == nil {
+		start := time.Now().AddDate(0, 0, -13)
+		taskSeriesFrom = &start
+	}
+	if taskSeriesTo == nil {
+		end := time.Now().AddDate(0, 0, 1)
+		taskSeriesTo = &end
+	}
+	taskSeriesConditions := `EXISTS (SELECT 1 FROM agent_runs ar WHERE ar.task_id=t.id AND ($3::timestamptz IS NULL OR ar.created_at >= $3) AND ($4::timestamptz IS NULL OR ar.created_at < $4) AND ($5='' OR ar.usage_provider=$5) AND ($6='' OR ar.usage_model=$6) AND (NULLIF($7,'')::uuid IS NULL OR ar.agent_id=NULLIF($7,'')::uuid)) AND (NULLIF($8,'')::uuid IS NULL OR t.board_id=NULLIF($8,'')::uuid)`
+	seriesArgs := append([]any{taskSeriesFrom, taskSeriesTo}, args...)
+	createdTasks, err := s.DB.Query(c, `SELECT to_char(day,'DD.MM'),count(t.id)::int FROM generate_series($1::timestamptz,$2::timestamptz-interval '1 day',interval '1 day') day LEFT JOIN tasks t ON t.created_at >= day AND t.created_at < day + interval '1 day' AND `+taskSeriesConditions+` GROUP BY day ORDER BY day`, seriesArgs...)
+	if err != nil {
+		return d, err
+	}
+	d.CreatedSeries, err = pgx.CollectRows(createdTasks, pgx.RowToStructByPos[domain.Metric])
+	createdTasks.Close()
+	if err != nil {
+		return d, err
+	}
+	completedTasks, err := s.DB.Query(c, `SELECT to_char(day,'DD.MM'),count(t.id)::int FROM generate_series($1::timestamptz,$2::timestamptz-interval '1 day',interval '1 day') day LEFT JOIN tasks t ON t.completed_at >= day AND t.completed_at < day + interval '1 day' AND `+taskSeriesConditions+` GROUP BY day ORDER BY day`, seriesArgs...)
+	if err != nil {
+		return d, err
+	}
+	d.CompletedSeries, err = pgx.CollectRows(completedTasks, pgx.RowToStructByPos[domain.Metric])
+	completedTasks.Close()
 	return d, err
 }
 

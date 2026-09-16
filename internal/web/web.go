@@ -1400,7 +1400,10 @@ func (a *App) persistUsagePrice(w http.ResponseWriter, r *http.Request, id strin
 		if id != "" {
 			kind = "usage_price.updated"
 		}
-		_ = a.store.RecordAudit(r.Context(), user.ID, kind, "usage_price", p.Version, map[string]string{"provider": p.Provider, "model": p.Model, "version": p.Version})
+		if err := a.store.RecordAudit(r.Context(), user.ID, kind, "usage_price", p.Version, map[string]string{"provider": p.Provider, "model": p.Model, "version": p.Version}); err != nil {
+			http.Error(w, "Preis wurde gespeichert, konnte aber nicht auditiert werden: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	http.Redirect(w, r, "/settings/prices", 303)
 }
@@ -1411,7 +1414,10 @@ func (a *App) deleteUsagePrice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if user, ok := currentUser(r.Context()); ok {
-		_ = a.store.RecordAudit(r.Context(), user.ID, "usage_price.deleted", "usage_price", r.PathValue("id"), nil)
+		if err := a.store.RecordAudit(r.Context(), user.ID, "usage_price.deleted", "usage_price", r.PathValue("id"), nil); err != nil {
+			http.Error(w, "Preis wurde gelöscht, konnte aber nicht auditiert werden: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	http.Redirect(w, r, "/settings/prices", 303)
 }
