@@ -1125,6 +1125,51 @@ func (s *Store) MoveTask(c context.Context, id, target, source string) (domain.T
 // MoveTaskToNamedColumn moves only when the board explicitly models the
 // requested target and its transition is allowed. It never bypasses workflow
 // policy merely because an automation observed an error.
+// MoveTaskToColumnID resolves workflow transitions by stable column ID.
+// A self-transition is an intentional, silent no-op.
+func (s *Store) MoveTaskToColumnID(c context.Context, taskID, target, source string) (bool, error) {
+	var current, board string
+	if err := s.DB.QueryRow(c, "SELECT column_id,board_id FROM tasks WHERE id=$1", taskID).Scan(&current, &board); err != nil {
+		return false, err
+	}
+	target = strings.TrimSpace(target)
+	if target == current {
+		return false, nil
+	}
+	var targetName string
+	if err := s.DB.QueryRow(c, "SELECT name FROM workflow_columns WHERE id=$1 AND board_id=$2", target, board).Scan(&targetName); errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("unbekannte Zielspalten-ID %q; erlaubte Übergänge: %s", target, s.allowedTransitionDiagnosis(c, taskID))
+	} else if err != nil {
+		return false, err
+	}
+	if _, err := s.MoveTask(c, taskID, target, source); err != nil {
+		if err.Error() == "transition is not allowed" {
+			return false, fmt.Errorf("Transition zur Zielspalte %q (%s) ist nicht erlaubt; erlaubte Übergänge: %s", target, targetName, s.allowedTransitionDiagnosis(c, taskID))
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) allowedTransitionDiagnosis(c context.Context, taskID string) string {
+	rows, err := s.DB.Query(c, `SELECT tr.to_column_id,c.name FROM transitions tr JOIN tasks t ON t.column_id=tr.from_column_id JOIN workflow_columns c ON c.id=tr.to_column_id WHERE t.id=$1 ORDER BY tr.to_column_id`, taskID)
+	if err != nil {
+		return "nicht verfügbar"
+	}
+	defer rows.Close()
+	var values []string
+	for rows.Next() {
+		var id, name string
+		if rows.Scan(&id, &name) == nil {
+			values = append(values, id+" ("+name+")")
+		}
+	}
+	if len(values) == 0 {
+		return "keine"
+	}
+	return strings.Join(values, ", ")
+}
+
 func (s *Store) MoveTaskToNamedColumn(c context.Context, taskID, name, source string) (bool, error) {
 	var target string
 	err := s.DB.QueryRow(c, `SELECT c.id FROM tasks t JOIN workflow_columns c ON c.board_id=t.board_id
