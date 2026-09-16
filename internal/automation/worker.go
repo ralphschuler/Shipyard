@@ -404,6 +404,64 @@ func reportedCLITokenUsage(logs []domain.RunLog) (int, bool) {
 	return usage, found
 }
 
+type cliUsageReport struct {
+	APICalls           *int64
+	InputTokens        *int64
+	OutputTokens       *int64
+	CachedInputTokens  *int64
+	CacheWriteTokens   *int64
+	ReasoningTokens    *int64
+	TotalTokens        *int64
+	NativeCostMicrousd *int64
+	ServiceTier        string
+}
+
+// reportedCLIUsage accepts the small, machine-readable usage shape emitted by
+// CLI adapters. It deliberately does not inspect arbitrary terminal text;
+// only JSON objects with usage fields are telemetry candidates.
+func reportedCLIUsage(logs []domain.RunLog) (cliUsageReport, bool) {
+	var result cliUsageReport
+	found := false
+	for _, entry := range logs {
+		for _, line := range strings.Split(entry.Message, "\n") {
+			var envelope struct {
+				Type  string          `json:"type"`
+				Usage json.RawMessage `json:"usage"`
+			}
+			if json.Unmarshal([]byte(strings.TrimSpace(line)), &envelope) != nil || len(envelope.Usage) == 0 {
+				continue
+			}
+			var usage struct {
+				APICalls           *int64 `json:"api_calls"`
+				InputTokens        *int64 `json:"input_tokens"`
+				OutputTokens       *int64 `json:"output_tokens"`
+				CachedInputTokens  *int64 `json:"cached_input_tokens"`
+				CacheWriteTokens   *int64 `json:"cache_write_tokens"`
+				ReasoningTokens    *int64 `json:"reasoning_tokens"`
+				TotalTokens        *int64 `json:"total_tokens"`
+				NativeCostMicrousd *int64 `json:"native_cost_microusd"`
+				CostMicrousd       *int64 `json:"cost_microusd"`
+				ServiceTier        string `json:"service_tier"`
+			}
+			if json.Unmarshal(envelope.Usage, &usage) != nil {
+				continue
+			}
+			if usage.NativeCostMicrousd == nil {
+				usage.NativeCostMicrousd = usage.CostMicrousd
+			}
+			result = cliUsageReport{usage.APICalls, usage.InputTokens, usage.OutputTokens, usage.CachedInputTokens, usage.CacheWriteTokens, usage.ReasoningTokens, usage.TotalTokens, usage.NativeCostMicrousd, usage.ServiceTier}
+			found = true
+		}
+	}
+	if !found {
+		if total, ok := reportedCLITokenUsage(logs); ok {
+			result.TotalTokens = int64Ptr(int64(total))
+			found = true
+		}
+	}
+	return result, found
+}
+
 func interactionFingerprint(key string, fields []interactionField) string {
 	raw, _ := json.Marshal(struct {
 		Key    string             `json:"key"`
@@ -1710,13 +1768,14 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		if providerErr != nil {
 			reason = providerErr.Error()
 		}
-		_ = w.Store.SetRunUsage(ctx, run.ID, domain.UsageReport{Provider: providerName, Status: "incomplete", CostSource: "unknown", RawUsage: []byte(`{"status":"provider_unavailable"}`)})
+		w.persistIncompleteUsage(ctx, run, providerName, "", "provider_unavailable")
 		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
 		_ = w.finish(ctx, run, "failed")
 		return
 	}
 	secretValues, secretErr := w.Store.SecretValuesForAgent(ctx, run.AgentID)
 	if secretErr != nil {
+		w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "secret_load_failed")
 		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", "Secret-Berechtigungen konnten nicht geladen werden")
 		_ = w.finish(ctx, run, "failed")
 		return
@@ -1731,11 +1790,13 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	if provider.Provider == "openai" {
 		secret, ok := secretValueForEnv(secretValues, provider.SecretEnv)
 		if !ok {
+			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "secret_not_assigned")
 			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", "OpenAI-Secret ist diesem Agent nicht zugeordnet")
 			_ = w.finish(ctx, run, "failed")
 			return
 		}
 		if auditErr := w.recordSecretUse(ctx, run, secret); auditErr != nil {
+			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "secret_audit_failed")
 			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", "Secret-Nutzung konnte nicht auditiert werden")
 			_ = w.finish(ctx, run, "failed")
 			return
@@ -1748,7 +1809,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	} else {
 		command, args, stdin, commandErr := cliInvocation(provider, prompt)
 		if commandErr != nil {
-			_ = w.Store.SetRunUsage(ctx, run.ID, domain.UsageReport{Provider: provider.Provider, Model: provider.Model, Status: "incomplete", CostSource: "unknown", RawUsage: []byte(`{"status":"adapter_configuration_error"}`)})
+			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "adapter_configuration_error")
 			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", commandErr.Error())
 			_ = w.finish(ctx, run, "failed")
 			return
@@ -1771,6 +1832,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		for _, secret := range secretValues {
 			secretEnv = append(secretEnv, secret.EnvName+"="+secret.Value)
 			if auditErr := w.recordSecretUse(ctx, run, secret); auditErr != nil {
+				w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "secret_audit_failed")
 				_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", "Secret-Nutzung konnte nicht auditiert werden")
 				_ = w.finish(ctx, run, "failed")
 				return
@@ -1783,6 +1845,42 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			finalPath := filepath.Join("/home/agent/.taskboard-run-logs", run.ID+".final")
 			if raw, readErr := os.ReadFile(finalPath); readErr == nil {
 				structuredOutput = string(raw)
+			}
+		}
+	}
+	// CLI adapters may emit a final machine-readable usage event even when the
+	// process exits non-zero. Read it before constructing and persisting the
+	// report so partial runs retain all measured telemetry.
+	if provider.Provider != "openai" {
+		if logs, logErr := w.Store.RunLogs(ctx, run.ID); logErr == nil {
+			if reported, ok := reportedCLIUsage(logs); ok {
+				if reported.APICalls != nil {
+					apiCalls = int(*reported.APICalls)
+				}
+				if reported.InputTokens != nil {
+					inputTokens = int(*reported.InputTokens)
+				}
+				if reported.OutputTokens != nil {
+					outputTokens = int(*reported.OutputTokens)
+				}
+				if reported.CachedInputTokens != nil {
+					cachedInputTokens = int(*reported.CachedInputTokens)
+				}
+				if reported.CacheWriteTokens != nil {
+					cacheWriteTokens = int(*reported.CacheWriteTokens)
+				}
+				if reported.ReasoningTokens != nil {
+					reasoningTokens = int(*reported.ReasoningTokens)
+				}
+				if reported.TotalTokens != nil {
+					tokenUsage = int(*reported.TotalTokens)
+				}
+				if reported.NativeCostMicrousd != nil {
+					nativeCostMicrousd = reported.NativeCostMicrousd
+				}
+				if reported.ServiceTier != "" {
+					serviceTier = reported.ServiceTier
+				}
 			}
 		}
 	}
@@ -1869,11 +1967,6 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 				_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Self-Review fehlgeschlagen", reason)
 				_ = w.finish(ctx, run, "failed")
 				return
-			}
-			if provider.Provider == "codex" {
-				if reported, ok := reportedCLITokenUsage(logs); ok {
-					tokenUsage = reported
-				}
 			}
 			for _, comment := range requestedTaskComments(controlLogs) {
 				_ = w.Store.AddComment(ctx, run.TaskID, "Agent", comment)
@@ -2032,6 +2125,13 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		}
 	}
 	_ = w.finish(ctx, run, "succeeded")
+}
+
+func (w *Worker) persistIncompleteUsage(ctx context.Context, run domain.AgentRun, provider, model, status string) {
+	raw, _ := json.Marshal(map[string]string{"status": status})
+	_ = w.Store.SetRunUsage(ctx, run.ID, domain.UsageReport{
+		Provider: provider, Model: model, Status: "incomplete", CostSource: "unknown", RawUsage: raw,
+	})
 }
 func (w *Worker) finish(ctx context.Context, run domain.AgentRun, status string) error {
 	// Cancellation wins over every concurrently completing worker branch. The

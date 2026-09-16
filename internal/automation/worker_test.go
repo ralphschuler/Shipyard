@@ -652,6 +652,22 @@ func TestReportedCLITokenUsageUsesCodexSummaryInsteadOfTerminalBytes(t *testing.
 	}
 }
 
+func TestReportedCLIUsageReadsMachineReadableBreakdownAndNativeCost(t *testing.T) {
+	logs := []domain.RunLog{{Message: `{"type":"usage","usage":{"api_calls":2,"input_tokens":100,"output_tokens":25,"cached_input_tokens":40,"cache_write_tokens":5,"reasoning_tokens":10,"total_tokens":125,"cost_microusd":321,"service_tier":"flex"}}`}}
+	report, ok := reportedCLIUsage(logs)
+	if !ok || report.APICalls == nil || *report.APICalls != 2 || report.InputTokens == nil || *report.InputTokens != 100 || report.CachedInputTokens == nil || *report.CachedInputTokens != 40 || report.NativeCostMicrousd == nil || *report.NativeCostMicrousd != 321 || report.ServiceTier != "flex" {
+		t.Fatalf("report = %#v, %t; want complete machine-readable usage", report, ok)
+	}
+}
+
+func TestReportedCLIUsageKeepsIncompleteMachineReadableUsage(t *testing.T) {
+	logs := []domain.RunLog{{Message: `{"usage":{"input_tokens":17,"output_tokens":null}}`}}
+	report, ok := reportedCLIUsage(logs)
+	if !ok || report.InputTokens == nil || *report.InputTokens != 17 || report.OutputTokens != nil {
+		t.Fatalf("report = %#v, %t; want null output tokens and known input tokens", report, ok)
+	}
+}
+
 func TestInteractionFingerprintIsStableAndSeparatesDifferentQuestions(t *testing.T) {
 	fields := []interactionField{{ID: "database", Label: "Datenbank", Type: "buttons", Options: []interactionOption{{Value: "postgres", Label: "Postgres"}}}}
 	first := interactionFingerprint("database", fields)
