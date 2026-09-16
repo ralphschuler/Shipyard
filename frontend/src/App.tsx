@@ -4298,6 +4298,7 @@ function RunDetail({ id }: { id: string }) {
   const [trace, setTrace] = useState<any>();
   const [feedback, setFeedback] = useState("");
   const [message, setMessage] = useState("");
+  const [confirmApply, setConfirmApply] = useState(false);
   if (error) return <Failure />;
   if (!data) return <Loading />;
   const terminal = !["running", "queued"].includes(data.run.Status);
@@ -4444,7 +4445,7 @@ function RunDetail({ id }: { id: string }) {
               data.delivery.DiffSummary &&
               data.delivery.GateStatus === "passed" && (
                 <>
-                  <Button disabled={busy} onClick={() => action("/apply")}>
+                  <Button disabled={busy} onClick={() => setConfirmApply(true)}>
                     Änderungen übernehmen
                   </Button>
                   <Button
@@ -4475,6 +4476,12 @@ function RunDetail({ id }: { id: string }) {
               )}
           </CardContent>
         </Card>
+        <Dialog open={confirmApply} onOpenChange={setConfirmApply}>
+          <DialogContent>
+            <DialogHeader><DialogTitle>Änderungen übernehmen?</DialogTitle><DialogDescription>Die geprüften Änderungen werden in das zugewiesene Repository integriert und der Task anschließend zur Review weitergegeben.</DialogDescription></DialogHeader>
+            <DialogFooter><Button variant="outline" onClick={() => setConfirmApply(false)}>Abbrechen</Button><Button disabled={busy} onClick={() => { setConfirmApply(false); void action("/apply"); }}>Bestätigen und übernehmen</Button></DialogFooter>
+          </DialogContent>
+        </Dialog>
         {terminal && !data.delivery.AppliedAt && (
           <Card>
             <CardHeader>

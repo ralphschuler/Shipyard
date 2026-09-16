@@ -1004,6 +1004,11 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 		_ = w.Store.AddRunLog(ctx, runID, "info", "Isolierter Worktree nach Übernahme bereinigt")
 	}
 	if run.RuleID == "" {
+		_, err = w.Store.MoveTaskToNamedColumn(ctx, run.TaskID, "Review", "automation")
+		if err != nil {
+			return err
+		}
+		_ = w.Store.AddComment(ctx, run.TaskID, "Taskboard", "Änderungen übernommen; Task wurde zur Review weitergegeben.")
 		return nil
 	}
 	if run.BatchID != "" {
@@ -1038,9 +1043,42 @@ func (w *Worker) Diff(ctx context.Context, runID string) (string, error) {
 	}
 	out, err := exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--binary", "HEAD").CombinedOutput()
 	if err != nil {
-		return "", errors.New(strings.TrimSpace(string(out)))
+		return "", errors.New(RedactSensitiveText(strings.TrimSpace(string(out))))
 	}
-	return string(out), nil
+	return redactSensitiveDiff(string(out)), nil
+}
+
+var sensitiveDiffPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(authorization\s*:\s*bearer\s+)[^\s]+`),
+	regexp.MustCompile(`(?i)(\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|secret|private[_-]?key)\s*[:=]\s*)[^\s#]+`),
+	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
+	regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b`),
+}
+
+func RedactSensitiveText(value string) string {
+	for _, pattern := range sensitiveDiffPatterns {
+		value = pattern.ReplaceAllString(value, `[REDACTED]`)
+	}
+	return value
+}
+
+func redactSensitiveDiff(diff string) string {
+	lines := strings.Split(RedactSensitiveText(diff), "\n")
+	privateKey := false
+	for index, line := range lines {
+		if strings.Contains(line, "-----BEGIN ") && strings.Contains(line, "PRIVATE KEY-----") {
+			privateKey = true
+			lines[index] = "[REDACTED PRIVATE KEY]"
+			continue
+		}
+		if privateKey {
+			if strings.Contains(line, "-----END ") && strings.Contains(line, "PRIVATE KEY-----") {
+				privateKey = false
+			}
+			lines[index] = "[REDACTED PRIVATE KEY]"
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 func (w *Worker) Discard(ctx context.Context, runID string) error {
 	run, err := w.Store.Run(ctx, runID)
