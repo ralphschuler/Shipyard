@@ -28,6 +28,13 @@ func resolveLanguage(accountPreference string, r *http.Request) string {
 // translations is also used by tests and future server-rendered templates.
 // English is the fallback language for a missing key.
 var translations = map[string]map[string]string{
+	"de": {
+		"nav.overview": "Übersicht", "nav.projects": "Projekte", "nav.boards": "Boards", "nav.agents": "Agents", "nav.automations": "Automationen", "nav.skills": "Skills", "nav.runs": "Runs", "nav.audit": "Audit", "nav.settings": "Einstellungen",
+		"settings.title": "Einstellungen", "settings.appearance": "Darstellung & Bedienung", "settings.language": "Sprache", "settings.uiLanguage": "Oberflächensprache", "settings.save": "Einstellungen speichern", "settings.accountSaved": "Die Auswahl wird für dein Benutzerkonto gespeichert.",
+		"auth.signIn": "Anmelden", "auth.welcome": "Willkommen an Bord", "auth.email": "E-Mail-Adresse", "auth.password": "Passwort", "auth.submit": "Anmelden",
+		"dashboard.title": "Arbeitsfluss", "dashboard.boards": "Boards verwalten", "dashboard.tasks": "Tasks", "dashboard.open": "offen", "dashboard.completed": "erledigt",
+		"common.cancel": "Abbrechen", "common.delete": "Löschen", "common.save": "Speichern",
+	},
 	"en": {
 		"nav.overview": "Overview", "nav.projects": "Projects", "nav.boards": "Boards", "nav.agents": "Agents", "nav.automations": "Automations", "nav.skills": "Skills", "nav.runs": "Runs", "nav.audit": "Audit", "nav.settings": "Settings",
 		"settings.title": "Settings", "settings.appearance": "Appearance & interaction", "settings.language": "Language", "settings.uiLanguage": "Interface language", "settings.save": "Save settings", "settings.accountSaved": "The selection is saved for your account.",

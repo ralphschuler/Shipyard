@@ -325,7 +325,7 @@ func webTemplateFunctions() template.FuncMap {
 			}
 		}
 		return out
-	}, "auditAction": auditAction, "auditStatus": auditStatus, "auditStatusClass": auditStatusClass, "runStatus": runStatusLabel, "gateStatus": gateStatusLabel, "excerpt": excerpt, "taskCount": func(count int) string {
+	}, "tr": translate, "auditAction": auditAction, "auditStatus": auditStatus, "auditStatusClass": auditStatusClass, "runStatus": runStatusLabel, "gateStatus": gateStatusLabel, "excerpt": excerpt, "taskCount": func(count int) string {
 		if count == 1 {
 			return "1 Aufgabe"
 		}
@@ -677,7 +677,7 @@ func (a *App) skills(w http.ResponseWriter, r *http.Request) {
 			catalogError = "Der skills.sh-Katalog ist gerade nicht erreichbar. Bitte erneut versuchen."
 		}
 	}
-	a.render(w, "skills.html", map[string]any{"Installed": installed, "Catalog": catalog, "Query": query, "CatalogError": catalogError})
+	a.render(r, w, "skills.html", map[string]any{"Installed": installed, "Catalog": catalog, "Query": query, "CatalogError": catalogError})
 }
 func (a *App) installSkillsSH(w http.ResponseWriter, r *http.Request) {
 	if e := skillcatalog.InstallSkillsSH(r.Context(), a.store, r.FormValue("source"), r.FormValue("slug")); e != nil {
@@ -757,7 +757,7 @@ func (a *App) agents(w http.ResponseWriter, r *http.Request) {
 		}
 		views = append(views, agentView{Agent: agent, Skills: assigned})
 	}
-	a.render(w, "agents.html", map[string]any{"Agents": views, "Skills": skills})
+	a.render(r, w, "agents.html", map[string]any{"Agents": views, "Skills": skills})
 }
 func (a *App) createAgent(w http.ResponseWriter, r *http.Request) {
 	if e := r.ParseForm(); e != nil {
@@ -887,7 +887,7 @@ func (a *App) automations(w http.ResponseWriter, r *http.Request) {
 	for _, rule := range rules {
 		views = append(views, ruleView{AutomationRule: rule, BoardName: boardNames[rule.BoardID], ColumnName: columnNames[rule.TargetColumnID], LabelName: labelNames[rule.LabelID], AgentName: agentNames[rule.AgentID], SuccessColumnName: columnNames[rule.SuccessColumnID], FailureColumnName: columnNames[rule.FailureColumnID]})
 	}
-	a.render(w, "automations.html", map[string]any{"Rules": views, "Boards": boards, "Agents": agents, "Columns": options, "Labels": labels})
+	a.render(r, w, "automations.html", map[string]any{"Rules": views, "Boards": boards, "Agents": agents, "Columns": options, "Labels": labels})
 }
 func (a *App) automationPreview(w http.ResponseWriter, r *http.Request) {
 	boardID, columnID := strings.TrimSpace(r.URL.Query().Get("board_id")), strings.TrimSpace(r.URL.Query().Get("target_column_id"))
@@ -991,7 +991,7 @@ func (a *App) schedules(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	a.render(w, "schedules.html", map[string]any{"Boards": boards, "Agents": agents, "Schedules": schedules})
+	a.render(r, w, "schedules.html", map[string]any{"Boards": boards, "Agents": agents, "Schedules": schedules})
 }
 func (a *App) createSchedule(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(r.FormValue("agent_id")) == "" {
@@ -1024,7 +1024,7 @@ func (a *App) webhooks(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	a.render(w, "webhooks.html", map[string]any{"Webhooks": hooks})
+	a.render(r, w, "webhooks.html", map[string]any{"Webhooks": hooks})
 }
 func (a *App) addWebhook(w http.ResponseWriter, r *http.Request) {
 	if err := validate.WebhookURL(r.FormValue("url")); err != nil {
@@ -1052,7 +1052,7 @@ func (a *App) setWebhookEnabled(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/webhooks", http.StatusSeeOther)
 }
 func (a *App) agentTemplates(w http.ResponseWriter, r *http.Request) {
-	a.render(w, "agent-templates.html", nil)
+	a.render(r, w, "agent-templates.html", nil)
 }
 func (a *App) createTemplateAgent(w http.ResponseWriter, r *http.Request) {
 	kind := r.FormValue("kind")
@@ -1079,7 +1079,7 @@ func (a *App) providerSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	a.render(w, "providers.html", map[string]any{"Providers": p})
+	a.render(r, w, "providers.html", map[string]any{"Providers": p})
 }
 func (a *App) agentPolicy(w http.ResponseWriter, r *http.Request) {
 	prefix, suffix, err := a.store.AgentPromptPolicy(r.Context())
@@ -1087,7 +1087,7 @@ func (a *App) agentPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	a.render(w, "agent-policy.html", agentPolicyPage{Prefix: prefix, Suffix: suffix})
+	a.render(r, w, "agent-policy.html", agentPolicyPage{Prefix: prefix, Suffix: suffix})
 }
 func (a *App) saveAgentPolicy(w http.ResponseWriter, r *http.Request) {
 	if err := a.store.UpdateAgentPromptPolicy(r.Context(), r.FormValue("prompt_prefix"), r.FormValue("prompt_suffix")); err != nil {
@@ -1107,7 +1107,7 @@ func (a *App) appearance(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	a.render(w, "appearance.html", appearancePage{Preferences: prefs})
+	a.render(r, w, "appearance.html", appearancePage{Preferences: prefs})
 }
 func (a *App) saveAppearance(w http.ResponseWriter, r *http.Request) {
 	user, ok := currentUser(r.Context())
@@ -1171,7 +1171,7 @@ func (a *App) integrations(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Integrationen konnten nicht geladen werden.", http.StatusInternalServerError)
 		return
 	}
-	a.render(w, "integrations.html", integrationsPage{Connections: connections})
+	a.render(r, w, "integrations.html", integrationsPage{Connections: connections})
 }
 func (a *App) createIntegration(w http.ResponseWriter, r *http.Request) {
 	u, ok := currentUser(r.Context())
@@ -1255,16 +1255,21 @@ func (a *App) accountLanguage(r *http.Request) string {
 	return language(r)
 }
 
-func (a *App) render(w http.ResponseWriter, name string, data any) {
+func (a *App) render(r *http.Request, w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	var page bytes.Buffer
 	if e := a.templates.ExecuteTemplate(&page, name, data); e != nil {
 		http.Error(w, e.Error(), 500)
 		return
 	}
+	// Account preferences are authoritative for every server-rendered view.
+	// This also covers templates that do not carry a page-specific Lang field.
+	lang := a.accountLanguage(r)
+	html := strings.Replace(page.String(), `<html lang="de">`, `<html lang="`+lang+`">`, 1)
+	html = strings.Replace(html, `<html lang="en">`, `<html lang="`+lang+`">`, 1)
 	// Every server-rendered view exposes one stable swap boundary. HTMX uses
 	// it for mutations today and for fragment navigation in the next layer.
-	html := strings.Replace(page.String(), "<main ", `<main id="app-main" `, 1)
+	html = strings.Replace(html, "<main ", `<main id="app-main" `, 1)
 	html = strings.Replace(html, "<main>", `<main id="app-main">`, 1)
 	_, _ = io.WriteString(w, html)
 }
@@ -1279,7 +1284,7 @@ func (a *App) account(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	a.render(w, "account.html", map[string]any{"User": u, "Tokens": tokens})
+	a.render(r, w, "account.html", map[string]any{"User": u, "Tokens": tokens})
 }
 func (a *App) createAccountToken(w http.ResponseWriter, r *http.Request) {
 	u, ok := currentUser(r.Context())
@@ -1299,7 +1304,7 @@ func (a *App) createAccountToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tokens, _ := a.store.APITokens(r.Context(), u.ID)
-	a.render(w, "account.html", map[string]any{"User": u, "Tokens": tokens, "NewToken": raw, "Created": token})
+	a.render(r, w, "account.html", map[string]any{"User": u, "Tokens": tokens, "NewToken": raw, "Created": token})
 }
 func (a *App) revokeAccountToken(w http.ResponseWriter, r *http.Request) {
 	u, ok := currentUser(r.Context())
@@ -1319,7 +1324,7 @@ func (a *App) boards(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	a.render(w, "boards.html", map[string]any{"Boards": bs, "Templates": store.BoardTemplates(), "Lang": a.accountLanguage(r)})
+	a.render(r, w, "boards.html", map[string]any{"Boards": bs, "Templates": store.BoardTemplates(), "Lang": a.accountLanguage(r)})
 }
 func (a *App) projects(w http.ResponseWriter, r *http.Request) {
 	projects, err := a.store.Projects(r.Context())
@@ -1337,7 +1342,7 @@ func (a *App) projects(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	a.render(w, "projects.html", map[string]any{"Projects": projects, "Boards": boards, "Groups": groups})
+	a.render(r, w, "projects.html", map[string]any{"Projects": projects, "Boards": boards, "Groups": groups})
 }
 func (a *App) createProjectGroup(w http.ResponseWriter, r *http.Request) {
 	_, err := a.store.CreateProjectGroup(r.Context(), r.FormValue("name"), r.FormValue("description"), r.FormValue("color"), r.Form["project_ids"])
@@ -1528,7 +1533,7 @@ func (a *App) dashboard(w http.ResponseWriter, r *http.Request) {
 			max = m.Count
 		}
 	}
-	a.render(w, "dashboard.html", map[string]any{"Dashboard": d, "Max": max})
+	a.render(r, w, "dashboard.html", map[string]any{"Dashboard": d, "Max": max})
 }
 
 // dashboardAPI is the first stable UI API used by the React/shadcn client.
@@ -1823,7 +1828,7 @@ func (a *App) board(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	a.render(w, "board.html", p)
+	a.render(r, w, "board.html", p)
 }
 func (a *App) updateBoard(w http.ResponseWriter, r *http.Request) {
 	if err := a.store.UpdateBoard(r.Context(), r.PathValue("id"), r.FormValue("name")); err != nil {
@@ -1847,7 +1852,7 @@ func (a *App) createTask(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		p, _ := a.page(r.Context(), r.PathValue("id"), e.Error(), a.accountLanguage(r))
-		a.render(w, "board.html", p)
+		a.render(r, w, "board.html", p)
 		return
 	}
 	if e = a.store.SetLabels(r.Context(), task.ID, r.Form["label_ids"]); e != nil {
@@ -1886,7 +1891,7 @@ func (a *App) workflow(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	a.render(w, "workflow.html", p)
+	a.render(r, w, "workflow.html", p)
 }
 func (a *App) addTransition(w http.ResponseWriter, r *http.Request) {
 	_, e := a.store.AddTransition(r.Context(), r.PathValue("id"), r.FormValue("from"), r.FormValue("to"), r.FormValue("action_name"))
@@ -1963,7 +1968,7 @@ func (a *App) task(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	a.render(w, "task.html", p)
+	a.render(r, w, "task.html", p)
 }
 func (a *App) taskPanel(w http.ResponseWriter, r *http.Request) {
 	p, err := a.taskData(r.Context(), r.PathValue("id"))
@@ -1972,7 +1977,7 @@ func (a *App) taskPanel(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	a.render(w, "task-panel.html", p)
+	a.render(r, w, "task-panel.html", p)
 }
 func (a *App) taskData(ctx context.Context, id string) (taskPage, error) {
 	t, e := a.store.GetTask(ctx, id)
@@ -2171,7 +2176,7 @@ func (a *App) runs(w http.ResponseWriter, r *http.Request) {
 	if hasOlder && len(runs) > 0 {
 		page.OlderCursor = encodeListCursor(runs[len(runs)-1].CreatedAt, runs[len(runs)-1].ID)
 	}
-	a.render(w, "runs.html", page)
+	a.render(r, w, "runs.html", page)
 }
 func (a *App) audit(w http.ResponseWriter, r *http.Request) {
 	before, beforeID, isOlderPage, err := listCursor(r.URL.Query().Get("before"))
@@ -2192,7 +2197,7 @@ func (a *App) audit(w http.ResponseWriter, r *http.Request) {
 	if hasOlder && len(events) > 0 {
 		page.OlderCursor = encodeListCursor(events[len(events)-1].CreatedAt, events[len(events)-1].ID)
 	}
-	a.render(w, "audit.html", page)
+	a.render(r, w, "audit.html", page)
 }
 
 func encodeListCursor(createdAt time.Time, id string) string {
@@ -2238,7 +2243,7 @@ func (a *App) run(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	a.render(w, "run.html", runPage{Run: run, Logs: newRunLogView(logs, truncated, run.ID), Task: task, Delivery: delivery})
+	a.render(r, w, "run.html", runPage{Run: run, Logs: newRunLogView(logs, truncated, run.ID), Task: task, Delivery: delivery})
 }
 func (a *App) runLogs(w http.ResponseWriter, r *http.Request) {
 	run, err := a.store.Run(r.Context(), r.PathValue("id"))
@@ -2263,7 +2268,7 @@ func (a *App) runLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("X-Run-Status", run.Status)
-	a.render(w, "run-log.html", newRunLogView(logs, truncated, run.ID))
+	a.render(r, w, "run-log.html", newRunLogView(logs, truncated, run.ID))
 }
 
 func newRunLogView(entries []domain.RunLog, truncated bool, runID string) runLogView {
@@ -2464,7 +2469,7 @@ func (a *App) moveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Header.Get("HX-Request") == "true" {
-		a.render(w, "task-card.html", t)
+		a.render(r, w, "task-card.html", t)
 		return
 	}
 	http.Redirect(w, r, "/boards/"+t.BoardID, 303)

@@ -344,7 +344,7 @@ func (a *App) Protected(next http.Handler) http.Handler {
 }
 func (a *App) setup(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
-		a.render(w, "setup.html", nil)
+		a.render(r, w, "setup.html", nil)
 		return
 	}
 	has, _ := a.store.HasUsers(r.Context())
@@ -372,7 +372,7 @@ func (a *App) setup(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet || r.Method == http.MethodHead {
-		a.render(w, "login.html", nil)
+		a.render(r, w, "login.html", nil)
 		return
 	}
 	client := loginClient(r)

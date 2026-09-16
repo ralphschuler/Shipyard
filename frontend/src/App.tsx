@@ -1510,7 +1510,14 @@ function Appearance() {
             <legend className="font-medium">{appearanceText("language")}</legend>
             <label className="grid gap-1 text-sm">
               {appearanceText("languageDescription")}
-              <select name="language" value={currentLanguage} onChange={(event) => setSelectedLanguage(normalizeLanguage(event.target.value))}>
+              <select name="language" value={currentLanguage} onChange={(event) => {
+                const next = normalizeLanguage(event.target.value);
+                setSelectedLanguage(next);
+                // Keep the entire React shell in sync before the preference
+                // request completes. The server remains authoritative after
+                // reload/login, while this event makes the switch immediate.
+                window.dispatchEvent(new CustomEvent("shipyard:language-change", { detail: next }));
+              }}>
                 <option value="de">{appearanceText("german")}</option>
                 <option value="en">{appearanceText("english")}</option>
               </select>
