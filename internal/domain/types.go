@@ -206,6 +206,13 @@ type UsageReport struct {
 	RawUsage                                                       []byte
 	CostCalculatedAt                                               *time.Time
 }
+type UsagePrice struct {
+	ID, Provider, Model, ServiceTier, Version         string
+	ValidFrom                                         time.Time
+	ValidUntil                                        *time.Time
+	Input, Output, CachedInput, CacheWrite, Reasoning *int64
+	CreatedAt                                         time.Time
+}
 type Webhook struct {
 	ID, Name, URL, Events             string
 	Enabled                           bool

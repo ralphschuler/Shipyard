@@ -47,6 +47,7 @@ type openAIUsage struct {
 	EstimatedCostMicrousd                                                                        int64
 	NativeCostMicrousd                                                                           *int64
 	APICalls                                                                                     int
+	ServiceTier                                                                                  string
 }
 type responseOutput struct {
 	Type      string `json:"type"`
@@ -231,6 +232,7 @@ func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, pr
 		return "", openAIUsage{}, errors.New("OpenAI-Optionen enthalten ungültige Werte")
 	}
 	client := &http.Client{Timeout: 19 * time.Minute}
+	usageServiceTier := options.ServiceTier
 	request := responseRequest{
 		Model:           provider.Model,
 		Instructions:    "Du bist ein Coding-Agent. Arbeite ausschließlich im zugewiesenen Git-Worktree über run_command. Keine Netzwerkanfragen, keine Pushes, Merges, Releases, Deployments oder dauerhaften Prozesse. Prüfe die Änderung und antworte mit einer kurzen Zusammenfassung.",
@@ -249,6 +251,7 @@ func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, pr
 	}
 	var transcript []string
 	usage := openAIUsage{}
+	usage.ServiceTier = usageServiceTier
 	for round := 0; round < maxOpenAIToolRounds; round++ {
 		result, err := callResponses(ctx, client, endpoint, apiKey, request)
 		if err != nil {
@@ -262,7 +265,10 @@ func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, pr
 		usage.ReasoningTokens += result.Usage.ReasoningTokens
 		usage.TotalTokens += result.Usage.TotalTokens
 		if result.Usage.CostMicrousd != nil {
-			usage.NativeCostMicrousd = result.Usage.CostMicrousd
+			if usage.NativeCostMicrousd == nil {
+				usage.NativeCostMicrousd = new(int64)
+			}
+			*usage.NativeCostMicrousd += *result.Usage.CostMicrousd
 		}
 		var outputs []map[string]string
 		for _, item := range result.Output {

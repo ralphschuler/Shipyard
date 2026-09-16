@@ -73,6 +73,11 @@ type taskPage struct {
 	Changes        []taskChangeView
 }
 
+type usagePricesPage struct {
+	Prices []domain.UsagePrice
+	Error  string
+}
+
 // taskChangeView deliberately excludes prompt and workspace snapshots: those
 // fields can contain provider details or environment values.
 type taskChangeView struct {
@@ -573,6 +578,9 @@ func (a *App) Register(m *http.ServeMux) {
 		http.Redirect(w, r, "/settings/providers", http.StatusSeeOther)
 	})
 	m.HandleFunc("GET /settings/providers", a.providerSettings)
+	m.HandleFunc("GET /settings/prices", a.usagePrices)
+	m.HandleFunc("POST /settings/prices", a.saveUsagePrice)
+	m.HandleFunc("POST /settings/prices/{id}/delete", a.deleteUsagePrice)
 	m.HandleFunc("GET /settings/agent-policy", a.agentPolicy)
 	m.HandleFunc("POST /settings/agent-policy", a.saveAgentPolicy)
 	m.HandleFunc("GET /settings/appearance", a.appearance)
@@ -1165,6 +1173,86 @@ func (a *App) saveProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, "/settings/providers", 303)
 }
+
+func parseMicrousd(value string) (*int64, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || n < 0 {
+		return nil, errors.New("Preis muss eine positive Ganzzahl in Micro-USD pro Million sein")
+	}
+	return &n, nil
+}
+
+func (a *App) usagePrices(w http.ResponseWriter, r *http.Request) {
+	prices, err := a.store.UsagePrices(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	a.render(r, w, "prices.html", usagePricesPage{Prices: prices})
+}
+
+func (a *App) saveUsagePrice(w http.ResponseWriter, r *http.Request) {
+	from, err := time.Parse("2006-01-02", strings.TrimSpace(r.FormValue("valid_from")))
+	if err != nil {
+		http.Error(w, "Gültig ab muss ein Datum sein.", 400)
+		return
+	}
+	var until *time.Time
+	if value := strings.TrimSpace(r.FormValue("valid_until")); value != "" {
+		parsed, parseErr := time.Parse("2006-01-02", value)
+		if parseErr != nil || !parsed.After(from) {
+			http.Error(w, "Gültig bis muss nach Gültig ab liegen.", 400)
+			return
+		}
+		until = &parsed
+	}
+	p := domain.UsagePrice{Provider: strings.TrimSpace(r.FormValue("provider")), Model: strings.TrimSpace(r.FormValue("model")), ServiceTier: strings.TrimSpace(r.FormValue("service_tier")), Version: strings.TrimSpace(r.FormValue("version")), ValidFrom: from}
+	p.ValidUntil = until
+	if p.Provider == "" || p.Model == "" || p.Version == "" {
+		http.Error(w, "Provider, Modell und Version sind Pflichtfelder.", 400)
+		return
+	}
+	fields := []**int64{&p.Input, &p.Output, &p.CachedInput, &p.CacheWrite, &p.Reasoning}
+	values := []string{"input", "output", "cached_input", "cache_write", "reasoning"}
+	known := 0
+	for i, field := range fields {
+		value, parseErr := parseMicrousd(r.FormValue(values[i]))
+		if parseErr != nil {
+			http.Error(w, parseErr.Error(), 400)
+			return
+		}
+		*field = value
+		if value != nil {
+			known++
+		}
+	}
+	if known == 0 {
+		http.Error(w, "Mindestens eine Tokenrate ist erforderlich.", 400)
+		return
+	}
+	if err := a.store.SaveUsagePrice(r.Context(), p); err != nil {
+		http.Error(w, "Preis konnte nicht gespeichert werden: "+err.Error(), 400)
+		return
+	}
+	if user, ok := currentUser(r.Context()); ok {
+		_ = a.store.RecordAudit(r.Context(), user.ID, "usage_price.created", "usage_price", p.Version, map[string]string{"provider": p.Provider, "model": p.Model, "version": p.Version})
+	}
+	http.Redirect(w, r, "/settings/prices", 303)
+}
+
+func (a *App) deleteUsagePrice(w http.ResponseWriter, r *http.Request) {
+	if err := a.store.DeleteUsagePrice(r.Context(), r.PathValue("id")); err != nil {
+		http.Error(w, "Preis konnte nicht gelöscht werden: "+err.Error(), 400)
+		return
+	}
+	if user, ok := currentUser(r.Context()); ok {
+		_ = a.store.RecordAudit(r.Context(), user.ID, "usage_price.deleted", "usage_price", r.PathValue("id"), nil)
+	}
+	http.Redirect(w, r, "/settings/prices", 303)
+}
 func (a *App) testProvider(w http.ResponseWriter, r *http.Request) {
 	result, err := a.worker.CheckProvider(r.Context(), r.PathValue("provider"))
 	if err != nil {
@@ -1554,13 +1642,49 @@ func (a *App) dashboard(w http.ResponseWriter, r *http.Request) {
 // It deliberately returns the same domain projection as the legacy view so
 // the migration does not duplicate business or metric logic in JavaScript.
 func (a *App) dashboardAPI(w http.ResponseWriter, r *http.Request) {
-	dashboard, err := a.store.Dashboard(r.Context())
+	from, to, err := dashboardRange(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	dashboard, err := a.store.DashboardFiltered(r.Context(), from, to, r.URL.Query().Get("provider"), r.URL.Query().Get("model"), r.URL.Query().Get("agent"), r.URL.Query().Get("board"))
 	if err != nil {
 		http.Error(w, "Dashboard-Daten sind momentan nicht verfügbar.", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(dashboard)
+}
+
+func dashboardRange(r *http.Request) (*time.Time, *time.Time, error) {
+	value := r.URL.Query().Get("range")
+	if value == "" || value == "all" {
+		return nil, nil, nil
+	}
+	now := time.Now()
+	to := now
+	if value == "today" {
+		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		return &start, &to, nil
+	}
+	if value == "7d" || value == "30d" {
+		days := 7
+		if value == "30d" {
+			days = 30
+		}
+		start := now.AddDate(0, 0, -days)
+		return &start, &to, nil
+	}
+	if value == "custom" {
+		start, startErr := time.Parse("2006-01-02", r.URL.Query().Get("from"))
+		end, endErr := time.Parse("2006-01-02", r.URL.Query().Get("to"))
+		if startErr != nil || endErr != nil || !end.After(start) {
+			return nil, nil, errors.New("Benutzerdefinierter Zeitraum ist ungültig")
+		}
+		end = end.AddDate(0, 0, 1)
+		return &start, &end, nil
+	}
+	return nil, nil, errors.New("Unbekannter Dashboard-Zeitraum")
 }
 
 func writeAPI(w http.ResponseWriter, value any, err error) {

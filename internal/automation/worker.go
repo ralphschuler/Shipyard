@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"taskboard/internal/domain"
 	"taskboard/internal/store"
+	"taskboard/internal/usage"
 	"time"
 )
 
@@ -1667,6 +1668,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		if providerErr != nil {
 			reason = providerErr.Error()
 		}
+		_ = w.Store.SetRunUsage(ctx, run.ID, domain.UsageReport{Provider: providerName, Status: "incomplete", CostSource: "unknown", RawUsage: []byte(`{"status":"provider_unavailable"}`)})
 		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
 		_ = w.finish(ctx, run, "failed")
 		return
@@ -1677,14 +1679,17 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	var inputTokens, outputTokens, cachedInputTokens, cacheWriteTokens, reasoningTokens, apiCalls int
 	var estimatedCostMicrousd int64
 	var nativeCostMicrousd *int64
+	var serviceTier string
 	if provider.Provider == "openai" {
 		text, usage, responseErr := runOpenAIResponses(runCtx, provider, prompt, run.WorkspaceSnapshot)
 		out, tokenUsage, inputTokens, outputTokens, estimatedCostMicrousd, err = []byte(text), usage.TotalTokens, usage.InputTokens, usage.OutputTokens, usage.EstimatedCostMicrousd, responseErr
 		cachedInputTokens, cacheWriteTokens, reasoningTokens = usage.CachedInputTokens, usage.CacheWriteTokens, usage.ReasoningTokens
 		apiCalls, nativeCostMicrousd = usage.APICalls, usage.NativeCostMicrousd
+		serviceTier = usage.ServiceTier
 	} else {
 		command, args, stdin, commandErr := cliInvocation(provider, prompt)
 		if commandErr != nil {
+			_ = w.Store.SetRunUsage(ctx, run.ID, domain.UsageReport{Provider: provider.Provider, Model: provider.Model, Status: "incomplete", CostSource: "unknown", RawUsage: []byte(`{"status":"adapter_configuration_error"}`)})
 			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", commandErr.Error())
 			_ = w.finish(ctx, run, "failed")
 			return
@@ -1713,7 +1718,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	}
 	// Persist the adapter report before lifecycle handling so a timeout or
 	// provider error still leaves the measured partial usage available.
-	partial := domain.UsageReport{Provider: provider.Provider, Model: provider.Model, Status: "unknown", CostSource: "unknown", NativeCostMicrousd: nativeCostMicrousd}
+	partial := domain.UsageReport{Provider: provider.Provider, Model: provider.Model, ServiceTier: serviceTier, Status: "unknown", CostSource: "unknown", NativeCostMicrousd: nativeCostMicrousd}
 	if apiCalls > 0 {
 		partial.APICalls = int64Ptr(int64(apiCalls))
 	}
@@ -1745,9 +1750,17 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	} else if partial.TotalTokens != nil {
 		partial.Status = "complete"
 	}
-	if err == nil && nativeCostMicrousd == nil && provider.Provider == "openai" && estimatedCostMicrousd > 0 {
-		partial.CostSource = "estimated"
-		partial.CalculatedCostMicrousd = &estimatedCostMicrousd
+	if err == nil && nativeCostMicrousd == nil {
+		if price, priceErr := w.Store.ResolveUsagePrice(ctx, partial.Provider, partial.Model, partial.ServiceTier, run.CreatedAt); priceErr == nil {
+			result := usage.Calculate(usage.Report{Provider: partial.Provider, Model: partial.Model, ServiceTier: partial.ServiceTier, InputTokens: partial.InputTokens, OutputTokens: partial.OutputTokens, CachedInputTokens: partial.CachedInputTokens, CacheWriteTokens: partial.CacheWriteTokens, ReasoningTokens: partial.ReasoningTokens, TotalTokens: partial.TotalTokens}, usage.Price{Version: price.Version, Input: price.Input, Output: price.Output, CachedInput: price.CachedInput, CacheWrite: price.CacheWrite, Reasoning: price.Reasoning})
+			if result.Known {
+				partial.CostSource = "estimated"
+				partial.CalculatedCostMicrousd = &result.Microusd
+				partial.PriceVersion = price.Version
+				now := time.Now()
+				partial.CostCalculatedAt = &now
+			}
+		}
 	}
 	_ = w.Store.SetRunUsage(ctx, run.ID, partial)
 	// CLI output has already been copied into append-only run-log records by

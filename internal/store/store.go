@@ -197,6 +197,31 @@ func (s *Store) RecordAudit(ctx context.Context, userID, kind, resourceType, res
 	return err
 }
 
+func (s *Store) UsagePrices(ctx context.Context) ([]domain.UsagePrice, error) {
+	rows, err := s.DB.Query(ctx, `SELECT id::text,provider,model,service_tier,version,valid_from,valid_until,input_microusd_per_million,output_microusd_per_million,cached_input_microusd_per_million,cache_write_microusd_per_million,reasoning_microusd_per_million,created_at FROM usage_price_catalog ORDER BY provider,model,service_tier,valid_from DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[domain.UsagePrice])
+}
+
+func (s *Store) SaveUsagePrice(ctx context.Context, p domain.UsagePrice) error {
+	_, err := s.DB.Exec(ctx, `INSERT INTO usage_price_catalog(provider,model,service_tier,valid_from,valid_until,input_microusd_per_million,output_microusd_per_million,cached_input_microusd_per_million,cache_write_microusd_per_million,reasoning_microusd_per_million,version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, p.Provider, p.Model, p.ServiceTier, p.ValidFrom, p.ValidUntil, p.Input, p.Output, p.CachedInput, p.CacheWrite, p.Reasoning, p.Version)
+	return err
+}
+
+func (s *Store) DeleteUsagePrice(ctx context.Context, id string) error {
+	_, err := s.DB.Exec(ctx, `DELETE FROM usage_price_catalog WHERE id=$1`, id)
+	return err
+}
+
+func (s *Store) ResolveUsagePrice(ctx context.Context, provider, model, tier string, at time.Time) (domain.UsagePrice, error) {
+	var p domain.UsagePrice
+	err := s.DB.QueryRow(ctx, `SELECT id::text,provider,model,service_tier,version,valid_from,valid_until,input_microusd_per_million,output_microusd_per_million,cached_input_microusd_per_million,cache_write_microusd_per_million,reasoning_microusd_per_million,created_at FROM usage_price_catalog WHERE provider=$1 AND model=$2 AND service_tier=$3 AND valid_from <= $4 AND (valid_until IS NULL OR valid_until > $4) ORDER BY valid_from DESC LIMIT 1`, provider, model, tier, at).Scan(&p.ID, &p.Provider, &p.Model, &p.ServiceTier, &p.Version, &p.ValidFrom, &p.ValidUntil, &p.Input, &p.Output, &p.CachedInput, &p.CacheWrite, &p.Reasoning, &p.CreatedAt)
+	return p, err
+}
+
 func (s *Store) AuditEvents(ctx context.Context, limit int) ([]domain.AuditEvent, error) {
 	return s.AuditEventsBefore(ctx, limit, nil, "")
 }
@@ -724,6 +749,27 @@ func (s *Store) Dashboard(c context.Context) (domain.Dashboard, error) {
 	}
 	defer completed.Close()
 	d.CompletedSeries, err = pgx.CollectRows(completed, pgx.RowToStructByPos[domain.Metric])
+	return d, err
+}
+
+// DashboardFiltered keeps the operational dashboard stable while allowing
+// telemetry consumers to request a reproducible historical slice.
+func (s *Store) DashboardFiltered(c context.Context, from, to *time.Time, provider, model, agent, board string) (domain.Dashboard, error) {
+	d, err := s.Dashboard(c)
+	if err != nil || (from == nil && to == nil && provider == "" && model == "" && agent == "" && board == "") {
+		return d, err
+	}
+	where := `WHERE ($1::timestamptz IS NULL OR r.created_at >= $1) AND ($2::timestamptz IS NULL OR r.created_at < $2) AND ($3='' OR r.usage_provider=$3) AND ($4='' OR r.usage_model=$4) AND (NULLIF($5,'')::uuid IS NULL OR r.agent_id=NULLIF($5,'')::uuid) AND (NULLIF($6,'')::uuid IS NULL OR r.task_id IN (SELECT id FROM tasks WHERE board_id=NULLIF($6,'')::uuid))`
+	args := []any{from, to, provider, model, agent, board}
+	if err = s.DB.QueryRow(c, `SELECT COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='reported'),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='estimated'),0),count(*) FILTER (WHERE r.cost_source IN ('included','unknown')),COALESCE(sum(COALESCE(r.usage_total_tokens,r.token_usage)) FILTER (WHERE r.cost_source IN ('included','unknown')),0) FROM agent_runs r `+where, args...).Scan(&d.KnownActualCostMicrousd, &d.EstimatedCostMicrousdV2, &d.IncludedOrUnknownRuns, &d.IncludedOrUnknownTokens); err != nil {
+		return d, err
+	}
+	rows, err := s.DB.Query(c, `SELECT 'provider',COALESCE(NULLIF(r.usage_provider,''),'unknown'),COALESCE(sum(COALESCE(r.usage_total_tokens,r.token_usage)),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='reported'),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='estimated'),0) FROM agent_runs r `+where+` GROUP BY r.usage_provider UNION ALL SELECT 'model',COALESCE(NULLIF(r.usage_model,''),'unknown'),COALESCE(sum(COALESCE(r.usage_total_tokens,r.token_usage)),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='reported'),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='estimated'),0) FROM agent_runs r `+where+` GROUP BY r.usage_model UNION ALL SELECT 'agent',a.name,COALESCE(sum(COALESCE(r.usage_total_tokens,r.token_usage)),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='reported'),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='estimated'),0) FROM agent_runs r JOIN agents a ON a.id=r.agent_id `+where+` GROUP BY a.name UNION ALL SELECT 'board',b.name,COALESCE(sum(COALESCE(r.usage_total_tokens,r.token_usage)),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='reported'),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='estimated'),0) FROM agent_runs r JOIN tasks t ON t.id=r.task_id JOIN boards b ON b.id=t.board_id `+where+` GROUP BY b.name ORDER BY 1,2`, args...)
+	if err != nil {
+		return d, err
+	}
+	defer rows.Close()
+	d.UsageByDimension, err = pgx.CollectRows(rows, pgx.RowToStructByPos[domain.UsageMetric])
 	return d, err
 }
 
