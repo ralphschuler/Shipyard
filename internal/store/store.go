@@ -657,12 +657,24 @@ func (s *Store) Dashboard(c context.Context) (domain.Dashboard, error) {
 	if err = s.DB.QueryRow(c, `SELECT COALESCE(sum(estimated_cost_microusd),0) FROM agent_runs`).Scan(&d.EstimatedCostMicrousd); err != nil {
 		return d, err
 	}
+	if err = s.DB.QueryRow(c, `SELECT COALESCE(sum(calculated_cost_microusd) FILTER (WHERE cost_source='reported'),0), COALESCE(sum(calculated_cost_microusd) FILTER (WHERE cost_source='estimated'),0), count(*) FILTER (WHERE cost_source IN ('included','unknown')), COALESCE(sum(COALESCE(usage_total_tokens, token_usage)) FILTER (WHERE cost_source IN ('included','unknown')),0) FROM agent_runs`).Scan(&d.KnownActualCostMicrousd, &d.EstimatedCostMicrousdV2, &d.IncludedOrUnknownRuns, &d.IncludedOrUnknownTokens); err != nil {
+		return d, err
+	}
 	costs, err := s.DB.Query(c, `SELECT a.name,COALESCE(sum(r.estimated_cost_microusd),0) FROM agent_runs r JOIN agents a ON a.id=r.agent_id GROUP BY a.id,a.name HAVING COALESCE(sum(r.estimated_cost_microusd),0)>0 ORDER BY 2 DESC,1`)
 	if err != nil {
 		return d, err
 	}
 	defer costs.Close()
 	d.CostByAgent, err = pgx.CollectRows(costs, pgx.RowToStructByPos[domain.CostMetric])
+	if err != nil {
+		return d, err
+	}
+	dimensions, err := s.DB.Query(c, `SELECT 'provider',COALESCE(NULLIF(usage_provider,''),'unknown'),COALESCE(sum(COALESCE(usage_total_tokens,token_usage)),0),COALESCE(sum(calculated_cost_microusd) FILTER (WHERE cost_source='reported'),0),COALESCE(sum(calculated_cost_microusd) FILTER (WHERE cost_source='estimated'),0) FROM agent_runs GROUP BY usage_provider UNION ALL SELECT 'model',COALESCE(NULLIF(usage_model,''),'unknown'),COALESCE(sum(COALESCE(usage_total_tokens,token_usage)),0),COALESCE(sum(calculated_cost_microusd) FILTER (WHERE cost_source='reported'),0),COALESCE(sum(calculated_cost_microusd) FILTER (WHERE cost_source='estimated'),0) FROM agent_runs GROUP BY usage_model UNION ALL SELECT 'agent',a.name,COALESCE(sum(COALESCE(r.usage_total_tokens,r.token_usage)),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='reported'),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='estimated'),0) FROM agent_runs r JOIN agents a ON a.id=r.agent_id GROUP BY a.name ORDER BY 1,2`)
+	if err != nil {
+		return d, err
+	}
+	defer dimensions.Close()
+	d.UsageByDimension, err = pgx.CollectRows(dimensions, pgx.RowToStructByPos[domain.UsageMetric])
 	if err != nil {
 		return d, err
 	}
@@ -2026,6 +2038,17 @@ func (s *Store) RunDelivery(c context.Context, id string) (domain.RunDelivery, e
 	var d domain.RunDelivery
 	err := s.DB.QueryRow(c, "SELECT diff_summary,gate_status,gate_output,input_tokens,output_tokens,token_usage,estimated_cost_microusd,duration_seconds,applied_at FROM agent_runs WHERE id=$1", id).Scan(&d.DiffSummary, &d.GateStatus, &d.GateOutput, &d.InputTokens, &d.OutputTokens, &d.TokenUsage, &d.EstimatedCostMicrousd, &d.DurationSeconds, &d.AppliedAt)
 	return d, err
+}
+
+func (s *Store) RunUsage(c context.Context, id string) (domain.UsageReport, error) {
+	var u domain.UsageReport
+	err := s.DB.QueryRow(c, `SELECT usage_provider,usage_model,usage_service_tier,usage_status,cost_source,COALESCE(price_version,''),usage_api_calls,usage_input_tokens,usage_output_tokens,usage_cached_input_tokens,usage_cache_write_tokens,usage_reasoning_tokens,usage_total_tokens,native_cost_microusd,calculated_cost_microusd,COALESCE(raw_usage,'{}'::jsonb),cost_calculated_at FROM agent_runs WHERE id=$1`, id).Scan(&u.Provider, &u.Model, &u.ServiceTier, &u.Status, &u.CostSource, &u.PriceVersion, &u.APICalls, &u.InputTokens, &u.OutputTokens, &u.CachedInputTokens, &u.CacheWriteTokens, &u.ReasoningTokens, &u.TotalTokens, &u.NativeCostMicrousd, &u.CalculatedCostMicrousd, &u.RawUsage, &u.CostCalculatedAt)
+	return u, err
+}
+
+func (s *Store) SetRunUsage(c context.Context, id string, u domain.UsageReport) error {
+	_, err := s.DB.Exec(c, `UPDATE agent_runs SET usage_provider=$2,usage_model=$3,usage_service_tier=$4,usage_status=$5,cost_source=$6,price_version=NULLIF($7,''),usage_api_calls=$8,usage_input_tokens=$9,usage_output_tokens=$10,usage_cached_input_tokens=$11,usage_cache_write_tokens=$12,usage_reasoning_tokens=$13,usage_total_tokens=$14,native_cost_microusd=$15,calculated_cost_microusd=$16,raw_usage=$17,cost_calculated_at=$18 WHERE id=$1`, id, u.Provider, u.Model, u.ServiceTier, u.Status, u.CostSource, u.PriceVersion, u.APICalls, u.InputTokens, u.OutputTokens, u.CachedInputTokens, u.CacheWriteTokens, u.ReasoningTokens, u.TotalTokens, u.NativeCostMicrousd, u.CalculatedCostMicrousd, u.RawUsage, u.CostCalculatedAt)
+	return err
 }
 func (s *Store) SetRunDelivery(c context.Context, id, diff, gate, output string, inputTokens, outputTokens, tokens int, estimatedCostMicrousd int64, duration int) error {
 	_, err := s.DB.Exec(c, "UPDATE agent_runs SET diff_summary=$2,gate_status=$3,gate_output=$4,input_tokens=$5,output_tokens=$6,token_usage=$7,estimated_cost_microusd=$8,duration_seconds=$9 WHERE id=$1", id, diff, gate, output, inputTokens, outputTokens, tokens, estimatedCostMicrousd, duration)

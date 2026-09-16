@@ -68,7 +68,8 @@
       {{end}}
 
       <section class="workflow-panel dashboard-section cost-panel">
-        <header><div><p class="section-kicker">Budget</p><h2>Geschätzte Agent-Kosten</h2></div><p>{{usd .Dashboard.EstimatedCostMicrousd}} gesamt</p></header>
+        <header><div><p class="section-kicker">Budget</p><h2>Agent-Kosten</h2></div><p>Ist {{usd .Dashboard.KnownActualCostMicrousd}} · Schätzung {{usd .Dashboard.EstimatedCostMicrousdV2}}</p></header>
+        <p class="panel-summary">{{.Dashboard.IncludedOrUnknownRuns}} Runs ohne verlässlichen Grenzpreis; diese werden nicht als $0 gewertet.</p>
         <div class="bar-chart">{{range .Dashboard.CostByAgent}}<div class="bar-row"><span>{{.Name}}</span><div><i style="width:{{costPct .AmountMicrousd $.Dashboard.EstimatedCostMicrousd}}%"></i></div><strong>{{usd .AmountMicrousd}}</strong></div>{{else}}<p class="empty-state">Noch keine Kostenraten oder API-Runs erfasst.</p>{{end}}</div>
       </section>
 
