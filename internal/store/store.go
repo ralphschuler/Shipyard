@@ -2278,7 +2278,16 @@ func (s *Store) AcceptedRunCommitSHAs(c context.Context, source string) ([]strin
 
 func (s *Store) RunUsage(c context.Context, id string) (domain.UsageReport, error) {
 	var u domain.UsageReport
-	err := s.DB.QueryRow(c, `SELECT usage_provider,usage_model,usage_service_tier,usage_status,cost_source,COALESCE(price_version,''),usage_api_calls,usage_input_tokens,usage_output_tokens,usage_cached_input_tokens,usage_cache_write_tokens,usage_reasoning_tokens,usage_total_tokens,native_cost_microusd,calculated_cost_microusd,COALESCE(raw_usage,'{}'::jsonb),cost_calculated_at FROM agent_runs WHERE id=$1`, id).Scan(&u.Provider, &u.Model, &u.ServiceTier, &u.Status, &u.CostSource, &u.PriceVersion, &u.APICalls, &u.InputTokens, &u.OutputTokens, &u.CachedInputTokens, &u.CacheWriteTokens, &u.ReasoningTokens, &u.TotalTokens, &u.NativeCostMicrousd, &u.CalculatedCostMicrousd, &u.RawUsage, &u.CostCalculatedAt)
+	// token_usage is the pre-telemetry column. Keep it visible for legacy
+	// runs, but mark the report incomplete: it contains no reliable token
+	// class breakdown and must not become a synthetic cost estimate.
+	err := s.DB.QueryRow(c, `SELECT usage_provider,usage_model,usage_service_tier,
+		CASE WHEN usage_total_tokens IS NULL AND token_usage > 0 THEN 'incomplete' ELSE usage_status END,
+		cost_source,COALESCE(price_version,''),usage_api_calls,usage_input_tokens,usage_output_tokens,
+		usage_cached_input_tokens,usage_cache_write_tokens,usage_reasoning_tokens,
+		COALESCE(usage_total_tokens,NULLIF(token_usage,0)),native_cost_microusd,calculated_cost_microusd,
+		COALESCE(raw_usage,'{}'::jsonb),cost_calculated_at
+		FROM agent_runs WHERE id=$1`, id).Scan(&u.Provider, &u.Model, &u.ServiceTier, &u.Status, &u.CostSource, &u.PriceVersion, &u.APICalls, &u.InputTokens, &u.OutputTokens, &u.CachedInputTokens, &u.CacheWriteTokens, &u.ReasoningTokens, &u.TotalTokens, &u.NativeCostMicrousd, &u.CalculatedCostMicrousd, &u.RawUsage, &u.CostCalculatedAt)
 	return u, err
 }
 
