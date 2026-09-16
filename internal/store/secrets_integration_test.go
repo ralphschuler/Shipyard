@@ -13,27 +13,27 @@ func TestSecretAssignmentSerializesWithReplacement(t *testing.T) {
 	s := integrationStore(t)
 	t.Setenv("SHIPYARD_SECRET_KEY", "integration-secret-key")
 	ctx := context.Background()
-	suffix := time.Now().UTC().Format("20060102150405.000000000")
+	suffix := time.Now().UTC().Format("20060102150405000000000")
 	agent, err := s.CreateAgent(ctx, "Secret lock agent "+suffix, "integration", "", "", "", t.TempDir(), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.DeleteAgent(ctx, agent.ID) })
 
-	active, err := s.CreateSecret(ctx, "integration", "active-"+suffix, "", "LOCK_TEST_TOKEN", "active-value")
+	active, err := s.CreateSecret(ctx, "", "active-"+suffix, "", "LOCK_TEST_TOKEN", "active-value")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = s.DeleteSecret(ctx, "integration", active.ID) })
-	if err = s.SetSecretAgents(ctx, "integration", active.ID, []string{agent.ID}); err != nil {
+	t.Cleanup(func() { _ = s.DeleteSecret(ctx, "", active.ID) })
+	if err = s.SetSecretAgents(ctx, "", active.ID, []string{agent.ID}); err != nil {
 		t.Fatal(err)
 	}
-	target, err := s.CreateSecret(ctx, "integration", "target-"+suffix, "", "LOCK_TEST_TOKEN", "target-value")
+	target, err := s.CreateSecret(ctx, "", "target-"+suffix, "", "TARGET_TEST_TOKEN", "target-value")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = s.DeleteSecret(ctx, "integration", target.ID) })
-	if err = s.RevokeSecret(ctx, "integration", target.ID); err != nil {
+	t.Cleanup(func() { _ = s.DeleteSecret(ctx, "", target.ID) })
+	if err = s.RevokeSecret(ctx, "", target.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -49,7 +49,7 @@ func TestSecretAssignmentSerializesWithReplacement(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		result <- s.SetSecretAgents(ctx, "integration", target.ID, []string{agent.ID})
+		result <- s.SetSecretAgents(ctx, "", target.ID, []string{agent.ID})
 	}()
 	select {
 	case err = <-result:
@@ -63,14 +63,14 @@ func TestSecretAssignmentSerializesWithReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err = s.ReplaceSecret(ctx, "integration", target.ID, "target-replacement"); err == nil {
-		t.Fatal("replacement unexpectedly ignored the assignment conflict")
+	if err = s.ReplaceSecret(ctx, "", target.ID, "target-replacement"); err != nil {
+		t.Fatalf("replacement failed after serialized assignment: %v", err)
 	}
 	values, err := s.SecretValuesForAgent(ctx, agent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(values) != 1 || values[0].ID != active.ID || values[0].Value != "active-value" {
+	if len(values) != 2 || values[0].ID != active.ID || values[0].Value != "active-value" || values[1].ID != target.ID || values[1].Value != "target-replacement" {
 		t.Fatalf("concurrent assignment/reactivation exposed an invalid active set: %#v", values)
 	}
 	if lockedID != target.ID {

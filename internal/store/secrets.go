@@ -176,7 +176,7 @@ func (s *Store) SetSecretAgents(ctx context.Context, actor, secretID string, age
 	lockKeys := append([]string(nil), normalizedIDs...)
 	sort.Strings(lockKeys)
 	for _, id := range lockKeys {
-		if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", id+"\x00"+envName); err != nil {
+		if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", id+"|"+envName); err != nil {
 			return err
 		}
 	}
@@ -262,7 +262,7 @@ func (s *Store) ReplaceSecret(ctx context.Context, actor, secretID, value string
 	}
 	sort.Strings(agentIDs)
 	for _, agentID := range agentIDs {
-		if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", agentID+"\x00"+envName); err != nil {
+		if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", agentID+"|"+envName); err != nil {
 			return err
 		}
 		var conflict string

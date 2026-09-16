@@ -69,6 +69,31 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 ./deploy/deploy-local.sh
 ```
 
+### Produktionsnahe Automation-Integrationstests
+
+Die PostgreSQL-Integrationstests sind absichtlich opt-in. Für einen
+reproduzierbaren Host- oder CI-Lauf mit echten Listenern und einer getrennten,
+temporären Datenbank steht der Podman-Runner bereit:
+
+```sh
+timeout 120s ./scripts/run-integration-tests.sh
+```
+
+Der Runner startet `docker.io/library/postgres:16-alpine` mit einem zufälligen Loopback-Port und
+der ausschließlich für Tests vorgesehenen Datenbank
+`taskboard_agent_tests`. Er überschreibt nur `SHIPYARD_TEST_DATABASE_URL`;
+`DATABASE_URL` wird nicht verwendet. Die Migrationen werden von den Tests
+ausgeführt, und das automatische Cleanup entfernt Container und temporäre
+Go-Artefakte auch bei einem Abbruch. Das ist der Rollback: Es bleiben weder
+Testdaten noch ein laufender Dienst zurück. Produktionsdaten werden nicht
+berührt.
+
+Der Runner muss außerhalb einer restriktiven Delivery-Sandbox bzw. in einem
+CI-Runner mit erlaubten Loopback-Listenern und Podman-Netzwerk laufen. Ein
+direktes `go test ./...` in der Delivery-Sandbox bleibt deshalb eine explizite
+Umgebungsausnahme, wenn Socket-Listener oder localhost-Verbindungen dort
+verboten sind.
+
 Das Deploy-Skript kompiliert vor dem Stoppen des Dienstes, behält die vorherige
 Binärdatei und stellt sie bei einem fehlgeschlagenen Start oder Health-Check
 automatisch wieder her. Ein direktes Überschreiben von `./taskboard` während

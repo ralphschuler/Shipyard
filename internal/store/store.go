@@ -410,12 +410,23 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err = s.DB.Exec(ctx, "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"); err != nil {
 		return err
 	}
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	// Package-level Go tests run concurrently. Serialize migrations so two
+	// fresh test connections cannot both observe a missing version and execute
+	// CREATE EXTENSION/DDL at the same time.
+	if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext('taskboard schema migrations'))"); err != nil {
+		return err
+	}
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 		var applied bool
-		if err = s.DB.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)", entry.Name()).Scan(&applied); err != nil {
+		if err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)", entry.Name()).Scan(&applied); err != nil {
 			return err
 		}
 		if applied {
@@ -425,22 +436,14 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if readErr != nil {
 			return readErr
 		}
-		tx, beginErr := s.DB.Begin(ctx)
-		if beginErr != nil {
-			return beginErr
-		}
 		if _, err = tx.Exec(ctx, string(body)); err == nil {
 			_, err = tx.Exec(ctx, "INSERT INTO schema_migrations(version) VALUES($1)", entry.Name())
 		}
 		if err != nil {
-			_ = tx.Rollback(ctx)
-			return err
-		}
-		if err = tx.Commit(ctx); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 func (s *Store) ListBoards(c context.Context) ([]domain.Board, error) {
 	rows, e := s.DB.Query(c, "SELECT id,name,created_at FROM boards ORDER BY created_at")
