@@ -119,6 +119,17 @@ func structuredControlLogs(provider string, logs []domain.RunLog, structuredOutp
 	return []domain.RunLog{{Message: structuredOutput}}
 }
 
+func validateSelfReview(agentName string, logs []domain.RunLog, logErr error) error {
+	if !requiresSelfReview(agentName) {
+		return nil
+	}
+	if logErr != nil {
+		return fmt.Errorf("Abschlussprotokoll konnte nicht gelesen werden: %w", logErr)
+	}
+	_, err := requestedSelfReview(logs)
+	return err
+}
+
 func maxAutomationEventAttempts() int {
 	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("SHIPYARD_MAX_AUTOMATION_EVENT_ATTEMPTS")))
 	if err != nil || value < 1 {
@@ -994,9 +1005,21 @@ func (w *Worker) Process(ctx context.Context) {
 				return
 			}
 			if attempts >= maxAutomationEventAttempts() {
-				_, _ = w.Store.AbandonEvent(ctx, event, reason)
-				// The event is terminal now. Do not continue evaluating further
-				// rules or mark it processed as if this cycle had succeeded.
+				abandoned, abandonErr := w.Store.AbandonEvent(ctx, event, reason)
+				if abandonErr != nil {
+					// Do not silently lose the terminalisation failure. The event
+					// remains pending and will be retried, but this run must not
+					// continue processing rules after the limit was reached.
+					log.Printf("automation event %s could not be abandoned after attempt limit: %v", event.ID, abandonErr)
+				} else if !abandoned {
+					// Another worker may have terminalised the event concurrently.
+					// Treat that as terminal for this snapshot as well.
+					log.Printf("automation event %s was already terminal when attempt limit was reached", event.ID)
+				}
+				// Do not continue evaluating further rules or mark the event
+				// processed as if this cycle had succeeded. If terminalisation
+				// failed, the pending event is intentionally retried with the
+				// failure recorded in the service log.
 				deferEvent = true
 				return
 			}
@@ -1530,19 +1553,30 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	var requestedRoute transitionRequest
 	hasRequestedRoute := false
 	if err == nil {
-		if logs, logErr := w.Store.RunLogs(ctx, run.ID); logErr == nil {
+		logs, logErr := w.Store.RunLogs(ctx, run.ID)
+		if logErr != nil {
+			// A delivery agent may only pass the self-review gate when the
+			// authoritative completion channel and its run record are readable.
+			// Failing closed here prevents a storage/read failure from being
+			// mistaken for a missing gate and then reaching apply/transition.
+			if reviewErr := validateSelfReview(agent.Name, nil, logErr); reviewErr != nil {
+				reason := "Self-Review abgelehnt: " + reviewErr.Error()
+				_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+				_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Self-Review fehlgeschlagen", reason)
+				_ = w.finish(ctx, run, "failed")
+				return
+			}
+		} else {
 			controlLogs := structuredControlLogs(provider.Provider, logs, structuredOutput)
 			if provider.Provider == "codex" && len(controlLogs) == 0 {
 				_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Codex lieferte keine Abschlussnachricht; strukturierte Task-Aktionen wurden aus Sicherheitsgründen nicht aus dem Terminal gelesen.")
 			}
-			if requiresSelfReview(agent.Name) {
-				if _, reviewErr := requestedSelfReview(controlLogs); reviewErr != nil {
-					reason := "Self-Review abgelehnt: " + reviewErr.Error()
-					_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
-					_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Self-Review fehlgeschlagen", reason)
-					_ = w.finish(ctx, run, "failed")
-					return
-				}
+			if reviewErr := validateSelfReview(agent.Name, controlLogs, nil); reviewErr != nil {
+				reason := "Self-Review abgelehnt: " + reviewErr.Error()
+				_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+				_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Self-Review fehlgeschlagen", reason)
+				_ = w.finish(ctx, run, "failed")
+				return
 			}
 			if provider.Provider == "codex" {
 				if reported, ok := reportedCLITokenUsage(logs); ok {

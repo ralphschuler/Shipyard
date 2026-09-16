@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -256,6 +257,15 @@ func TestCodexSelfReviewUsesOnlyTheStructuredCompletionChannel(t *testing.T) {
 	}
 	if _, err := requestedSelfReview(structuredControlLogs("codex", terminal, string(terminal[0].Message))); err == nil {
 		t.Fatal("malformed structured completion must remain rejected")
+	}
+}
+
+func TestSelfReviewGateFailsClosedWhenRunLogsCannotBeRead(t *testing.T) {
+	if err := validateSelfReview("Delivery Agent", nil, errors.New("store unavailable")); err == nil {
+		t.Fatal("delivery self-review must fail closed when run logs are unreadable")
+	}
+	if err := validateSelfReview("Triage Agent", nil, errors.New("store unavailable")); err != nil {
+		t.Fatalf("triage must remain compatible with the self-review gate: %v", err)
 	}
 }
 
