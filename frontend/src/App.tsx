@@ -489,6 +489,15 @@ function ResourceList({
   if (endpoint === "/api/v1/runs") return <Runs />;
   if (endpoint === "/api/v1/skills") return <Skills />;
   if (endpoint === "/api/v1/audit") return <Audit />;
+  return <GenericResourceList endpoint={endpoint} title={title} />;
+}
+function GenericResourceList({
+  endpoint,
+  title,
+}: {
+  endpoint: string;
+  title: string;
+}) {
   const { data, error } = useAPI<Record<string, unknown>[]>(endpoint);
   if (error) return <Failure />;
   if (!data) return <Loading />;
@@ -1257,6 +1266,7 @@ function Settings({ route }: { route: string }) {
 function Providers() {
   const { data, error } = useAPI<any[]>("/api/v1/settings/providers");
   const [message, setMessage] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, Record<string, unknown>>>({});
   if (error) return <Failure />;
   if (!data) return <Loading />;
   const providers = ["codex", "openai", "claude"].map(
@@ -1284,10 +1294,20 @@ function Providers() {
         method: "POST",
         body: form,
       });
+      setDrafts((current) => {
+        const { [provider.Provider]: _saved, ...remaining } = current;
+        return remaining;
+      });
       setMessage(`${provider.Provider} gespeichert.`);
     } catch (err) {
       setMessage(String(err));
     }
+  };
+  const update = (provider: any, field: string, value: unknown) => {
+    setDrafts((current) => ({
+      ...current,
+      [provider.Provider]: { ...current[provider.Provider], [field]: value },
+    }));
   };
   const test = async (provider: any) => {
     try {
@@ -1308,8 +1328,9 @@ function Providers() {
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
-        {providers.map((provider) => (
-          <details key={provider.Provider} className="rounded-lg border p-4">
+        {providers.map((source) => {
+          const provider = { ...source, ...drafts[source.Provider] };
+          return <details key={provider.Provider} className="rounded-lg border p-4">
             <summary className="cursor-pointer font-medium capitalize">
               {provider.Provider}{" "}
               <span className="ml-2 text-xs text-muted-foreground">
@@ -1320,44 +1341,44 @@ function Providers() {
               <label className="grid gap-1 text-sm">
                 Modell
                 <Input
-                  defaultValue={provider.Model}
-                  onChange={(e) => (provider.Model = e.target.value)}
+                  value={provider.Model || ""}
+                  onChange={(e) => update(provider, "Model", e.target.value)}
                 />
               </label>
               <label className="grid gap-1 text-sm">
                 Kommando / Adapter
                 <Input
-                  defaultValue={provider.Command}
-                  onChange={(e) => (provider.Command = e.target.value)}
+                  value={provider.Command || ""}
+                  onChange={(e) => update(provider, "Command", e.target.value)}
                 />
               </label>
               <label className="grid gap-1 text-sm">
                 Secret-Umgebungsvariable
                 <Input
-                  defaultValue={provider.SecretEnv}
-                  onChange={(e) => (provider.SecretEnv = e.target.value)}
+                  value={provider.SecretEnv || ""}
+                  onChange={(e) => update(provider, "SecretEnv", e.target.value)}
                 />
               </label>
               <label className="grid gap-1 text-sm">
                 Base URL
                 <Input
-                  defaultValue={provider.BaseURL}
-                  onChange={(e) => (provider.BaseURL = e.target.value)}
+                  value={provider.BaseURL || ""}
+                  onChange={(e) => update(provider, "BaseURL", e.target.value)}
                 />
               </label>
               <label className="grid gap-1 text-sm">
                 Zusatzoptionen (JSON)
                 <textarea
                   className="min-h-24 rounded-lg border bg-transparent p-2"
-                  defaultValue={provider.Options || "{}"}
-                  onChange={(e) => (provider.Options = e.target.value)}
+                  value={provider.Options || "{}"}
+                  onChange={(e) => update(provider, "Options", e.target.value)}
                 />
               </label>
               <label className="flex items-center gap-2 text-sm">
                 <input
                   type="checkbox"
-                  defaultChecked={provider.Enabled}
-                  onChange={(e) => (provider.Enabled = e.target.checked)}
+                  checked={Boolean(provider.Enabled)}
+                  onChange={(e) => update(provider, "Enabled", e.target.checked)}
                 />{" "}
                 Aktiv
               </label>
@@ -1370,8 +1391,8 @@ function Providers() {
                 </Button>
               </div>
             </div>
-          </details>
-        ))}
+          </details>;
+        })}
         {message && <p className="text-sm text-muted-foreground">{message}</p>}
       </CardContent>
     </Card>
