@@ -1803,7 +1803,7 @@ func (s *Store) CreateRun(c context.Context, task, agent, rule string) (domain.A
 }
 func (s *Store) createRunWithWorkspace(c context.Context, task string, a domain.Agent, agent, rule, workspace, targetProject, batchID string) (domain.AgentRun, error) {
 	var r domain.AgentRun
-	e := s.DB.QueryRow(c, "INSERT INTO agent_runs(task_id,agent_id,rule_id,batch_id,prompt_snapshot,workspace_snapshot,source_workspace,target_project_id,skill_snapshot) VALUES($1,$2,NULLIF($3,'')::uuid,NULLIF($4,'')::uuid,$5,$6,$6,NULLIF($7,'')::uuid,COALESCE((SELECT jsonb_agg(jsonb_build_object('name',s.name,'path',i.install_path)) FROM agent_skills x JOIN installed_skills i ON i.id=x.installed_skill_id JOIN skills s ON s.id=i.skill_id WHERE x.agent_id=$2),'[]'::jsonb)) RETURNING id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,summary,error_message,started_at,finished_at,created_at", task, agent, rule, batchID, a.Prompt, workspace, targetProject).Scan(&r.ID, &r.TaskID, &r.AgentID, &r.RuleID, &r.BatchID, &r.Status, &r.PromptSnapshot, &r.WorkspaceSnapshot, &r.Summary, &r.ErrorMessage, &r.StartedAt, &r.FinishedAt, &r.CreatedAt)
+	e := s.DB.QueryRow(c, "INSERT INTO agent_runs(task_id,agent_id,rule_id,batch_id,prompt_snapshot,workspace_snapshot,source_workspace,target_project_id,skill_snapshot) VALUES($1,$2,NULLIF($3,'')::uuid,NULLIF($4,'')::uuid,$5,$6,$6,NULLIF($7,'')::uuid,COALESCE((SELECT jsonb_agg(jsonb_build_object('name',s.name,'path',i.install_path)) FROM agent_skills x JOIN installed_skills i ON i.id=x.installed_skill_id JOIN skills s ON s.id=i.skill_id WHERE x.agent_id=$2),'[]'::jsonb)) RETURNING id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at", task, agent, rule, batchID, a.Prompt, workspace, targetProject).Scan(&r.ID, &r.TaskID, &r.AgentID, &r.RuleID, &r.BatchID, &r.Status, &r.PromptSnapshot, &r.WorkspaceSnapshot, &r.TargetProject, &r.Summary, &r.ErrorMessage, &r.StartedAt, &r.FinishedAt, &r.CreatedAt)
 	return r, e
 }
 func (s *Store) TaskWorkspace(c context.Context, taskID, fallback string) string {
@@ -1930,9 +1930,9 @@ func createRunTx(c context.Context, tx pgx.Tx, task string, a domain.Agent, agen
 		VALUES($1,$2,NULLIF($3,'')::uuid,NULLIF($4,'')::uuid,NULLIF($5,'')::uuid,$6,$7,$7,NULLIF($8,'')::uuid,
 		COALESCE((SELECT jsonb_agg(jsonb_build_object('name',s.name,'path',i.install_path)) FROM agent_skills x JOIN installed_skills i ON i.id=x.installed_skill_id JOIN skills s ON s.id=i.skill_id WHERE x.agent_id=$2),'[]'::jsonb))
 		ON CONFLICT DO NOTHING
-		RETURNING id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,summary,error_message,started_at,finished_at,created_at`,
+		RETURNING id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at`,
 		task, agent, rule, event, batch, a.Prompt, workspace, targetProject).
-		Scan(&run.ID, &run.TaskID, &run.AgentID, &run.RuleID, &run.BatchID, &run.Status, &run.PromptSnapshot, &run.WorkspaceSnapshot, &run.Summary, &run.ErrorMessage, &run.StartedAt, &run.FinishedAt, &run.CreatedAt)
+		Scan(&run.ID, &run.TaskID, &run.AgentID, &run.RuleID, &run.BatchID, &run.Status, &run.PromptSnapshot, &run.WorkspaceSnapshot, &run.TargetProject, &run.Summary, &run.ErrorMessage, &run.StartedAt, &run.FinishedAt, &run.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.AgentRun{}, false, nil
 	}
@@ -1965,7 +1965,7 @@ func (s *Store) ConsumeBatchDelivery(c context.Context, id string) (bool, error)
 	return tag.RowsAffected() == 1, err
 }
 func (s *Store) RunsForTask(c context.Context, task string) ([]domain.AgentRun, error) {
-	r, e := s.DB.Query(c, "SELECT id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,summary,error_message,started_at,finished_at,created_at FROM agent_runs WHERE task_id=$1 ORDER BY created_at DESC", task)
+	r, e := s.DB.Query(c, "SELECT id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at FROM agent_runs WHERE task_id=$1 ORDER BY created_at DESC", task)
 	if e != nil {
 		return nil, e
 	}
@@ -1974,7 +1974,7 @@ func (s *Store) RunsForTask(c context.Context, task string) ([]domain.AgentRun, 
 }
 func (s *Store) Run(c context.Context, id string) (domain.AgentRun, error) {
 	var r domain.AgentRun
-	err := s.DB.QueryRow(c, "SELECT id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,summary,error_message,started_at,finished_at,created_at FROM agent_runs WHERE id=$1", id).Scan(&r.ID, &r.TaskID, &r.AgentID, &r.RuleID, &r.BatchID, &r.Status, &r.PromptSnapshot, &r.WorkspaceSnapshot, &r.Summary, &r.ErrorMessage, &r.StartedAt, &r.FinishedAt, &r.CreatedAt)
+	err := s.DB.QueryRow(c, "SELECT id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at FROM agent_runs WHERE id=$1", id).Scan(&r.ID, &r.TaskID, &r.AgentID, &r.RuleID, &r.BatchID, &r.Status, &r.PromptSnapshot, &r.WorkspaceSnapshot, &r.TargetProject, &r.Summary, &r.ErrorMessage, &r.StartedAt, &r.FinishedAt, &r.CreatedAt)
 	return r, err
 }
 func (s *Store) RunDelivery(c context.Context, id string) (domain.RunDelivery, error) {
@@ -2138,7 +2138,7 @@ func (s *Store) RunTrace(c context.Context, id string) (domain.RunTrace, error) 
 	return trace, nil
 }
 func (s *Store) QueuedRuns(c context.Context) ([]domain.AgentRun, error) {
-	rows, err := s.DB.Query(c, "SELECT id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,summary,error_message,started_at,finished_at,created_at FROM agent_runs WHERE status='queued' ORDER BY created_at LIMIT 20")
+	rows, err := s.DB.Query(c, "SELECT id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at FROM agent_runs WHERE status='queued' ORDER BY created_at LIMIT 20")
 	if err != nil {
 		return nil, err
 	}
@@ -2154,7 +2154,7 @@ func (s *Store) RecoverInterruptedRuns(c context.Context) ([]domain.AgentRun, er
 	rows, err := s.DB.Query(c, `UPDATE agent_runs
 		SET status='failed',finished_at=now(),summary='Agent-Run durch Dienstneustart unterbrochen',error_message='Taskboard wurde während dieses Agent-Runs neu gestartet'
 		WHERE status='running'
-		RETURNING id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,summary,error_message,started_at,finished_at,created_at`)
+		RETURNING id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at`)
 	if err != nil {
 		return nil, err
 	}

@@ -1169,12 +1169,14 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	runCtx, cancel := context.WithTimeout(ctx, agentRunTimeout)
 	w.cancels.Store(run.ID, cancel)
 	defer func() { cancel(); w.cancels.Delete(run.ID) }()
-	if targets, targetsErr := w.Store.TaskRepositoryTargets(runCtx, run.TaskID); targetsErr == nil {
-		for _, target := range targets {
-			if target.RepositoryURL == "" || (target.LocalPath != run.WorkspaceSnapshot && len(targets) != 1) {
-				continue
-			}
-			project := domain.Project{ID: target.ProjectID, RepositoryURL: target.RepositoryURL, DefaultBranch: target.DefaultBranch, LocalPath: target.LocalPath}
+	if run.TargetProject != "" {
+		project, projectErr := w.Store.Project(runCtx, run.TargetProject)
+		if projectErr != nil {
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", projectErr.Error())
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		if project.RepositoryURL != "" {
 			if syncErr := w.syncManagedProject(runCtx, project); syncErr != nil {
 				reason := "Projekt-Repository konnte nicht aktualisiert werden: " + syncErr.Error()
 				_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
@@ -1184,7 +1186,6 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			}
 			run.WorkspaceSnapshot = project.LocalPath
 			_ = w.Store.AddRunLog(ctx, run.ID, "info", "Projekt-Checkout aktualisiert: "+project.LocalPath)
-			break
 		}
 	}
 	// Fail with an actionable project error before invoking git or a provider.
