@@ -156,6 +156,14 @@ func measuredInt64Ptr(value int) *int64 {
 	return &v
 }
 
+func measuredUsagePointer(value int, known bool) *int64 {
+	if !known {
+		return nil
+	}
+	v := int64(value)
+	return &v
+}
+
 // projectSyncLocks serializes a managed source checkout. Individual agent runs
 // never share a worktree, but they intentionally share this clean, read-only
 // source checkout from which their worktrees are created.
@@ -1787,6 +1795,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	var estimatedCostMicrousd int64
 	var nativeCostMicrousd *int64
 	var serviceTier string
+	var cliReport *cliUsageReport
 	if provider.Provider == "openai" {
 		secret, ok := secretValueForEnv(secretValues, provider.SecretEnv)
 		if !ok {
@@ -1854,6 +1863,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	if provider.Provider != "openai" {
 		if logs, logErr := w.Store.RunLogs(ctx, run.ID); logErr == nil {
 			if reported, ok := reportedCLIUsage(logs); ok {
+				cliReport = &reported
 				if reported.APICalls != nil {
 					apiCalls = int(*reported.APICalls)
 				}
@@ -1887,26 +1897,23 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	// Persist the adapter report before lifecycle handling so a timeout or
 	// provider error still leaves the measured partial usage available.
 	partial := domain.UsageReport{Provider: provider.Provider, Model: provider.Model, ServiceTier: serviceTier, Status: "unknown", CostSource: "unknown", NativeCostMicrousd: nativeCostMicrousd}
-	if apiCalls > 0 {
-		partial.APICalls = int64Ptr(int64(apiCalls))
-	}
-	if inputTokens > 0 {
-		partial.InputTokens = measuredInt64Ptr(inputTokens)
-	}
-	if outputTokens > 0 {
-		partial.OutputTokens = measuredInt64Ptr(outputTokens)
-	}
-	if cachedInputTokens > 0 {
-		partial.CachedInputTokens = measuredInt64Ptr(cachedInputTokens)
-	}
-	if cacheWriteTokens > 0 {
-		partial.CacheWriteTokens = measuredInt64Ptr(cacheWriteTokens)
-	}
-	if reasoningTokens > 0 {
-		partial.ReasoningTokens = measuredInt64Ptr(reasoningTokens)
-	}
-	if tokenUsage > 0 {
-		partial.TotalTokens = int64Ptr(int64(tokenUsage))
+	if cliReport != nil {
+		partial.APICalls = cliReport.APICalls
+		partial.InputTokens = cliReport.InputTokens
+		partial.OutputTokens = cliReport.OutputTokens
+		partial.CachedInputTokens = cliReport.CachedInputTokens
+		partial.CacheWriteTokens = cliReport.CacheWriteTokens
+		partial.ReasoningTokens = cliReport.ReasoningTokens
+		partial.TotalTokens = cliReport.TotalTokens
+	} else if apiCalls > 0 {
+		// A successful provider response makes zero-valued token classes known.
+		partial.APICalls = measuredUsagePointer(apiCalls, true)
+		partial.InputTokens = measuredUsagePointer(inputTokens, true)
+		partial.OutputTokens = measuredUsagePointer(outputTokens, true)
+		partial.CachedInputTokens = measuredUsagePointer(cachedInputTokens, true)
+		partial.CacheWriteTokens = measuredUsagePointer(cacheWriteTokens, true)
+		partial.ReasoningTokens = measuredUsagePointer(reasoningTokens, true)
+		partial.TotalTokens = measuredUsagePointer(tokenUsage, true)
 	}
 	partial.RawUsage, _ = json.Marshal(map[string]any{"api_calls": apiCalls, "input_tokens": partial.InputTokens, "output_tokens": partial.OutputTokens, "cached_input_tokens": partial.CachedInputTokens, "cache_write_tokens": partial.CacheWriteTokens, "reasoning_tokens": partial.ReasoningTokens, "total_tokens": partial.TotalTokens})
 	if nativeCostMicrousd != nil {
@@ -1930,7 +1937,12 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			}
 		}
 	}
-	_ = w.Store.SetRunUsage(ctx, run.ID, partial)
+	if usageErr := w.Store.SetRunUsage(ctx, run.ID, partial); usageErr != nil {
+		_ = w.Store.AddRunLog(ctx, run.ID, "error", "Usage-Telemetrie konnte nicht gespeichert werden: "+usageErr.Error())
+		if err == nil {
+			err = fmt.Errorf("Usage-Telemetrie konnte nicht gespeichert werden: %w", usageErr)
+		}
+	}
 	// CLI output has already been copied into append-only run-log records by
 	// tmux. API providers return one response and are recorded here instead.
 	if provider.Provider == "openai" {

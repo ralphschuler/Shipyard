@@ -16,6 +16,27 @@ import (
 	"time"
 )
 
+func TestMeasuredUsagePointerPreservesKnownZero(t *testing.T) {
+	if value := measuredUsagePointer(0, false); value != nil {
+		t.Fatalf("unknown usage must remain nil, got %v", *value)
+	}
+	value := measuredUsagePointer(0, true)
+	if value == nil || *value != 0 {
+		t.Fatalf("known zero usage was not preserved: %v", value)
+	}
+}
+
+func TestReportedCLIUsagePreservesExplicitZeroClasses(t *testing.T) {
+	logs := []domain.RunLog{{Message: `{"type":"usage","usage":{"api_calls":1,"input_tokens":0,"output_tokens":4,"total_tokens":4}}`}}
+	report, ok := reportedCLIUsage(logs)
+	if !ok || report.InputTokens == nil || *report.InputTokens != 0 {
+		t.Fatalf("explicit zero input usage was lost: %#v, %v", report, ok)
+	}
+	if report.OutputTokens == nil || *report.OutputTokens != 4 {
+		t.Fatalf("output usage was not parsed: %#v", report)
+	}
+}
+
 func runGit(t *testing.T, directory string, args ...string) {
 	t.Helper()
 	command := exec.Command("git", append([]string{"-C", directory}, args...)...)
