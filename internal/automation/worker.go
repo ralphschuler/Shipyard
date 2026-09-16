@@ -76,8 +76,9 @@ type interactionRequest struct {
 // access: the store still verifies that the requested transition exists on the
 // task's board before moving anything.
 type transitionRequest struct {
-	Target  string `json:"target"`
-	Comment string `json:"comment"`
+	TargetColumnID string `json:"target_column_id"`
+	Target         string `json:"target,omitempty"`
+	Comment        string `json:"comment"`
 }
 
 // Triage owns task wording and repository routing. These narrow controls keep
@@ -147,9 +148,10 @@ func requestedTransition(logs []domain.RunLog) (transitionRequest, bool) {
 		if json.Unmarshal([]byte(match[1]), &request) != nil {
 			continue
 		}
+		request.TargetColumnID = strings.TrimSpace(request.TargetColumnID)
 		request.Target = strings.TrimSpace(request.Target)
 		request.Comment = strings.TrimSpace(request.Comment)
-		if request.Target == "" || found { // one unambiguous routing decision per run
+		if (request.TargetColumnID == "" && request.Target == "") || found { // one unambiguous routing decision per run
 			continue
 		}
 		result, found = request, true
@@ -339,6 +341,22 @@ func formatTaskContext(task domain.Task, board domain.Board, projects []domain.P
 		}
 	}
 	b.WriteString("--- ENDE AUFGABENKONTEXT ---")
+	return b.String()
+}
+
+func formatAllowedTransitions(transitions []domain.Transition, columns []domain.Column) string {
+	if len(transitions) == 0 {
+		return ""
+	}
+	labels := make(map[string]string, len(columns))
+	for _, column := range columns {
+		labels[column.ID] = column.Name
+	}
+	var b strings.Builder
+	b.WriteString("\n\nErlaubte Workflow-Transitionen (nur strukturierte ID-/Label-Paare anfordern):\n")
+	for _, transition := range transitions {
+		fmt.Fprintf(&b, "- {\"target_column_id\":\"%s\",\"label\":%q}\n", transition.ToColumnID, labels[transition.ToColumnID])
+	}
 	return b.String()
 }
 
@@ -1278,6 +1296,9 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		comments, _ := w.Store.Comments(ctx, task.ID)
 		decisions, _ := w.Store.TaskDecisions(ctx, task.ID)
 		prompt += formatTaskContext(task, board, projects, groups, history, comments, decisions, started)
+		allowed, _ := w.Store.Allowed(ctx, task.ID)
+		columns, _ := w.Store.Columns(ctx, task.BoardID)
+		prompt += formatAllowedTransitions(allowed, columns)
 	}
 	prompt += "\n\nFühre die projektspezifischen Tests für deine Änderung aus und dokumentiere das Ergebnis im Abschluss. Begrenze jeden einzelnen Test-, Build- oder Installationsbefehl als direkten Befehl mit `timeout 120s <befehl>` (oder dem passenden Mechanismus der Plattform). Schreibe keinen verschachtelten `bash -lc`-Aufruf, setze keine zusätzlichen Shell-Anführungszeichen und werte `$?` nicht selbst aus; die Ausführungsumgebung meldet Status und Ausgabe. Hängt ein Befehl oder läuft er in das Limit, dokumentiere das als offenes Risiko und fahre mit anderen aussagekräftigen Prüfungen fort. Entferne vor dem Abschluss generierte Entwicklungsartefakte wie __pycache__, *.pyc, Coverage-Dateien und temporäre Daten. Beende alle temporären Server und Browser-Prozesse vor dem Abschluss; verwende keine interaktiven oder dauerhaft wartenden Befehle. Erstelle keinen Push, Merge, Release oder Deployment."
 	prompt += "\n\nDokumentiere am Ende Ergebnis, geänderte Bereiche, ausgeführte Tests und offene Risiken für Menschen als ```taskboard-comment\n…\n```. Wenn eine neue Entscheidung nötig ist, gib am Ende einen taskboard-interaction-Block aus: {\"key\":\"stabiler_schluessel\",\"title\":\"Kurze Frage\",\"body\":\"Kontext\",\"fields\":[...]}. Unterstützt: text, textarea, select, buttons. Frage keine verbindliche Nutzerentscheidung erneut ab. Öffne sie nur mit reopen:true und reason, wenn sich die Sachlage wesentlich geändert hat. Nach einer Antwort startet genau ein Folge-Run. Wenn du als Reviewer Nacharbeit verlangst, verwende zusätzlich genau einen ```taskboard-transition\n{\"target\":\"In Progress\",\"comment\":\"konkrete Nacharbeit\"}\n```-Block. Die Transition wird nur ausgeführt, wenn sie im Board erlaubt ist. Nur der Triage Agent darf zusätzlich genau einen ```taskboard-update\n{\"title\":\"…\",\"description\":\"…\"}\n```-Block und einen ```taskboard-targets\n{\"project_ids\":[\"uuid\"],\"group_ids\":[]}\n```-Block ausgeben."
@@ -1481,7 +1502,15 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	}
 	_ = w.Store.SetRunStatus(ctx, run.ID, "succeeded", "Codex-Agent erfolgreich beendet", "")
 	if hasRequestedRoute && !awaitingDecision {
-		moved, moveErr := w.Store.MoveTaskToNamedColumn(ctx, run.TaskID, requestedRoute.Target, "agent_review")
+		targetID := requestedRoute.TargetColumnID
+		var moved bool
+		var moveErr error
+		if targetID != "" {
+			moved, moveErr = w.Store.MoveTaskToColumnID(ctx, run.TaskID, targetID, "agent_review")
+		}
+		if targetID == "" {
+			moved, moveErr = w.Store.MoveTaskToNamedColumn(ctx, run.TaskID, requestedRoute.Target, "agent_review")
+		}
 		if moveErr != nil {
 			_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Angeforderte Workflow-Transition wurde nicht ausgeführt: "+moveErr.Error())
 		} else if moved {
@@ -1497,7 +1526,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			routedRun.RuleID = ""
 			_ = w.finish(ctx, routedRun, "succeeded")
 			return
-		} else {
+		} else if targetID == "" {
 			_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Angeforderte Workflow-Transition ist für die aktuelle Spalte nicht erlaubt: "+requestedRoute.Target)
 		}
 	}

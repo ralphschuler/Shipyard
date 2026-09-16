@@ -289,6 +289,21 @@ func TestRequestedInteractionsRequireAStableDecisionKey(t *testing.T) {
 	}
 }
 
+func TestRequestedTransitionAcceptsStableColumnID(t *testing.T) {
+	logs := []domain.RunLog{{Message: "```taskboard-transition\n{\"target_column_id\":\"column-development\"}\n```"}}
+	route, ok := requestedTransition(logs)
+	if !ok || route.TargetColumnID != "column-development" || route.Target != "" {
+		t.Fatalf("unexpected ID route: %#v, %v", route, ok)
+	}
+}
+
+func TestFormatAllowedTransitionsUsesIDsAndDisplayLabels(t *testing.T) {
+	got := formatAllowedTransitions([]domain.Transition{{ToColumnID: "development-id"}}, []domain.Column{{ID: "development-id", Name: "Entwicklung"}})
+	if !strings.Contains(got, "target_column_id") || !strings.Contains(got, "development-id") || !strings.Contains(got, "Entwicklung") {
+		t.Fatalf("missing structured transition context: %s", got)
+	}
+}
+
 func TestRequestedTransitionIsUnambiguous(t *testing.T) {
 	logs := []domain.RunLog{{Message: "```taskboard-transition\n{\"target\":\"In Progress\",\"comment\":\"Bitte Schnittstelle nachziehen.\"}\n```"}}
 	route, ok := requestedTransition(logs)
