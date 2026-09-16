@@ -28,6 +28,12 @@ const enhanceLegacyDialog=dialog=>{
  const body=[...article.children].filter(child=>child!==header&&child!==footer);
  if(!body.length)return;
  const wrapper=document.createElement('div');wrapper.className='dialog-body';body[0].before(wrapper);body.forEach(child=>wrapper.append(child));
+ // Forms stay semantically intact, but their boxes must not become a second
+ // scroll container after they have been moved into the shared body. A
+ // second form (usually a destructive action) is marked as the dialog's
+ // sticky action area so it remains available beside a long primary form.
+ const forms=[...wrapper.querySelectorAll(':scope > form')];
+ forms.forEach((form,index)=>form.classList.toggle('dialog-secondary-form',index>0));
 };
 const dialogFocusTarget=dialog=>dialog.querySelector('[autofocus]')||dialog.querySelector('.dialog-body button:not(.close):not([data-close-modal]),.dialog-body input,.dialog-body select,.dialog-body textarea,.dialog-body [tabindex]:not([tabindex="-1"])')||dialog.querySelector('.close,[data-close-modal],button[type="button"]');
 const openModal=(dialog,trigger=document.activeElement)=>{if(!dialog)return;if(trigger instanceof HTMLElement)modalReturnFocus.set(dialog,trigger);enhanceLegacyDialog(dialog);if(!dialog.open)nativeShowModal.call(dialog);requestAnimationFrame(()=>dialogFocusTarget(dialog)?.focus())};

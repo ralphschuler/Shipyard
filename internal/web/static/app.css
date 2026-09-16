@@ -20,12 +20,14 @@ dialog{width:min(42rem,calc(100vw - 2rem));max-width:none;max-height:calc(100dvh
 dialog::backdrop{background:rgba(5,15,20,.72);backdrop-filter:blur(2px)}
 dialog article{display:flex;flex-direction:column;min-height:0;max-height:calc(100dvh - 2rem);margin:0;background:var(--surface)}
 dialog article>.dialog-body{display:flex;flex:1 1 auto;min-height:0;flex-direction:column;gap:var(--space-3);overflow-y:auto;overscroll-behavior:contain;padding:var(--space-3) var(--space-4) var(--space-4)}
-dialog article>.dialog-body>form{margin:0}
+dialog article>.dialog-body>form{display:flex;flex:0 0 auto;min-height:0;flex-direction:column;gap:var(--space-3);margin:0;padding:0;overflow:visible}
+dialog article>.dialog-body>form.dialog-secondary-form{display:block;flex:0 0 auto;margin:0 calc(var(--space-4) * -1) calc(var(--space-4) * -1);padding:var(--space-3) var(--space-4);background:var(--surface);border-top:1px solid var(--line);position:sticky;bottom:0}
 dialog article>header{flex:0 0 auto;padding:var(--space-4) var(--space-4) 0}
-dialog article>form{display:flex;flex:1 1 auto;min-height:0;flex-direction:column;gap:var(--space-3);margin:0;padding:var(--space-3) var(--space-4) var(--space-4);overflow-y:auto;overscroll-behavior:contain}
+dialog article>form{display:flex;flex:1 1 auto;min-height:0;flex-direction:column;gap:var(--space-3);margin:0;padding:var(--space-3) var(--space-4) var(--space-4);overflow:visible}
 dialog article>form>footer{position:sticky;bottom:calc(var(--space-4) * -1);flex:0 0 auto;margin:var(--space-3) calc(var(--space-4) * -1) calc(var(--space-4) * -1);padding:var(--space-3) var(--space-4);background:var(--surface);border-top:1px solid var(--line)}
 dialog article>.dialog-body>form>footer{position:sticky;bottom:calc(var(--space-4) * -1);flex:0 0 auto;margin:var(--space-3) calc(var(--space-4) * -1) calc(var(--space-4) * -1);padding:var(--space-3) var(--space-4);background:var(--surface);border-top:1px solid var(--line)}
 dialog article>.dialog-body>form+form{position:sticky;bottom:0;margin:0 calc(var(--space-4) * -1) calc(var(--space-4) * -1);padding:var(--space-3) var(--space-4);background:var(--surface);border-top:1px solid var(--line)}
+dialog article>.dialog-body>form:not(:has(>footer)):only-child>button:last-child{position:sticky;bottom:0;align-self:flex-end;margin:0 calc(var(--space-4) * -1) calc(var(--space-4) * -1);padding:var(--space-3) var(--space-4);background:var(--surface);border-top:1px solid var(--line)}
 dialog article:not(:has(>form)){padding:0;overflow:hidden}
 dialog article:not(:has(>form))>.dialog-body{padding:var(--space-4)}
 .management-list>article>footer{display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap;margin:var(--space-3) 0 0;padding:var(--space-3) 0 0;border-top:1px solid var(--line);background:transparent}.management-list>article>footer form{margin:0}.management-list>article>footer button{margin:0;white-space:nowrap}

@@ -19,6 +19,8 @@ func TestModalAccessibilityStyleContract(t *testing.T) {
 		"dialog::backdrop{background:rgba(5,15,20,.72)",
 		"dialog article>.dialog-body{display:flex;flex:1 1 auto;min-height:0",
 		"overflow-y:auto;overscroll-behavior:contain",
+		"dialog article>.dialog-body>form{display:flex;flex:0 0 auto;min-height:0",
+		"dialog article>.dialog-body>form.dialog-secondary-form{display:block",
 		"dialog article>.dialog-body>form>footer{position:sticky",
 		"dialog article>.dialog-body>form+form{position:sticky",
 	} {
@@ -37,6 +39,8 @@ func TestModalAccessibilityScriptContract(t *testing.T) {
 	for _, required := range []string{
 		"const enhanceLegacyDialog=dialog=>",
 		"className='dialog-body'",
+		"forms=[...wrapper.querySelectorAll(':scope > form')]",
+		"dialog-secondary-form",
 		"dialogFocusTarget=dialog=>dialog.querySelector('[autofocus]')",
 		"nativeShowModal.call(dialog)",
 		"modalReturnFocus.delete(dialog)",
