@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Webhooks · Shipyard</title>
+    <link rel="stylesheet" href="/static/pico.min.css" />
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div class="app-shell collapsed-shell">
+      <aside class="app-sidebar" aria-label="Hauptnavigation">
+        <strong class="brand-mark">SY</strong>
+        <nav>
+          <a href="/"><b>▦</b><span>Übersicht</span></a
+          ><a href="/projects"><b>◫</b><span>Projekte</span></a
+          ><a href="/boards"><b>▤</b><span>Boards</span></a
+          ><a href="/agents"><b>◉</b><span>Agents</span></a
+          ><a class="active" href="/automations"
+            ><b>↯</b><span>Automationen</span></a
+          ><a href="/skills"><b>◇</b><span>Skills</span></a
+          ><a href="/settings/providers"><b>⚙</b><span>Einstellungen</span></a>
+        </nav>
+      </aside>
+      <main class="dashboard cockpit management-page">
+        <header class="cockpit-header">
+          <div>
+            <p class="section-kicker">Automationen</p>
+            <h1>Webhooks</h1>
+            <p>Informiere externe Systeme über Agent-Run-Ergebnisse.</p>
+          </div>
+          <button data-open-modal="new-webhook">Webhook hinzufügen</button>
+        </header>
+        <nav class="settings-tabs" aria-label="Automationen">
+          <a href="/automations">Ereignisregeln</a
+          ><a href="/schedules">Zeitregeln</a
+          ><a class="active" href="/webhooks">Webhooks</a>
+        </nav>
+        <section class="management-list">
+          {{range .Webhooks}}
+          <article>
+            <header>
+              <div>
+                <h2>{{.Name}}</h2>
+                <p>{{.URL}}</p>
+              </div>
+              <div class="run-actions">
+                <form method="post" action="/webhooks/{{.ID}}/enabled">
+                  <input type="hidden" name="enabled" value="{{if .Enabled}}false{{else}}true{{end}}" />
+                  <button class="secondary">{{if .Enabled}}Pausieren{{else}}Aktivieren{{end}}</button>
+                </form>
+                <form method="post" action="/webhooks/{{.ID}}/delete" onsubmit="return confirm('Webhook wirklich löschen?');">
+                  <button class="contrast secondary">Löschen</button>
+                </form>
+              </div>
+            </header>
+            <p>
+              <small
+                >Ereignisse: {{.Events}}{{if gt .PendingDeliveries 0}} ·
+                {{.PendingDeliveries}} ausstehend{{end}}{{if gt .DeadDeliveries
+                0}} ·
+                <mark class="status-failed"
+                  >{{.DeadDeliveries}} fehlgeschlagen</mark
+                >{{end}}</small
+              >
+            </p>
+          </article>
+          {{else}}
+          <article class="empty-state">
+            <h2>Noch keine Webhooks</h2>
+            <p>
+              Lege einen Webhook an, um Run-Ergebnisse an ein internes System
+              weiterzugeben.
+            </p>
+            <button data-open-modal="new-webhook">Webhook hinzufügen</button>
+          </article>
+          {{end}}
+        </section>
+      </main>
+    </div>
+    <dialog id="new-webhook">
+      <article>
+        <header>
+          <button
+            class="close"
+            data-close-modal="new-webhook"
+            aria-label="Schließen"
+          ></button>
+          <h2>Webhook hinzufügen</h2>
+        </header>
+        <form method="post" action="/webhooks">
+          <label>Name<input name="name" required /></label
+          ><label>Ziel-URL<input type="url" name="url" required /></label
+          ><label
+            >Ereignisse<input
+              name="events"
+              value="run.succeeded,run.failed,run.cancelled"
+          /></label>
+          <footer>
+            <button
+              type="button"
+              class="secondary"
+              data-close-modal="new-webhook"
+            >
+              Abbrechen</button
+            ><button>Webhook speichern</button>
+          </footer>
+        </form>
+      </article>
+    </dialog>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

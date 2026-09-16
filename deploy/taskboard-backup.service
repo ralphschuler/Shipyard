@@ -1,0 +1,10 @@
+[Unit]
+Description=Taskboard PostgreSQL backup
+
+[Service]
+Type=oneshot
+User=agent
+Group=agent
+Environment=DATABASE_URL=postgres://taskboard:taskboard@localhost:5432/taskboard?sslmode=disable
+Environment=TASKBOARD_BACKUP_DIR=/home/agent/taskboard-backups
+ExecStart=/bin/bash /home/agent/taskboard/deploy/backup-postgres.sh

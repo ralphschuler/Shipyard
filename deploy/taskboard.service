@@ -1,0 +1,42 @@
+[Unit]
+Description=Taskboard web and MCP server
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agent
+WorkingDirectory=/home/agent/taskboard
+Environment=DATABASE_URL=postgres://taskboard:taskboard@localhost:5432/taskboard?sslmode=disable
+Environment=TASKBOARD_ADDR=127.0.0.1:8080
+# Optional local secrets, e.g. TASKBOARD_PROXY_SSO_EMAIL and
+# TASKBOARD_PROXY_SSO_SECRET. Keep this file outside the repository.
+EnvironmentFile=-/etc/taskboard/taskboard.env
+ExecStart=/home/agent/taskboard/taskboard
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+# The worker needs network access (Postgres, Git hosts and model providers)
+# and user/mount namespaces for Codex' workspace sandbox, so those are not
+# restricted here. The remaining controls are compatible with Git worktrees,
+# tmux and provider CLIs while removing unnecessary host-wide privileges.
+UMask=0077
+ProtectSystem=full
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RemoveIPC=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

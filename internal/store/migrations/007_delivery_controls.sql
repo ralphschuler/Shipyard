@@ -1,0 +1,11 @@
+ALTER TABLE agents ADD COLUMN gate_command TEXT NOT NULL DEFAULT 'git diff --check';
+ALTER TABLE automation_rules ADD COLUMN schedule_every_minutes INTEGER;
+ALTER TABLE automation_rules ADD COLUMN due_within_hours INTEGER;
+ALTER TABLE agent_runs ADD COLUMN source_workspace TEXT NOT NULL DEFAULT '';
+ALTER TABLE agent_runs ADD COLUMN diff_summary TEXT NOT NULL DEFAULT '';
+ALTER TABLE agent_runs ADD COLUMN gate_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE agent_runs ADD COLUMN gate_output TEXT NOT NULL DEFAULT '';
+ALTER TABLE agent_runs ADD COLUMN token_usage INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE agent_runs ADD COLUMN duration_seconds INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE agent_runs ADD COLUMN applied_at TIMESTAMPTZ;
+CREATE TABLE webhook_subscriptions (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), name TEXT NOT NULL, url TEXT NOT NULL, events TEXT NOT NULL DEFAULT 'run.succeeded,run.failed', enabled BOOLEAN NOT NULL DEFAULT true, created_at TIMESTAMPTZ NOT NULL DEFAULT now());

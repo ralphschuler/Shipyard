@@ -1,0 +1,116 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --background: oklch(0.985 0.004 250);
+  --foreground: oklch(0.22 0.02 255);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.22 0.02 255);
+  --primary: oklch(0.47 0.14 235);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.955 0.012 245);
+  --secondary-foreground: oklch(0.3 0.03 255);
+  --muted: oklch(0.955 0.009 245);
+  --muted-foreground: oklch(0.5 0.025 250);
+  --accent: oklch(0.93 0.03 235);
+  --accent-foreground: oklch(0.3 0.06 235);
+  --destructive: oklch(0.56 0.2 25);
+  --border: oklch(0.89 0.012 250);
+  --input: var(--border);
+  --ring: oklch(0.56 0.14 235);
+  --chart-1: oklch(0.55 0.15 235);
+  --chart-2: oklch(0.65 0.15 165);
+  --radius: 0.75rem;
+}
+.dark {
+  --background: oklch(0.17 0.018 250);
+  --foreground: oklch(0.95 0.008 250);
+  --card: oklch(0.22 0.02 250);
+  --card-foreground: oklch(0.95 0.008 250);
+  --primary: oklch(0.71 0.13 225);
+  --primary-foreground: oklch(0.18 0.02 250);
+  --secondary: oklch(0.28 0.018 250);
+  --secondary-foreground: oklch(0.94 0.008 250);
+  --muted: oklch(0.28 0.018 250);
+  --muted-foreground: oklch(0.7 0.018 250);
+  --accent: oklch(0.31 0.035 235);
+  --accent-foreground: oklch(0.94 0.02 235);
+  --destructive: oklch(0.7 0.16 25);
+  --border: oklch(1 0 0 / 11%);
+  --input: oklch(1 0 0 / 14%);
+  --ring: oklch(0.68 0.12 225);
+  --chart-1: oklch(0.71 0.13 225);
+  --chart-2: oklch(0.72 0.14 165);
+}
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply m-0 bg-background text-foreground antialiased;
+  }
+  button,
+  a,
+  input,
+  select,
+  textarea {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background;
+  }
+}
+
+/* Task discussions use the same neutral surfaces and radius scale as the
+   shadcn cards.  The selector is deliberately scoped to the comment composer,
+   so activity feeds and audit rows keep their compact list treatment. */
+[data-slot="card-content"]:has(textarea[placeholder="Kommentar hinzufügen"])
+  > .space-y-4
+  > div {
+  max-width: min(46rem, 92%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--muted);
+  padding: 0.8rem 1rem;
+  box-shadow: 0 1px 1px oklch(0 0 0 / 4%);
+}
+[data-slot="card-content"]:has(textarea[placeholder="Kommentar hinzufügen"])
+  > .space-y-4
+  > div:nth-child(even) {
+  margin-left: auto;
+  border-color: color-mix(in oklab, var(--primary) 28%, var(--border));
+  background: color-mix(in oklab, var(--primary) 10%, var(--card));
+}
+[data-slot="card-content"]:has(textarea[placeholder="Kommentar hinzufügen"])
+  > .space-y-4
+  > div
+  > p:first-child {
+  color: var(--foreground);
+}

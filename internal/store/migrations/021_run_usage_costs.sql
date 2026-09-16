@@ -1,0 +1,3 @@
+ALTER TABLE agent_runs ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE agent_runs ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE agent_runs ADD COLUMN estimated_cost_microusd BIGINT NOT NULL DEFAULT 0;

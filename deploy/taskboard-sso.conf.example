@@ -1,0 +1,5 @@
+# Install as /etc/nginx/snippets/taskboard-sso.conf (mode 0600).
+# This file is intentionally not tracked with real values.
+# Nginx injects these headers only after HTTP Basic Auth succeeded.
+proxy_set_header X-Taskboard-Proxy-Email "owner@example.com";
+proxy_set_header X-Taskboard-Proxy-Secret "replace-with-a-random-32-byte-secret";

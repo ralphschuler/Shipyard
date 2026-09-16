@@ -1,0 +1,1 @@
+ALTER TABLE automation_rules ADD COLUMN IF NOT EXISTS cooldown_minutes INTEGER NOT NULL DEFAULT 0 CHECK(cooldown_minutes BETWEEN 0 AND 10080);

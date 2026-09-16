@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Agents · Shipyard</title>
+    <link rel="icon" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/pico.min.css" />
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div class="app-shell collapsed-shell">
+      <aside class="app-sidebar" aria-label="Hauptnavigation">
+        <strong class="brand-mark">SY</strong>
+        <nav><a href="/"><b>▦</b><span>Übersicht</span></a><a href="/projects"><b>◫</b><span>Projekte</span></a><a href="/boards"><b>▤</b><span>Boards</span></a><a class="active" href="/agents"><b>◉</b><span>Agents</span></a><a href="/automations"><b>↯</b><span>Automationen</span></a><a href="/skills"><b>◇</b><span>Skills</span></a><a href="/runs"><b>▶</b><span>Runs</span></a><a href="/audit"><b>◷</b><span>Audit</span></a><a href="/settings/providers"><b>⚙</b><span>Einstellungen</span></a></nav>
+      </aside>
+      <main class="dashboard cockpit management-page">
+        <header class="cockpit-header">
+          <div>
+            <p class="section-kicker">Orchestrierung</p>
+            <h1>Agents</h1>
+            <p>
+              Profile mit klaren Workspaces, Arbeitsrahmen und Skill-Grenzen.
+            </p>
+          </div>
+          <button data-open-modal="new-agent">Agent anlegen</button>
+        </header>
+        <section class="management-list agent-list" aria-label="Agent-Profile">
+          {{range .Agents}}
+          <article>
+            <header>
+              <div>
+                <h2>{{.Name}}</h2>
+                <p>
+                  {{if
+                  .Enabled}}<mark>Aktiv</mark>{{else}}<small>Pausiert</small>{{end}}
+                  · maximal {{.MaxParallelRuns}} parallele Runs
+                </p>
+              </div>
+              <button class="secondary" data-open-modal="agent-{{.ID}}">
+                Bearbeiten
+              </button>
+            </header>
+            <p>{{.Description}}</p>
+            <p><small>Workspace: {{.WorkspacePath}}</small></p>
+            <p>
+              {{range .Skills}}<span class="status-pill">{{.Name}}</span>
+              {{else}}<small>Keine Skills zugewiesen.</small>{{end}}
+            </p>
+          </article>
+          <dialog id="agent-{{.ID}}">
+            <article>
+              <header>
+                <button
+                  class="close"
+                  aria-label="Schließen"
+                  data-close-modal="agent-{{.ID}}"
+                ></button>
+                <h2>{{.Name}} bearbeiten</h2>
+              </header>
+              <form method="post" action="/agents/{{.ID}}">
+                <label
+                  >Name<input name="name" value="{{.Name}}" required /></label
+                ><label
+                  >Beschreibung<input
+                    name="description"
+                    value="{{.Description}}" /></label
+                ><label
+                  >Workspace<input
+                    name="workspace_path"
+                    value="{{.WorkspacePath}}"
+                    required /></label
+                ><label
+                  >Max. parallele Runs<input
+                    type="number"
+                    name="max_parallel_runs"
+                    value="{{.MaxParallelRuns}}"
+                    min="1" /></label
+                ><label
+                  ><input
+                    type="checkbox"
+                    name="enabled"
+                    value="true"
+                    {{if
+                    .Enabled}}
+                    checked{{end}}
+                  />
+                  Agent aktiv</label
+                ><label
+                  >Prefix
+                  <small
+                    >Erinnerungen und Rollenkontext vor der
+                    Arbeitsanweisung.</small
+                  ><textarea name="prompt_prefix">
+{{.PromptPrefix}}</textarea
+                  ></label
+                ><label
+                  >Arbeitsanweisung<textarea name="prompt" required>
+{{.Prompt}}</textarea
+                  ></label
+                ><label
+                  >Suffix <small>Abschluss- und Übergabeanweisungen.</small
+                  ><textarea name="prompt_suffix">{{.PromptSuffix}}</textarea>
+                </label>
+                <footer>
+                  <button
+                    type="button"
+                    class="secondary"
+                    data-close-modal="agent-{{.ID}}"
+                  >
+                    Abbrechen</button
+                  ><button>Profil speichern</button>
+                </footer>
+              </form>
+              <hr />
+              <form method="post" action="/agents/{{.ID}}/skills">
+                <fieldset>
+                  <legend>Erlaubte Skills</legend>
+                  <div class="skill-chips">
+                    {{$assigned := .Skills}}{{range $.Skills}}<label
+                      ><input
+                        type="checkbox"
+                        name="skill_ids"
+                        value="{{.ID}}"
+                        {{if
+                        hasSkill
+                        $assigned
+                        .ID}}
+                        checked{{end}}
+                      /><span>{{.Name}}</span></label
+                    >{{end}}
+                  </div>
+                </fieldset>
+                <button class="secondary">Skills speichern</button>
+              </form>
+              <hr />
+              <form
+                method="post"
+                action="/agents/{{.ID}}/delete"
+                onsubmit="return confirm('Agent wirklich löschen? Das ist nur möglich, solange keine Run-Historie existiert.')"
+              >
+                <button type="submit" class="contrast secondary">
+                  Agent löschen
+                </button>
+              </form>
+            </article>
+          </dialog>
+          {{else}}
+          <article>
+            <h2>Noch keine Agent-Profile</h2>
+            <p>Lege ein Profil an, bevor Automationen Agents starten können.</p>
+          </article>
+          {{end}}
+        </section>
+      </main>
+    </div>
+    <dialog id="new-agent">
+      <article>
+        <header>
+          <button
+            class="close"
+            aria-label="Schließen"
+            data-close-modal="new-agent"
+          ></button>
+          <h2>Agent anlegen</h2>
+        </header>
+        <form method="post" action="/agents">
+          <label>Name<input name="name" required /></label
+          ><label>Beschreibung<input name="description" /></label
+          ><label
+            >Workspace<input
+              name="workspace_path"
+              required
+              value="/home/agent/taskboard" /></label
+          ><small
+            >Der Workspace muss ein absoluter, für Shipyard erreichbarer
+            Git-Pfad sein.</small
+          ><label
+            >Max. parallele Runs<input
+              type="number"
+              name="max_parallel_runs"
+              value="1"
+              min="1"
+          /></label>
+          <fieldset>
+            <legend>Erlaubte Skills</legend>
+            <div class="skill-chips">
+              {{range .Skills}}<label
+                ><input type="checkbox" name="skill_ids" value="{{.ID}}" /><span
+                  >{{.Name}}</span
+                ></label
+              >{{end}}
+            </div>
+          </fieldset>
+          <label
+            >Prefix<textarea
+              name="prompt_prefix"
+              placeholder="Rolle, Grenzen und Erinnerungen …"
+            ></textarea></label
+          ><label
+            >Arbeitsanweisung<textarea name="prompt" required>
+Arbeite ausschließlich an der zugewiesenen Aufgabe. Führe passende Tests aus. Erstelle keinen Push, Merge oder Release.</textarea
+            ></label
+          ><label
+            >Suffix<textarea
+              name="prompt_suffix"
+              placeholder="Abschluss und Übergabe …"
+            ></textarea>
+          </label>
+          <footer>
+            <button
+              type="button"
+              class="secondary"
+              data-close-modal="new-agent"
+            >
+              Abbrechen</button
+            ><button>Agent anlegen</button>
+          </footer>
+        </form>
+      </article>
+    </dialog>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Skills · Shipyard</title>
+  <link rel="stylesheet" href="/static/pico.min.css"><link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="app-shell collapsed-shell">
+  <aside class="app-sidebar" aria-label="Hauptnavigation"><strong class="brand-mark">SY</strong><nav>
+    <a href="/"><b>▦</b><span>Übersicht</span></a><a href="/projects"><b>◫</b><span>Projekte</span></a><a href="/boards"><b>▤</b><span>Boards</span></a><a href="/agents"><b>◉</b><span>Agents</span></a><a href="/automations"><b>↯</b><span>Automationen</span></a><a class="active" href="/skills"><b>◇</b><span>Skills</span></a><a href="/settings/providers"><b>⚙</b><span>Einstellungen</span></a>
+  </nav></aside>
+  <main class="dashboard cockpit management-page skills-page">
+    <header class="cockpit-header"><div><p class="section-kicker">Agenten-Bibliothek</p><h1>Skills</h1><p>Suche im globalen skills.sh-Katalog und erlaube nur geprüfte Fähigkeiten für deine Agents.</p></div><a class="secondary" role="button" href="https://skills.sh" target="_blank" rel="noreferrer">skills.sh öffnen</a></header>
+    <section class="skills-discovery" aria-labelledby="skills-search-title"><div><h2 id="skills-search-title">Fähigkeit finden</h2><p>Der Katalog wird live durchsucht. Shipyard speichert nur Skills, die du bewusst installierst.</p></div><form method="get" action="/skills" class="skill-search-form"><label for="skill-query">Suche nach Aufgabe, Technologie oder Anbieter</label><div><input id="skill-query" type="search" name="q" minlength="2" value="{{.Query}}" placeholder="z. B. PostgreSQL, Testing, React" autofocus><button>Skills suchen</button></div></form><div class="skill-topic-row" aria-label="Vorgeschlagene Suchen"><a href="/skills?q=testing">Testing</a><a href="/skills?q=frontend">Frontend</a><a href="/skills?q=postgres">PostgreSQL</a><a href="/skills?q=automation">Automation</a><a href="/skills?q=security">Security</a></div></section>
+    <section class="skill-workbench">
+      <section class="skill-catalog-pane" aria-labelledby="catalog-title"><header><p class="section-kicker">skills.sh</p><h2 id="catalog-title">{{if .Query}}Treffer für „{{.Query}}“{{else}}Durchsuche den Katalog{{end}}</h2></header>{{if .CatalogError}}<p class="notice error" role="alert">{{.CatalogError}}</p>{{else if .Query}}<div class="skill-catalog-list">{{range .Catalog}}<article class="skill-catalog-card"><div><h3>{{.Name}}</h3><p class="skill-provenance">{{.Source}} <span aria-hidden="true">·</span> {{.Installs}} Installationen</p><a href="{{.URL}}" target="_blank" rel="noreferrer">Details und Prüfungen auf skills.sh</a></div><form method="post" action="/skills/skills-sh/install"><input type="hidden" name="source" value="{{.Source}}"><input type="hidden" name="slug" value="{{.Slug}}"><button>Installieren</button></form></article>{{else}}<p class="empty-state">Keine passenden Skills gefunden. Versuche einen allgemeineren Begriff.</p>{{end}}</div>{{else}}<div class="skill-discovery-empty"><strong>Gezielt statt endlos scrollen.</strong><p>Beschreibe, was ein Agent können soll. Die Suche zeigt nur passende Skills aus skills.sh.</p></div>{{end}}</section>
+      <aside class="skill-installed-pane" aria-labelledby="installed-title"><header><p class="section-kicker">Installiert · {{len .Installed}}</p><h2 id="installed-title">Für Agents verfügbar</h2><p>Erst nach der Installation kannst du einen Skill gezielt im Agent-Profil erlauben.</p></header><div class="skill-installed-list">{{range .Installed}}<article class="skill-installed-card"><div><h3>{{.Name}}</h3><small>{{.Description}}</small></div><form method="post" action="/skills/{{.ID}}/uninstall" onsubmit="return confirm('Skill wirklich deinstallieren? Er wird aus Agent-Profilen entfernt.')"><button class="secondary contrast">Entfernen</button></form></article>{{else}}<p class="empty-state">Noch keine Skills installiert.</p>{{end}}</div></aside>
+    </section>
+  </main>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

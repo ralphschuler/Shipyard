@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Übersicht · Shipyard</title>
+  <link rel="icon" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/pico.min.css">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app-shell collapsed-shell">
+    <aside class="app-sidebar" aria-label="Hauptnavigation">
+      <strong class="brand-mark" title="Shipyard">SY</strong>
+      <nav>
+        <a class="active" href="/" title="Übersicht"><b>▦</b><span>Übersicht</span></a>
+        <a href="/projects" title="Projekte"><b>◫</b><span>Projekte</span></a>
+        <a href="/boards" title="Boards"><b>▤</b><span>Boards</span></a>
+        <a href="/agents" title="Agents"><b>◉</b><span>Agents</span></a>
+        <a href="/automations" title="Automationen"><b>↯</b><span>Automationen</span></a>
+        <a href="/skills" title="Skills"><b>◇</b><span>Skills</span></a>
+        <a href="/settings/providers" title="Einstellungen"><b>⚙</b><span>Einstellungen</span></a>
+      </nav>
+    </aside>
+    <main class="dashboard cockpit" data-dashboard-overview>
+      <header class="cockpit-header">
+        <div>
+          <p class="section-kicker">Live-Überblick</p>
+          <h1>Arbeitsfluss</h1>
+          <p>Der aktuelle Zustand über Boards, Projekte und Agent-Ausführungen.</p>
+        </div>
+        <a class="quiet-link" href="/boards">Boards verwalten <span aria-hidden="true">→</span></a>
+      </header>
+
+      <section class="signal-strip" aria-label="Task-Status">
+        <div><small>Im System</small><strong>{{.Dashboard.Total}}</strong><span>Tasks</span></div>
+        <div><small>In Arbeit</small><strong>{{.Dashboard.Active}}</strong><span>offen</span></div>
+        <div><small>Abgeschlossen</small><strong>{{.Dashboard.Completed}}</strong><span>erledigt</span></div>
+      </section>
+
+      {{if gt .Dashboard.Total 0}}
+      <section class="workbench dashboard-primary-grid">
+        <article class="workflow-panel throughput-panel">
+          <header><div><p class="section-kicker">Letzte 14 Tage</p><h2>Task-Durchsatz</h2><p class="panel-summary">Erstellt und abgeschlossen</p></div></header>
+          <div class="line-chart" aria-label="Linienchart erstellte und abgeschlossene Tasks">
+            <svg viewBox="0 0 200 90" role="img" aria-label="Erstellte Tasks in Blau, abgeschlossene Tasks in Grün"><line x1="8" y1="82" x2="192" y2="82"></line><polyline class="created" points="{{linePoints .Dashboard.CreatedSeries}}"></polyline><polyline class="completed" points="{{linePoints .Dashboard.CompletedSeries}}"></polyline></svg>
+            <div class="chart-legend"><span><i class="created"></i>Erstellt</span><span><i class="completed"></i>Abgeschlossen</span></div>
+          </div>
+        </article>
+        <article class="priority-panel run-status-panel">
+          <header><div><p class="section-kicker">Agents</p><h2>Run-Status</h2><p class="panel-summary">Ausführungen im gesamten System</p></div></header>
+          <div class="priority-chart">
+            <div><span>Wartend</span><strong>{{.Dashboard.Runs.Queued}}</strong></div>
+            <div><span>Läuft</span><strong>{{.Dashboard.Runs.Running}}</strong></div>
+            <div><span>Erfolgreich</span><strong>{{.Dashboard.Runs.Succeeded}}</strong></div>
+            <div{{if gt .Dashboard.Runs.Failed 0}} class="run-status-failed"{{end}}><span>Fehlgeschlagen</span><strong>{{.Dashboard.Runs.Failed}}</strong></div>
+          </div>
+          <a class="panel-link" href="/runs">Alle Runs öffnen <span aria-hidden="true">→</span></a>
+        </article>
+      </section>
+
+      <section class="workflow-panel dashboard-section">
+        <header><div><p class="section-kicker">Verteilung</p><h2>Tasks im Workflow</h2></div><p>Nach Board und Status</p></header>
+        <div class="bar-chart">{{range .Dashboard.ByColumn}}<div class="bar-row"><span>{{.Name}}</span><div><i style="width:{{pct .Count $.Max}}%"></i></div><strong>{{.Count}}</strong></div>{{else}}<p class="empty-state">Noch keine Tasks im Workflow.</p>{{end}}</div>
+      </section>
+      {{else}}
+      <section class="empty-dashboard"><h2>Der Arbeitsfluss beginnt mit einem Board.</h2><p>Lege einen Bereich und einen Workflow an. Danach erscheinen Durchsatz, Status und Agent-Ausführungen automatisch hier.</p><a role="button" href="/boards">Erstes Board anlegen</a></section>
+      {{end}}
+
+      <section class="workflow-panel dashboard-section cost-panel">
+        <header><div><p class="section-kicker">Budget</p><h2>Geschätzte Agent-Kosten</h2></div><p>{{usd .Dashboard.EstimatedCostMicrousd}} gesamt</p></header>
+        <div class="bar-chart">{{range .Dashboard.CostByAgent}}<div class="bar-row"><span>{{.Name}}</span><div><i style="width:{{costPct .AmountMicrousd $.Dashboard.EstimatedCostMicrousd}}%"></i></div><strong>{{usd .AmountMicrousd}}</strong></div>{{else}}<p class="empty-state">Noch keine Kostenraten oder API-Runs erfasst.</p>{{end}}</div>
+      </section>
+
+      {{if .Dashboard.Notifications}}
+      <details class="notifications"><summary>Agent-Meldungen ({{len .Dashboard.Notifications}})</summary>{{range .Dashboard.Notifications}}<article><p>{{.Message}}</p><small>{{datetime .CreatedAt}}</small><form method="post" action="/notifications/{{.ID}}/read"><button class="secondary">Gelesen</button></form></article>{{end}}</details>
+      {{end}}
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

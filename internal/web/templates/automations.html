@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Automationen · Shipyard</title>
+  <link rel="stylesheet" href="/static/pico.min.css">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div class="app-shell collapsed-shell">
+    <aside class="app-sidebar" aria-label="Hauptnavigation">
+      <strong class="brand-mark">SY</strong>
+      <nav>
+        <a href="/"><b>▦</b><span>Übersicht</span></a>
+        <a href="/projects"><b>◫</b><span>Projekte</span></a>
+        <a href="/boards"><b>▤</b><span>Boards</span></a>
+        <a href="/agents"><b>◉</b><span>Agents</span></a>
+        <a class="active" href="/automations"><b>↯</b><span>Automationen</span></a>
+        <a href="/skills"><b>◇</b><span>Skills</span></a>
+        <a href="/settings/providers"><b>⚙</b><span>Einstellungen</span></a>
+      </nav>
+    </aside>
+    <main class="dashboard cockpit management-page">
+      <header class="cockpit-header">
+        <div>
+          <p class="section-kicker">Ausführung</p>
+          <h1>Automationen</h1>
+          <p>Starte Agents durch Ereignisse im Task-Lebenszyklus.</p>
+        </div>
+        <button data-open-modal="new-rule">Regel anlegen</button>
+      </header>
+      <section class="management-list automation-rule-list">
+        {{range .Rules}}
+        {{$rule := .}}
+        <article>
+          <header><div><h2>{{.Name}}</h2><p>{{if .Enabled}}<mark>Aktiv</mark>{{else}}Pausiert{{end}} · {{.BoardName}}</p></div><button class="secondary" data-open-modal="edit-rule-{{.ID}}">Bearbeiten</button></header>
+          <p>Wenn <strong>{{.TriggerType}}</strong>{{if .ColumnName}} in <strong>{{.ColumnName}}</strong>{{end}}{{if .LabelName}} mit Tag <strong>{{.LabelName}}</strong>{{end}}, starte <strong>{{.AgentName}}</strong>.</p>
+          <p class="muted">{{if .SuccessColumnName}}Bei Erfolg: {{if .RequireDeliveryApproval}}Diff übernehmen, dann{{else}}automatisch nach{{end}} <strong>{{.SuccessColumnName}}</strong>.{{end}}{{if .FailureColumnName}} Bei Fehler: <strong>{{.FailureColumnName}}</strong>.{{end}}</p>
+          <footer>
+            <form method="post" action="/automations/{{.ID}}/enabled"><input type="hidden" name="enabled" value="{{if .Enabled}}false{{else}}true{{end}}"><button class="secondary">{{if .Enabled}}Pausieren{{else}}Aktivieren{{end}}</button></form>
+            <form method="post" action="/automations/{{.ID}}/delete"><button class="contrast">Löschen</button></form>
+          </footer>
+        </article>
+        <dialog id="edit-rule-{{.ID}}"><article><header><button class="close" data-close-modal="edit-rule-{{.ID}}" aria-label="Schließen"></button><h2>Regel bearbeiten</h2></header><form method="post" action="/automations/{{.ID}}"><label>Name<input name="name" value="{{.Name}}" required></label><label>Board<select name="board_id" required>{{range $.Boards}}<option value="{{.ID}}"{{if eq .ID $rule.BoardID}} selected{{end}}>{{.Name}}</option>{{end}}</select></label><label>Auslöser<select name="trigger_type"><option value="task.entered_column"{{if eq .TriggerType "task.entered_column"}} selected{{end}}>Task in Spalte verschoben</option><option value="task.created"{{if eq .TriggerType "task.created"}} selected{{end}}>Task angelegt</option><option value="task.due_soon"{{if eq .TriggerType "task.due_soon"}} selected{{end}}>Fälligkeit nähert sich</option></select></label><label>Zielspalte<select name="target_column_id"><option value="">Beliebige Spalte</option>{{range $.Columns}}<option value="{{.ID}}"{{if eq .ID $rule.TargetColumnID}} selected{{end}}>{{.Label}}</option>{{end}}</select></label><label>Erforderlicher Tag<select name="label_id"><option value="">Jeder Tag</option>{{range $.Labels}}<option value="{{.ID}}"{{if eq .ID $rule.LabelID}} selected{{end}}>{{.Name}}</option>{{end}}</select></label><label>Agent<select name="agent_id" required>{{range $.Agents}}<option value="{{.ID}}"{{if eq .ID $rule.AgentID}} selected{{end}}>{{.Name}}</option>{{end}}</select></label><label>Bei Erfolg verschieben<select name="success_column_id"><option value="">Nicht verschieben</option>{{range $.Columns}}<option value="{{.ID}}"{{if eq .ID $rule.SuccessColumnID}} selected{{end}}>{{.Label}}</option>{{end}}</select></label><label>Bei Fehler verschieben<select name="failure_column_id"><option value="">Nicht verschieben</option>{{range $.Columns}}<option value="{{.ID}}"{{if eq .ID $rule.FailureColumnID}} selected{{end}}>{{.Label}}</option>{{end}}</select></label><label>Erfolgs-Übergang<select name="require_delivery_approval"><option value="true"{{if .RequireDeliveryApproval}} selected{{end}}>Nach Übernahme des Diffs</option><option value="false"{{if not .RequireDeliveryApproval}} selected{{end}}>Sofort nach Agent-Abschluss</option></select></label><div class="grid"><label>Alle Minuten prüfen<input type="number" name="schedule_every_minutes" min="1" value="{{if .ScheduleEveryMinutes}}{{.ScheduleEveryMinutes}}{{end}}"></label><label>Fällig in Stunden<input type="number" name="due_within_hours" min="1" value="{{if .DueWithinHours}}{{.DueWithinHours}}{{end}}"></label></div><label>Cooldown in Minuten<input type="number" name="cooldown_minutes" min="0" value="{{.CooldownMinutes}}"></label><footer><button type="button" class="secondary" data-close-modal="edit-rule-{{.ID}}">Abbrechen</button><button>Regel speichern</button></footer></form></article></dialog>
+        {{else}}
+        <article><h2>Noch keine Regeln</h2><p>Lege eine Regel an, um einen Agent bei einem Ereignis zu starten.</p></article>
+        {{end}}
+      </section>
+    </main>
+  </div>
+  <dialog id="new-rule">
+    <article>
+      <header><button class="close" data-close-modal="new-rule" aria-label="Schließen"></button><h2>Automation anlegen</h2></header>
+      <form method="post" action="/automations">
+        <label>Name<input name="name" required></label>
+        <label>Board<select name="board_id" required>{{range .Boards}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>
+        <label>Auslöser<select name="trigger_type" required><option value="task.entered_column">Task in Spalte verschoben</option><option value="task.created">Task angelegt</option><option value="task.due_soon">Fälligkeit nähert sich</option></select></label>
+        <label>Zielspalte<select name="target_column_id"><option value="">Beliebige Spalte</option>{{range .Columns}}<option value="{{.ID}}" data-board="{{.BoardID}}">{{.Label}}</option>{{end}}</select></label>
+        <label>Erforderlicher Tag<select name="label_id"><option value="">Jeder Tag</option>{{range .Labels}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select><small>Nur Tasks mit diesem Tag lösen die Regel aus.</small></label>
+        <label>Agent<select name="agent_id" required>{{range .Agents}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label>
+        <label>Bei Erfolg verschieben<select name="success_column_id"><option value="">Nicht verschieben</option>{{range .Columns}}<option value="{{.ID}}" data-board="{{.BoardID}}">{{.Label}}</option>{{end}}</select></label>
+        <label>Bei Fehler verschieben<select name="failure_column_id"><option value="">Nicht verschieben</option>{{range .Columns}}<option value="{{.ID}}" data-board="{{.BoardID}}">{{.Label}}</option>{{end}}</select></label>
+        <label>Erfolgs-Übergang<select name="require_delivery_approval"><option value="true">Nach Übernahme des Diffs</option><option value="false">Sofort nach Agent-Abschluss</option></select><small>Für Coding-Agents bleibt der Patch bis zur Übernahme isoliert. Reine Review-Agents können sofort weiterleiten.</small></label>
+        <label>Alle Minuten prüfen<input type="number" name="schedule_every_minutes" min="1"></label>
+        <label>Fällig in Stunden<input type="number" name="due_within_hours" min="1"></label>
+        <label>Cooldown in Minuten<input type="number" name="cooldown_minutes" min="0" value="0"><small>Verhindert wiederholte Agent-Starts für dieselbe Task und Regel.</small></label>
+        <footer><button type="button" class="secondary" data-close-modal="new-rule">Abbrechen</button><button>Regel speichern</button></footer>
+      </form>
+    </article>
+  </dialog>
+  <script src="/static/app.js"></script>
+</body>
+</html>

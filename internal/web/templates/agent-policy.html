@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Agentenrichtlinien · Shipyard</title>
+    <link rel="icon" href="/static/favicon.svg" />
+    <link rel="stylesheet" href="/static/pico.min.css" />
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div class="app-shell collapsed-shell">
+      <aside class="app-sidebar" aria-label="Hauptnavigation">
+        <strong class="brand-mark">SY</strong>
+        <nav><a href="/"><b>▦</b><span>Übersicht</span></a><a href="/projects"><b>◫</b><span>Projekte</span></a><a href="/boards"><b>▤</b><span>Boards</span></a><a href="/agents"><b>◉</b><span>Agents</span></a><a href="/automations"><b>↯</b><span>Automationen</span></a><a href="/skills"><b>◇</b><span>Skills</span></a><a href="/runs"><b>▶</b><span>Runs</span></a><a href="/audit"><b>◷</b><span>Audit</span></a><a class="active" href="/settings/providers"><b>⚙</b><span>Einstellungen</span></a></nav>
+      </aside>
+      <main class="dashboard cockpit management-page">
+        <header class="cockpit-header">
+          <div>
+            <p class="section-kicker">Einstellungen</p>
+            <h1>Agentenrichtlinien</h1>
+            <p>
+              Diese Abschnitte umschließen jede Agentenanweisung.
+              Plattformregeln bleiben unveränderlich.
+            </p>
+          </div>
+        </header>
+        <nav class="settings-tabs" aria-label="Einstellungen">
+          <a href="/settings/providers">Provider</a
+          ><a class="active" href="/settings/agent-policy">Agentenrichtlinien</a
+          ><a href="/settings/integrations">Integrationen</a
+          ><a href="/account">Konto &amp; MCP-Tokens</a>
+        </nav>
+        <article>
+          <form method="post" action="/settings/agent-policy">
+            <label
+              >Globaler Prefix<textarea
+                name="prompt_prefix"
+                placeholder="Gemeinsamer Kontext und Erinnerungen …"
+              >
+{{.Prefix}}</textarea
+              ></label
+            ><label
+              >Globaler Suffix<textarea
+                name="prompt_suffix"
+                placeholder="Gemeinsame Abschluss- und Übergaberegeln …"
+              >
+{{.Suffix}}</textarea
+              >
+            </label>
+            <footer><button>Richtlinien speichern</button></footer>
+          </form>
+        </article>
+      </main>
+    </div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
