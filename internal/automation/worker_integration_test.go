@@ -60,7 +60,7 @@ func TestProcessStartsDeliveryAgentExactlyOnceAndRejectsUnknownTarget(t *testing
 	deliveryCount := filepath.Join(t.TempDir(), "delivery-count")
 	triageScript := fakeProviderScript(t, triageCount, "```taskboard-transition\n"+fmt.Sprintf(`{"target_column_id":"%s"}`, development.ID)+"\n```\n")
 	unknownScript := fakeProviderScript(t, triageCount, "```taskboard-transition\n{\"target_column_id\":\"00000000-0000-0000-0000-000000000000\"}\n```\n")
-	deliveryScript := fakeProviderScript(t, deliveryCount, "```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"scope\",\"result\":\"ok\"},{\"check\":\"diff\",\"result\":\"ok\"},{\"check\":\"tests\",\"result\":\"ok\"},{\"check\":\"security\",\"result\":\"ok\"},{\"check\":\"compatibility\",\"result\":\"ok\"}],\"tests\":\"integration\",\"open_risks\":\"none\"}\n```\n")
+	deliveryScript := fakeProviderScript(t, deliveryCount, "```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"Scope/Akzeptanz\",\"result\":\"ok\"},{\"check\":\"Diff/Secrets\",\"result\":\"ok\"},{\"check\":\"Tests/Fehler\",\"result\":\"ok\"},{\"check\":\"Sicherheits-/Betriebsrisiken\",\"result\":\"ok\"},{\"check\":\"Rückwärtskompatibilität\",\"result\":\"ok\"}],\"tests\":\"integration\",\"open_risks\":\"none\"}\n```\n")
 	suffix := time.Now().Format("20060102150405.000000000")
 	triageAgent, err := s.CreateAgent(ctx, "Triage Agent "+t.Name()+" "+suffix, "integration", "", "", "", repository, 1)
 	if err != nil {

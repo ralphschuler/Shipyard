@@ -219,7 +219,7 @@ func TestRequestedInteractionsParsesButtons(t *testing.T) {
 }
 
 func TestRequestedSelfReviewAcceptsPassedStructuredReview(t *testing.T) {
-	logs := []domain.RunLog{{Message: "```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"scope\",\"result\":\"ok\"},{\"check\":\"diff\",\"result\":\"ok\"},{\"check\":\"tests\",\"result\":\"ok\"},{\"check\":\"security\",\"result\":\"ok\"},{\"check\":\"compatibility\",\"result\":\"ok\"}],\"tests\":\"go test ./...\",\"open_risks\":\"none\"}\n```"}}
+	logs := []domain.RunLog{{Message: "```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"Scope/Akzeptanz\",\"result\":\"ok\"},{\"check\":\"Diff/Secrets\",\"result\":\"ok\"},{\"check\":\"Tests/Fehler\",\"result\":\"ok\"},{\"check\":\"Sicherheits-/Betriebsrisiken\",\"result\":\"ok\"},{\"check\":\"Rückwärtskompatibilität\",\"result\":\"ok\"}],\"tests\":\"go test ./...\",\"open_risks\":\"none\"}\n```"}}
 	if review, err := requestedSelfReview(logs); err != nil || review.Status != "passed" {
 		t.Fatalf("passed self-review rejected: %#v, %v", review, err)
 	}
@@ -235,6 +235,27 @@ func TestRequestedSelfReviewRejectsMissingFailedAndIncompleteReviews(t *testing.
 		if _, err := requestedSelfReview([]domain.RunLog{{Message: message}}); err == nil {
 			t.Fatalf("invalid self-review accepted: %q", message)
 		}
+	}
+}
+
+func TestRequestedSelfReviewRejectsUnknownOrDuplicateCategories(t *testing.T) {
+	base := `{"status":"passed","checklist":[{"check":"Scope/Akzeptanz","result":"ok"},{"check":"Diff/Secrets","result":"ok"},{"check":"Tests/Fehler","result":"ok"},{"check":"Sicherheits-/Betriebsrisiken","result":"ok"},{"check":"Rückwärtskompatibilität","result":"ok"}],"tests":"go test ./...","open_risks":"none"}`
+	unknown := strings.Replace(base, "Rückwärtskompatibilität", "Unbekannte Kategorie", 1)
+	duplicate := strings.Replace(base, "Rückwärtskompatibilität", "Scope/Akzeptanz", 1)
+	for _, raw := range []string{unknown, duplicate} {
+		if _, err := requestedSelfReview([]domain.RunLog{{Message: "```taskboard-self-review\n" + raw + "\n```"}}); err == nil {
+			t.Fatalf("invalid checklist categories accepted: %s", raw)
+		}
+	}
+}
+
+func TestCodexSelfReviewUsesOnlyTheStructuredCompletionChannel(t *testing.T) {
+	terminal := []domain.RunLog{{Message: "```taskboard-self-review\n{\"status\":\"passed\"}\n```"}}
+	if _, err := requestedSelfReview(structuredControlLogs("codex", terminal, "")); err == nil {
+		t.Fatal("terminal output must not satisfy the Codex self-review gate")
+	}
+	if _, err := requestedSelfReview(structuredControlLogs("codex", terminal, string(terminal[0].Message))); err == nil {
+		t.Fatal("malformed structured completion must remain rejected")
 	}
 }
 

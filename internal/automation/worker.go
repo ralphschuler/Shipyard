@@ -75,18 +75,48 @@ func requestedSelfReview(logs []domain.RunLog) (taskboardSelfReview, error) {
 	if strings.ToLower(strings.TrimSpace(review.Status)) != "passed" {
 		return review, errors.New("taskboard-self-review muss status=passed enthalten")
 	}
-	if len(review.Checklist) < 5 {
-		return review, errors.New("taskboard-self-review benötigt mindestens fünf Checklistenpunkte")
+	requiredChecks := map[string]bool{
+		"scope/akzeptanz":              false,
+		"diff/secrets":                 false,
+		"tests/fehler":                 false,
+		"sicherheits-/betriebsrisiken": false,
+		"rückwärtskompatibilität":      false,
+	}
+	if len(review.Checklist) != len(requiredChecks) {
+		return review, errors.New("taskboard-self-review benötigt genau die fünf Pflicht-Checklistenpunkte")
 	}
 	for _, item := range review.Checklist {
+		check := strings.ToLower(strings.TrimSpace(item.Check))
 		if strings.TrimSpace(item.Check) == "" || strings.TrimSpace(item.Result) == "" {
 			return review, errors.New("taskboard-self-review enthält einen unvollständigen Checklistenpunkt")
+		}
+		if _, required := requiredChecks[check]; !required {
+			return review, fmt.Errorf("taskboard-self-review enthält keine gültige Pflichtkategorie %q", item.Check)
+		}
+		if requiredChecks[check] {
+			return review, fmt.Errorf("taskboard-self-review enthält die Pflichtkategorie %q doppelt", item.Check)
+		}
+		requiredChecks[check] = true
+	}
+	for check, present := range requiredChecks {
+		if !present {
+			return review, fmt.Errorf("taskboard-self-review fehlt die Pflichtkategorie %q", check)
 		}
 	}
 	if len(review.Tests) == 0 || string(review.Tests) == "null" || len(review.OpenRisks) == 0 || string(review.OpenRisks) == "null" {
 		return review, errors.New("taskboard-self-review benötigt Testnachweise und offene Risiken")
 	}
 	return review, nil
+}
+
+func structuredControlLogs(provider string, logs []domain.RunLog, structuredOutput string) []domain.RunLog {
+	if provider != "codex" {
+		return logs
+	}
+	if strings.TrimSpace(structuredOutput) == "" {
+		return nil
+	}
+	return []domain.RunLog{{Message: structuredOutput}}
 }
 
 func maxAutomationEventAttempts() int {
@@ -965,6 +995,9 @@ func (w *Worker) Process(ctx context.Context) {
 			}
 			if attempts >= maxAutomationEventAttempts() {
 				_, _ = w.Store.AbandonEvent(ctx, event, reason)
+				// The event is terminal now. Do not continue evaluating further
+				// rules or mark it processed as if this cycle had succeeded.
+				deferEvent = true
 				return
 			}
 			deferEvent = true
@@ -975,6 +1008,9 @@ func (w *Worker) Process(ctx context.Context) {
 			continue
 		}
 		for _, rule := range rules {
+			if deferEvent {
+				break
+			}
 			runs, err := w.Store.CreateRunsForEvent(ctx, event, rule)
 			if errors.Is(err, store.ErrNoRunCreated) || errors.Is(err, store.ErrAutomationActive) {
 				continue
@@ -1495,8 +1531,12 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	hasRequestedRoute := false
 	if err == nil {
 		if logs, logErr := w.Store.RunLogs(ctx, run.ID); logErr == nil {
+			controlLogs := structuredControlLogs(provider.Provider, logs, structuredOutput)
+			if provider.Provider == "codex" && len(controlLogs) == 0 {
+				_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Codex lieferte keine Abschlussnachricht; strukturierte Task-Aktionen wurden aus Sicherheitsgründen nicht aus dem Terminal gelesen.")
+			}
 			if requiresSelfReview(agent.Name) {
-				if _, reviewErr := requestedSelfReview(logs); reviewErr != nil {
+				if _, reviewErr := requestedSelfReview(controlLogs); reviewErr != nil {
 					reason := "Self-Review abgelehnt: " + reviewErr.Error()
 					_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
 					_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Self-Review fehlgeschlagen", reason)
@@ -1507,15 +1547,6 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			if provider.Provider == "codex" {
 				if reported, ok := reportedCLITokenUsage(logs); ok {
 					tokenUsage = reported
-				}
-			}
-			controlLogs := logs
-			if provider.Provider == "codex" {
-				controlLogs = nil
-				if strings.TrimSpace(structuredOutput) != "" {
-					controlLogs = []domain.RunLog{{Message: structuredOutput}}
-				} else {
-					_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Codex lieferte keine Abschlussnachricht; strukturierte Task-Aktionen wurden aus Sicherheitsgründen nicht aus dem Terminal gelesen.")
 				}
 			}
 			for _, comment := range requestedTaskComments(controlLogs) {
