@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -355,5 +356,98 @@ func TestAutomationFingerprintClaimPersistsStatusAttemptsAndBlock(t *testing.T) 
 	}
 	if _, err = s.CreateRunsForEvent(ctx, event, rule); !errors.Is(err, ErrNoRunCreated) {
 		t.Fatalf("blocked claim must prevent a restart, got %v", err)
+	}
+}
+
+func TestWorkflowIntegrationQAReviewReturnRequiresNewAppliedDelivery(t *testing.T) {
+	s := integrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "Generation-bound return", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlog := columnByName(t, columns, "Backlog")
+	development := columnByName(t, columns, "Entwicklung")
+	review := columnByName(t, columns, "Review")
+	task, err := s.CreateTask(ctx, board.ID, "Generation-bound return", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "Generation-bound agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule, err := s.CreateRuleWithActions(ctx, "Generation-bound rule", board.ID, "task.entered_column", development.ID, agent.ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "mcp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, development.ID, "mcp"); err != nil {
+		t.Fatal(err)
+	}
+	events, err := s.PendingEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var developmentEvent domain.AutomationEvent
+	for _, event := range events {
+		if event.TaskID == task.ID && event.Type == "task.entered_column" && string(event.Payload) != "" {
+			var payload map[string]any
+			if json.Unmarshal(event.Payload, &payload) == nil && payload["target_column_id"] == development.ID {
+				developmentEvent = event
+			}
+		}
+	}
+	if developmentEvent.ID == "" {
+		t.Fatal("development event not found")
+	}
+	runs, err := s.CreateRunsForEvent(ctx, developmentEvent, rule)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("create delivery run: runs=%d err=%v", len(runs), err)
+	}
+	if _, err = s.DB.Exec(ctx, "UPDATE agent_runs SET applied_at=now(),accepted_commit_sha='applied-generation' WHERE id=$1", runs[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, review.ID, "mcp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, development.ID, "mcp"); err != nil {
+		t.Fatal(err)
+	}
+	assertLatestReturnPayload(t, s, ctx, task.ID, true)
+
+	// The same applied delivery must not make a second unchanged return
+	// eligible. It is older than the first concrete return generation.
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, review.ID, "mcp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, development.ID, "mcp"); err != nil {
+		t.Fatal(err)
+	}
+	assertLatestReturnPayload(t, s, ctx, task.ID, false)
+}
+
+func assertLatestReturnPayload(t *testing.T, s *Store, ctx context.Context, taskID string, wantChange bool) {
+	t.Helper()
+	var payload []byte
+	if err := s.DB.QueryRow(ctx, `SELECT payload FROM automation_events WHERE task_id=$1 AND payload->>'qa_return'='true' ORDER BY occurred_at DESC LIMIT 1`, taskID).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	var value struct {
+		ChangeAvailable  bool   `json:"change_available"`
+		ReturnGeneration string `json:"return_generation"`
+	}
+	if err := json.Unmarshal(payload, &value); err != nil {
+		t.Fatal(err)
+	}
+	if value.ChangeAvailable != wantChange || value.ReturnGeneration == "" {
+		t.Fatalf("return payload = %#v, want change_available=%t and a generation", value, wantChange)
 	}
 }

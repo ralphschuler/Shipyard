@@ -1259,7 +1259,9 @@ func moveTaskTx(c context.Context, tx pgx.Tx, id, target, source string) error {
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(c, "INSERT INTO task_transitions(task_id,from_column_id,to_column_id,transition_id,source) VALUES($1,$2,$3,$4,$5)", id, current, target, transition, source)
+	var taskTransitionID string
+	err = tx.QueryRow(c, `INSERT INTO task_transitions(task_id,from_column_id,to_column_id,transition_id,source)
+		VALUES($1,$2,$3,$4,$5) RETURNING id`, id, current, target, transition, source).Scan(&taskTransitionID)
 	if err != nil {
 		return err
 	}
@@ -1274,13 +1276,29 @@ func moveTaskTx(c context.Context, tx pgx.Tx, id, target, source string) error {
 	changeAvailable := false
 	returnColumn := strings.EqualFold(strings.TrimSpace(currentName), "qa") || strings.EqualFold(strings.TrimSpace(currentName), "review")
 	if returnColumn && targetType != "done" {
-		err = tx.QueryRow(c, "SELECT EXISTS(SELECT 1 FROM agent_runs WHERE task_id=$1 AND applied_at IS NOT NULL)", id).Scan(&changeAvailable)
+		// Bind the evidence to this concrete return generation. A task-wide
+		// EXISTS check would let an old applied run resurrect later unchanged
+		// QA/review returns indefinitely.
+		err = tx.QueryRow(c, `SELECT EXISTS(
+			SELECT 1 FROM agent_runs r
+			WHERE r.task_id=$1 AND r.applied_at IS NOT NULL
+			  AND r.applied_at > COALESCE((
+				SELECT MAX(previous.occurred_at)
+				FROM task_transitions previous
+				JOIN workflow_columns previous_from ON previous_from.id=previous.from_column_id
+				JOIN workflow_columns previous_to ON previous_to.id=previous.to_column_id
+				WHERE previous.task_id=$1
+				  AND previous.id<>$2
+				  AND lower(trim(previous_from.name)) IN ('qa','review')
+				  AND previous_to.column_type<>'done'
+			  ), '-infinity'::timestamptz)
+		)`, id, taskTransitionID).Scan(&changeAvailable)
 		if err != nil {
 			return err
 		}
 	}
 	_, err = tx.Exec(c, `INSERT INTO automation_events(type,task_id,board_id,payload)
-		VALUES($1,$2,$3,jsonb_build_object('target_column_id',$4::text,'qa_return',$5::boolean,'change_available',$6::boolean))`, eventType, id, board, target, returnColumn, changeAvailable)
+		VALUES($1,$2,$3,jsonb_build_object('target_column_id',$4::text,'qa_return',$5::boolean,'change_available',$6::boolean,'return_generation',$7::text))`, eventType, id, board, target, returnColumn, changeAvailable, taskTransitionID)
 	return err
 }
 
