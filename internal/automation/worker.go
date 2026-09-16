@@ -552,6 +552,12 @@ func agentEnvironment(secretEnv string) []string {
 			env = append(env, secretEnv+"="+value)
 		}
 	}
+	// This is a deliberately separate, disposable database. It is the only
+	// non-provider service value made available to sandboxed commands so the
+	// opt-in workflow integration suite can run. DATABASE_URL remains excluded.
+	if value, ok := os.LookupEnv("SHIPYARD_TEST_DATABASE_URL"); ok && value != "" {
+		env = append(env, "SHIPYARD_TEST_DATABASE_URL="+value)
+	}
 	env = append(env, "NO_COLOR=1", "TERM=dumb")
 	return env
 }
