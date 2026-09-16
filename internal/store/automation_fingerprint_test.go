@@ -8,7 +8,7 @@ import (
 
 func TestAutomationEventFingerprintIgnoresTransportAndObjectOrder(t *testing.T) {
 	rule := domain.AutomationRule{ID: "rule-1", TargetColumnID: "column-qa"}
-	one := domain.AutomationEvent{Type: "task.entered_column", TaskID: "task-1", Payload: []byte(`{"target_column_id":"column-qa","event_id":"old","items":[{"id":2},{"id":1}]}`)}
+	one := domain.AutomationEvent{Type: "task.entered_column", TaskID: "task-1", Payload: []byte(`{"target_column_id":"column-qa","event_id":"old","items":[{"id":1},{"id":2}]}`)}
 	two := domain.AutomationEvent{Type: one.Type, TaskID: one.TaskID, Payload: []byte(`{"items":[{"id":1},{"id":2}],"received_at":"later","target_column_id":"column-qa","delivery_id":"new"}`)}
 	first, err := AutomationEventFingerprint(one, rule)
 	if err != nil {
@@ -23,6 +23,24 @@ func TestAutomationEventFingerprintIgnoresTransportAndObjectOrder(t *testing.T) 
 	}
 	if len(first) != 64 || strings.Trim(first, "0123456789abcdef") != "" {
 		t.Fatalf("unexpected SHA-256 fingerprint: %q", first)
+	}
+}
+
+func TestAutomationEventFingerprintPreservesArrayOrder(t *testing.T) {
+	rule := domain.AutomationRule{ID: "rule-1"}
+	one := domain.AutomationEvent{Type: "task.entered_column", TaskID: "task-1", Payload: []byte(`{"steps":["prepare","deliver"]}`)}
+	two := one
+	two.Payload = []byte(`{"steps":["deliver","prepare"]}`)
+	first, err := AutomationEventFingerprint(one, rule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := AutomationEventFingerprint(two, rule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("ordered payload arrays must not collide")
 	}
 }
 

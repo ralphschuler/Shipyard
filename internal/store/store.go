@@ -12,7 +12,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"taskboard/internal/domain"
 	"time"
@@ -52,8 +51,10 @@ var ErrAutomationActive = errors.New("automation already has an active run for t
 var ErrTaskAgentActive = errors.New("agent already has an active run for this task")
 
 // AutomationEventFingerprint is the durable semantic identity used by the
-// automation claim table. Transport-only fields are deliberately excluded;
-// object keys and unordered arrays are canonicalized before hashing.
+// automation claim table. All payload fields are relevant unless they are
+// transport metadata (event_id, delivery_id, transport_id, occurred_at, or
+// received_at). JSON object key order is insignificant, while array order is
+// preserved: arrays can represent ordered transitions or requested targets.
 func AutomationEventFingerprint(event domain.AutomationEvent, rule domain.AutomationRule) (string, error) {
 	var payload any
 	if len(event.Payload) == 0 {
@@ -92,11 +93,6 @@ func canonicalAutomationPayload(value any) any {
 		for i, child := range v {
 			items[i] = canonicalAutomationPayload(child)
 		}
-		sort.SliceStable(items, func(i, j int) bool {
-			left, _ := json.Marshal(items[i])
-			right, _ := json.Marshal(items[j])
-			return string(left) < string(right)
-		})
 		return items
 	default:
 		return value
@@ -2705,12 +2701,26 @@ func (s *Store) MarkEventProcessed(c context.Context, id string) error {
 	return e
 }
 func (s *Store) RecordEventFailure(c context.Context, id, message string) (int, error) {
+	tx, err := s.DB.Begin(c)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(c)
 	var attempts int
-	err := s.DB.QueryRow(c, "UPDATE automation_events SET attempts=attempts+1,last_error=$2 WHERE id=$1 AND processed_at IS NULL RETURNING attempts", id, message).Scan(&attempts)
+	err = tx.QueryRow(c, "UPDATE automation_events SET attempts=attempts+1,last_error=$2 WHERE id=$1 AND processed_at IS NULL RETURNING attempts", id, message).Scan(&attempts)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
 	}
-	return attempts, err
+	if err != nil {
+		return 0, err
+	}
+	if _, err = tx.Exec(c, `UPDATE automation_event_claims
+		SET status=CASE WHEN status IN ('queued','running') THEN 'failed' ELSE status END,
+			attempts=attempts+1,last_error=$2,updated_at=now()
+		WHERE event_id=$1 AND status NOT IN ('succeeded','blocked')`, id, message); err != nil {
+		return 0, err
+	}
+	return attempts, tx.Commit(c)
 }
 
 // AbandonEvent terminates an unrecoverable event so a broken integration
@@ -2726,8 +2736,8 @@ func (s *Store) AbandonEvent(c context.Context, event domain.AutomationEvent, me
 	if err != nil || tag.RowsAffected() == 0 {
 		return false, err
 	}
-	if _, err = tx.Exec(c, `UPDATE automation_event_claims SET status='blocked',attempts=attempts+1,last_error=$2,updated_at=now()
-		WHERE event_id=$1 AND status IN ('queued','running')`, event.ID, message); err != nil {
+	if _, err = tx.Exec(c, `UPDATE automation_event_claims SET status='blocked',attempts=GREATEST(attempts,(SELECT attempts FROM automation_events WHERE id=$1)),last_error=$2,updated_at=now()
+		WHERE event_id=$1 AND status IN ('queued','running','failed')`, event.ID, message); err != nil {
 		return false, err
 	}
 	if event.TaskID != "" {

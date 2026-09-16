@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"taskboard/internal/domain"
 	"testing"
 	"time"
@@ -185,5 +187,173 @@ func TestWorkflowIntegrationTriageRunIsCreatedExactlyOnce(t *testing.T) {
 	allRuns, err := s.RunsForTask(ctx, task.ID)
 	if err != nil || len(allRuns) != 1 {
 		t.Fatalf("delivery agent must be started exactly once: runs=%d err=%v", len(allRuns), err)
+	}
+}
+
+func TestAutomationFingerprintClaimSerializesConcurrentTransportRetries(t *testing.T) {
+	s := integrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "Fingerprint race", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlog := columnByName(t, columns, "Backlog")
+	task, err := s.CreateTask(ctx, board.ID, "Fingerprint race task", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "Fingerprint race agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule, err := s.CreateRuleWithActions(ctx, "Fingerprint race rule", board.ID, "task.entered_column", backlog.ID, agent.ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := make([]domain.AutomationEvent, 2)
+	for i := range events {
+		err = s.DB.QueryRow(ctx, `INSERT INTO automation_events(type,task_id,board_id,payload)
+			VALUES('task.entered_column',$1,$2,jsonb_build_object('target_column_id',$3::text,'delivery_id',$4::text))
+			RETURNING id,type,task_id,board_id,payload,occurred_at`, task.ID, board.ID, backlog.ID, fmt.Sprintf("transport-%d", i)).
+			Scan(&events[i].ID, &events[i].Type, &events[i].TaskID, &events[i].BoardID, &events[i].Payload, &events[i].OccurredAt)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var wg sync.WaitGroup
+	results := make(chan error, len(events))
+	for _, event := range events {
+		wg.Add(1)
+		go func(event domain.AutomationEvent) {
+			defer wg.Done()
+			_, callErr := s.CreateRunsForEvent(ctx, event, rule)
+			results <- callErr
+		}(event)
+	}
+	wg.Wait()
+	close(results)
+	created := 0
+	for callErr := range results {
+		if callErr == nil {
+			created++
+			continue
+		}
+		if !errors.Is(callErr, ErrAutomationActive) && !errors.Is(callErr, ErrNoRunCreated) {
+			t.Fatalf("unexpected concurrent claim error: %v", callErr)
+		}
+	}
+	if created != 1 {
+		t.Fatalf("concurrent semantic retries started %d batches, want 1", created)
+	}
+	var runs, claims int
+	if err = s.DB.QueryRow(ctx, "SELECT count(*) FROM agent_runs WHERE task_id=$1", task.ID).Scan(&runs); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DB.QueryRow(ctx, "SELECT count(*) FROM automation_event_claims WHERE task_id=$1", task.ID).Scan(&claims); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 1 || claims != 1 {
+		t.Fatalf("durable deduplication created runs=%d claims=%d, want 1/1", runs, claims)
+	}
+}
+
+func TestAutomationFingerprintClaimPersistsStatusAttemptsAndBlock(t *testing.T) {
+	s := integrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "Fingerprint status", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlog := columnByName(t, columns, "Backlog")
+	task, err := s.CreateTask(ctx, board.ID, "Fingerprint status task", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "Fingerprint status agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule, err := s.CreateRuleWithActions(ctx, "Fingerprint status rule", board.ID, "task.entered_column", backlog.ID, agent.ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event domain.AutomationEvent
+	err = s.DB.QueryRow(ctx, `INSERT INTO automation_events(type,task_id,board_id,payload)
+		VALUES('task.entered_column',$1,$2,jsonb_build_object('target_column_id',$3::text,'transport_id','restart-test'))
+		RETURNING id,type,task_id,board_id,payload,occurred_at`, task.ID, board.ID, backlog.ID).
+		Scan(&event.ID, &event.Type, &event.TaskID, &event.BoardID, &event.Payload, &event.OccurredAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CreateRunsForEvent(ctx, event, rule); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.DB.Exec(ctx, "UPDATE agent_run_batches SET status='failed' WHERE task_id=$1", task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.DB.Exec(ctx, "UPDATE agent_runs SET status='failed' WHERE task_id=$1", task.ID); err != nil {
+		t.Fatal(err)
+	}
+	batches, err := s.DB.Query(ctx, "SELECT id FROM agent_run_batches WHERE task_id=$1", task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var batchID string
+	if batches.Next() {
+		err = batches.Scan(&batchID)
+	}
+	batches.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.RefreshRunBatch(ctx, batchID); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err = s.DB.QueryRow(ctx, "SELECT status FROM automation_event_claims WHERE event_id=$1", event.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" {
+		t.Fatalf("claim status after persisted batch failure = %q, want failed", status)
+	}
+	restarted, err := Open(ctx, s.DSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { restarted.DB.Close() })
+	if err = restarted.DB.QueryRow(ctx, "SELECT status FROM automation_event_claims WHERE event_id=$1", event.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" {
+		t.Fatalf("claim status after opening a replacement worker store = %q, want failed", status)
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, err = s.RecordEventFailure(ctx, event.ID, fmt.Sprintf("failure-%d", attempt+1)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	abandoned, err := s.AbandonEvent(ctx, event, "attempt limit")
+	if err != nil || !abandoned {
+		t.Fatalf("abandon after attempt limit: abandoned=%t err=%v", abandoned, err)
+	}
+	var attempts int
+	if err = s.DB.QueryRow(ctx, "SELECT status,attempts FROM automation_event_claims WHERE event_id=$1", event.ID).Scan(&status, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "blocked" || attempts != 3 {
+		t.Fatalf("terminal claim = status %q attempts %d, want blocked/3", status, attempts)
+	}
+	if _, err = s.CreateRunsForEvent(ctx, event, rule); !errors.Is(err, ErrNoRunCreated) {
+		t.Fatalf("blocked claim must prevent a restart, got %v", err)
 	}
 }
