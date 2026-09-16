@@ -154,7 +154,11 @@ func (s *Store) SetSecretAgents(ctx context.Context, actor, secretID string, age
 	}
 	defer tx.Rollback(ctx)
 	var envName string
-	if err = tx.QueryRow(ctx, "SELECT env_name FROM secrets WHERE id=$1", secretID).Scan(&envName); err != nil {
+	// Serialize assignment changes with replacement/reactivation. ReplaceSecret
+	// locks this same row before reading the assignments; without the lock a
+	// concurrent assignment could be added after ReplaceSecret's collision
+	// check and then be reactivated into a conflicting environment name.
+	if err = tx.QueryRow(ctx, "SELECT env_name FROM secrets WHERE id=$1 FOR UPDATE", secretID).Scan(&envName); err != nil {
 		return err
 	}
 	normalizedIDs := make([]string, 0, len(agentIDs))
