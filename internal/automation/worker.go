@@ -26,6 +26,10 @@ import (
 type Worker struct {
 	Store   *store.Store
 	cancels sync.Map
+
+	// executeRun is injectable only for orchestration tests. Production workers
+	// leave it nil and use the real provider execution path below.
+	executeRun func(context.Context, domain.AgentRun)
 }
 
 const agentRunTimeout = 20 * time.Minute
@@ -902,7 +906,7 @@ func (w *Worker) Process(ctx context.Context) {
 				continue
 			}
 			for _, run := range runs {
-				go w.execute(ctx, run)
+				w.startRun(ctx, run)
 			}
 		}
 		if !deferEvent {
@@ -914,9 +918,17 @@ func (w *Worker) Process(ctx context.Context) {
 		return
 	}
 	for _, run := range queued {
-		go w.execute(ctx, run)
+		w.startRun(ctx, run)
 	}
 	w.processWebhookDeliveries(ctx)
+}
+
+func (w *Worker) startRun(ctx context.Context, run domain.AgentRun) {
+	if w.executeRun != nil {
+		go w.executeRun(ctx, run)
+		return
+	}
+	go w.execute(ctx, run)
 }
 func (w *Worker) Cancel(ctx context.Context, runID string) error {
 	run, err := w.Store.Run(ctx, runID)
