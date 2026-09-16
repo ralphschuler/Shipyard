@@ -270,6 +270,11 @@ func (a *App) Protected(next http.Handler) http.Handler {
 						http.Error(w, "identity store unavailable", http.StatusInternalServerError)
 						return
 					}
+					if prefs, prefsErr := a.store.UserPreferences(r.Context(), u.ID); prefsErr == nil {
+						selected := normalizeLanguage(prefs.Language)
+						http.SetCookie(w, &http.Cookie{Name: "shipyard_language", Value: selected, Path: "/", MaxAge: 31536000, Secure: true, SameSite: http.SameSiteLaxMode})
+						r.AddCookie(&http.Cookie{Name: "shipyard_language", Value: selected})
+					}
 					next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userKey{}, u)))
 					return
 				}
@@ -282,6 +287,14 @@ func (a *App) Protected(next http.Handler) http.Handler {
 			http.SetCookie(w, &http.Cookie{Name: "taskboard_session", Value: "", Path: "/", MaxAge: -1})
 			http.Redirect(w, r, "/login", 303)
 			return
+		}
+		// The account preference is authoritative. Heal a missing or stale
+		// readable cookie and make it available to the current request so
+		// server-rendered pages use it immediately, including after reload.
+		if prefs, prefsErr := a.store.UserPreferences(r.Context(), u.ID); prefsErr == nil {
+			selected := normalizeLanguage(prefs.Language)
+			http.SetCookie(w, &http.Cookie{Name: "shipyard_language", Value: selected, Path: "/", MaxAge: 31536000, Secure: true, SameSite: http.SameSiteLaxMode})
+			r.AddCookie(&http.Cookie{Name: "shipyard_language", Value: selected})
 		}
 		// A browser may retain the readable CSRF cookie while the server-side
 		// session was renewed (for example after the local proxy re-established

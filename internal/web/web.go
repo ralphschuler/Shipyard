@@ -1245,6 +1245,16 @@ func language(r *http.Request) string {
 	}
 	return "de"
 }
+
+func (a *App) accountLanguage(r *http.Request) string {
+	if user, ok := currentUser(r.Context()); ok {
+		if prefs, err := a.store.UserPreferences(r.Context(), user.ID); err == nil {
+			return resolveLanguage(prefs.Language, r)
+		}
+	}
+	return language(r)
+}
+
 func (a *App) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	var page bytes.Buffer
@@ -1309,7 +1319,7 @@ func (a *App) boards(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	a.render(w, "boards.html", map[string]any{"Boards": bs, "Templates": store.BoardTemplates(), "Lang": language(r)})
+	a.render(w, "boards.html", map[string]any{"Boards": bs, "Templates": store.BoardTemplates(), "Lang": a.accountLanguage(r)})
 }
 func (a *App) projects(w http.ResponseWriter, r *http.Request) {
 	projects, err := a.store.Projects(r.Context())
@@ -1691,7 +1701,7 @@ func (a *App) createAccountTokenAPI(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, map[string]any{"token": raw, "record": token}, err)
 }
 func (a *App) boardAPI(w http.ResponseWriter, r *http.Request) {
-	value, err := a.page(r.Context(), r.PathValue("id"), "", language(r))
+	value, err := a.page(r.Context(), r.PathValue("id"), "", a.accountLanguage(r))
 	writeAPI(w, value, err)
 }
 func (a *App) taskAPI(w http.ResponseWriter, r *http.Request) {
@@ -1808,7 +1818,7 @@ func (a *App) page(c context.Context, id, errText string, lang string) (boardPag
 	return boardPage{Board: b, Columns: cols, Tasks: tasks, Transitions: tr, Error: errText, Lang: lang, Labels: labels, Projects: projects, Groups: groups}, e
 }
 func (a *App) board(w http.ResponseWriter, r *http.Request) {
-	p, e := a.page(r.Context(), r.PathValue("id"), "", language(r))
+	p, e := a.page(r.Context(), r.PathValue("id"), "", a.accountLanguage(r))
 	if e != nil {
 		http.NotFound(w, r)
 		return
@@ -1836,7 +1846,7 @@ func (a *App) createTask(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, e.Error(), http.StatusBadRequest)
 			return
 		}
-		p, _ := a.page(r.Context(), r.PathValue("id"), e.Error(), language(r))
+		p, _ := a.page(r.Context(), r.PathValue("id"), e.Error(), a.accountLanguage(r))
 		a.render(w, "board.html", p)
 		return
 	}
@@ -1871,7 +1881,7 @@ func (a *App) addColumn(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/boards/"+r.PathValue("id")+"/workflow", 303)
 }
 func (a *App) workflow(w http.ResponseWriter, r *http.Request) {
-	p, e := a.page(r.Context(), r.PathValue("id"), "", language(r))
+	p, e := a.page(r.Context(), r.PathValue("id"), "", a.accountLanguage(r))
 	if e != nil {
 		http.NotFound(w, r)
 		return
