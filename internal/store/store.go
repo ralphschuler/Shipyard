@@ -474,13 +474,12 @@ func (s *Store) EnsureProjectGroup(c context.Context, name, color string) (domai
 	return group, err
 }
 func (s *Store) SetTaskTargets(c context.Context, taskID string, projectIDs, groupIDs []string) error {
-	for kind, ids := range map[string][]string{"project": projectIDs, "group": groupIDs} {
-		for _, rawID := range ids {
-			id := strings.TrimSpace(rawID)
-			if !canonicalUUID.MatchString(id) {
-				return fmt.Errorf("ungültige %s-ID %q: erwartet wird eine kanonische UUID (z. B. 123e4567-e89b-12d3-a456-426614174000), keine Repository-URL", kind, rawID)
-			}
-		}
+	var err error
+	if projectIDs, err = normalizeTargetIDs("project", projectIDs); err != nil {
+		return err
+	}
+	if groupIDs, err = normalizeTargetIDs("group", groupIDs); err != nil {
+		return err
 	}
 	tx, err := s.DB.Begin(c)
 	if err != nil {
@@ -524,6 +523,18 @@ func (s *Store) SetTaskTargets(c context.Context, taskID string, projectIDs, gro
 		return err
 	}
 	return tx.Commit(c)
+}
+
+func normalizeTargetIDs(kind string, rawIDs []string) ([]string, error) {
+	ids := make([]string, len(rawIDs))
+	for i, rawID := range rawIDs {
+		id := strings.TrimSpace(rawID)
+		if !canonicalUUID.MatchString(id) {
+			return nil, fmt.Errorf("ungültige %s-ID %q: erwartet wird eine kanonische UUID (z. B. 123e4567-e89b-12d3-a456-426614174000), keine Repository-URL", kind, rawID)
+		}
+		ids[i] = id
+	}
+	return ids, nil
 }
 func (s *Store) TaskRepositoryTargets(c context.Context, taskID string) ([]domain.RepositoryTarget, error) {
 	rows, err := s.DB.Query(c, `SELECT id,task_id,COALESCE(project_id::text,''),project_name,repository_url,default_branch,local_path,source_groups,created_at FROM task_repository_targets WHERE task_id=$1 ORDER BY project_name`, taskID)
