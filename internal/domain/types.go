@@ -234,6 +234,13 @@ type ProviderSetting struct {
 	Model, Command, SecretEnv, BaseURL, Options string
 	UpdatedAt                                   time.Time
 }
+type Secret struct {
+	ID, Name, Description, EnvName string
+	Revoked                        bool
+	AgentIDs                       []string
+	CreatedAt, UpdatedAt           time.Time
+}
+type SecretValue struct{ EnvName, Value string }
 type RunLog struct {
 	ID, RunID      string
 	Sequence       int

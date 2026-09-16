@@ -777,6 +777,18 @@ func agentEnvironment(secretEnv string) []string {
 	return env
 }
 
+func (w *Worker) agentSecretEnvironment(ctx context.Context, agentID string) ([]string, error) {
+	values, err := w.Store.SecretValuesForAgent(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+	env := make([]string, 0, len(values))
+	for _, secret := range values {
+		env = append(env, secret.EnvName+"="+secret.Value)
+	}
+	return env, nil
+}
+
 func providerCommand(configured string) (string, []string) {
 	// Every production run is prepared as a dedicated Git worktree before this
 	// command is assembled. Do not hide a broken workspace with
@@ -1707,7 +1719,16 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			invocation += "  (Prompt über stdin)"
 		}
 		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Ausführungsbefehl: "+invocation)
-		_, streamErr := w.runInTmux(runCtx, run.ID, run.WorkspaceSnapshot, command, args, stdin, agentEnvironment(provider.SecretEnv))
+		env := agentEnvironment(provider.SecretEnv)
+		secretEnv, secretErr := w.agentSecretEnvironment(ctx, run.AgentID)
+		if secretErr != nil {
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", "Secret-Berechtigungen konnten nicht geladen werden")
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		env = append(env, secretEnv...)
+		_ = w.Store.RecordAudit(ctx, "agent-runner", "secret.used", "run", run.ID, map[string]string{"agent_id": run.AgentID})
+		_, streamErr := w.runInTmux(runCtx, run.ID, run.WorkspaceSnapshot, command, args, stdin, env)
 		err = streamErr
 		if provider.Provider == "codex" {
 			finalPath := filepath.Join("/home/agent/.taskboard-run-logs", run.ID+".final")

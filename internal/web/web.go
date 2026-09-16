@@ -524,6 +524,8 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("GET /api/v1/runs", a.runsAPI)
 	m.HandleFunc("GET /api/v1/audit", a.auditAPI)
 	m.HandleFunc("GET /api/v1/settings/providers", a.providersAPI)
+	m.HandleFunc("GET /api/v1/settings/secrets", a.secretsAPI)
+	m.HandleFunc("POST /api/v1/settings/secrets", a.createSecretAPI)
 	m.HandleFunc("GET /api/v1/settings/agent-policy", a.agentPolicyAPI)
 	m.HandleFunc("GET /api/v1/settings/appearance", a.appearanceAPI)
 	m.HandleFunc("GET /api/v1/settings/integrations", a.integrationsAPI)
@@ -578,6 +580,11 @@ func (a *App) Register(m *http.ServeMux) {
 		http.Redirect(w, r, "/settings/providers", http.StatusSeeOther)
 	})
 	m.HandleFunc("GET /settings/providers", a.providerSettings)
+	m.HandleFunc("GET /settings/secrets", a.secrets)
+	m.HandleFunc("POST /settings/secrets", a.createSecret)
+	m.HandleFunc("POST /settings/secrets/{id}/replace", a.replaceSecret)
+	m.HandleFunc("POST /settings/secrets/{id}/revoke", a.revokeSecret)
+	m.HandleFunc("POST /settings/secrets/{id}/agents", a.assignSecretAgents)
 	m.HandleFunc("GET /settings/prices", a.usagePrices)
 	m.HandleFunc("POST /settings/prices", a.saveUsagePrice)
 	m.HandleFunc("POST /settings/prices/{id}/delete", a.deleteUsagePrice)
@@ -1102,6 +1109,121 @@ func (a *App) providerSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.render(r, w, "providers.html", map[string]any{"Providers": p})
+}
+
+func canManageSecrets(u domain.User) bool { return u.Role == "owner" || u.Role == "admin" }
+func (a *App) secrets(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok {
+		http.Redirect(w, r, "/login", 303)
+		return
+	}
+	if !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	items, err := a.store.Secrets(r.Context())
+	if err != nil {
+		http.Error(w, "secrets unavailable", 500)
+		return
+	}
+	agents, err := a.store.Agents(r.Context())
+	if err != nil {
+		http.Error(w, "agents unavailable", 500)
+		return
+	}
+	a.render(r, w, "secrets.html", map[string]any{"Secrets": items, "Agents": agents})
+}
+func (a *App) secretsAPI(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok {
+		http.Error(w, "not authenticated", 401)
+		return
+	}
+	if !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	items, err := a.store.Secrets(r.Context())
+	if err != nil {
+		http.Error(w, "secrets unavailable", 500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(items)
+}
+func (a *App) createSecretAPI(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok {
+		http.Error(w, "not authenticated", 401)
+		return
+	}
+	if !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	var input struct{ Name, Description, EnvName, Value string }
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&input); err != nil {
+		http.Error(w, "invalid request", 400)
+		return
+	}
+	secret, err := a.store.CreateSecret(r.Context(), u.ID, input.Name, input.Description, input.EnvName, input.Value)
+	if err != nil {
+		http.Error(w, "secret could not be saved", 400)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(secret)
+}
+func (a *App) createSecret(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok || !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	_, err := a.store.CreateSecret(r.Context(), u.ID, r.FormValue("name"), r.FormValue("description"), r.FormValue("env_name"), r.FormValue("value"))
+	if err != nil {
+		http.Error(w, "secret could not be saved", 400)
+		return
+	}
+	http.Redirect(w, r, "/settings/secrets", 303)
+}
+func (a *App) replaceSecret(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok || !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	if err := a.store.ReplaceSecret(r.Context(), u.ID, r.PathValue("id"), r.FormValue("value")); err != nil {
+		http.Error(w, "secret could not be replaced", 400)
+		return
+	}
+	http.Redirect(w, r, "/settings/secrets", 303)
+}
+func (a *App) revokeSecret(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok || !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	if err := a.store.RevokeSecret(r.Context(), u.ID, r.PathValue("id")); err != nil {
+		http.Error(w, "secret could not be revoked", 400)
+		return
+	}
+	http.Redirect(w, r, "/settings/secrets", 303)
+}
+func (a *App) assignSecretAgents(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok || !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	if err := a.store.SetSecretAgents(r.Context(), u.ID, r.PathValue("id"), r.Form["agent_id"]); err != nil {
+		http.Error(w, "secret assignment could not be saved", 400)
+		return
+	}
+	http.Redirect(w, r, "/settings/secrets", 303)
 }
 func (a *App) agentPolicy(w http.ResponseWriter, r *http.Request) {
 	prefix, suffix, err := a.store.AgentPromptPolicy(r.Context())
