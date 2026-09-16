@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"taskboard/internal/domain"
 )
@@ -136,17 +137,37 @@ func (s *Store) secretAgents(ctx context.Context, secretID string) ([]string, er
 	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 func (s *Store) SetSecretAgents(ctx context.Context, actor, secretID string, agentIDs []string) error {
-	previous, err := s.secretAgents(ctx, secretID)
+	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	for _, id := range agentIDs {
-		id = strings.TrimSpace(id)
-		if id == "" {
-			continue
+	defer tx.Rollback(ctx)
+	var envName string
+	if err = tx.QueryRow(ctx, "SELECT env_name FROM secrets WHERE id=$1", secretID).Scan(&envName); err != nil {
+		return err
+	}
+	normalizedIDs := make([]string, 0, len(agentIDs))
+	seen := map[string]bool{}
+	for _, rawID := range agentIDs {
+		id := strings.TrimSpace(rawID)
+		if id != "" && !seen[id] {
+			normalizedIDs = append(normalizedIDs, id)
+			seen[id] = true
 		}
+	}
+	// Serialize assignments for the same agent/environment pair. The lock is
+	// transaction-scoped, so the conflict check and replacement are atomic even
+	// when two administrators update different secrets concurrently.
+	lockKeys := append([]string(nil), normalizedIDs...)
+	sort.Strings(lockKeys)
+	for _, id := range lockKeys {
+		if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", id+"\x00"+envName); err != nil {
+			return err
+		}
+	}
+	for _, id := range normalizedIDs {
 		var conflict string
-		err = s.DB.QueryRow(ctx, `SELECT s.name FROM secrets s JOIN secret_agents a ON a.secret_id=s.id WHERE a.agent_id=$1 AND s.env_name=(SELECT env_name FROM secrets WHERE id=$2) AND s.id<>$2 AND s.revoked_at IS NULL LIMIT 1`, id, secretID).Scan(&conflict)
+		err = tx.QueryRow(ctx, `SELECT s.name FROM secrets s JOIN secret_agents a ON a.secret_id=s.id WHERE a.agent_id=$1 AND s.env_name=$2 AND s.id<>$3 AND s.revoked_at IS NULL LIMIT 1`, id, envName, secretID).Scan(&conflict)
 		if err == nil {
 			return errors.New("secret environment name is already assigned to this agent")
 		}
@@ -154,18 +175,19 @@ func (s *Store) SetSecretAgents(ctx context.Context, actor, secretID string, age
 			return err
 		}
 	}
-	tx, err := s.DB.Begin(ctx)
+	previousRows, err := tx.Query(ctx, "SELECT agent_id::text FROM secret_agents WHERE secret_id=$1 ORDER BY agent_id", secretID)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	previous, err := pgx.CollectRows(previousRows, pgx.RowTo[string])
+	previousRows.Close()
+	if err != nil {
+		return err
+	}
 	if _, err = tx.Exec(ctx, "DELETE FROM secret_agents WHERE secret_id=$1", secretID); err != nil {
 		return err
 	}
-	for _, id := range agentIDs {
-		if strings.TrimSpace(id) == "" {
-			continue
-		}
+	for _, id := range normalizedIDs {
 		if _, err = tx.Exec(ctx, "INSERT INTO secret_agents(secret_id,agent_id) VALUES($1,$2) ON CONFLICT DO NOTHING", secretID, id); err != nil {
 			return err
 		}
@@ -178,7 +200,7 @@ func (s *Store) SetSecretAgents(ctx context.Context, actor, secretID string, age
 		old[id] = true
 	}
 	next := map[string]bool{}
-	for _, id := range agentIDs {
+	for _, id := range normalizedIDs {
 		next[id] = true
 	}
 	for id := range next {
@@ -250,5 +272,11 @@ func (s *Store) SecretValuesForAgent(ctx context.Context, agentID string) ([]dom
 func (s *Store) HasActiveSecretAssignment(ctx context.Context, envName string) (bool, error) {
 	var exists bool
 	err := s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM secrets s JOIN secret_agents a ON a.secret_id=s.id WHERE s.env_name=$1 AND s.revoked_at IS NULL)`, envName).Scan(&exists)
+	return exists, err
+}
+
+func (s *Store) HasActiveSecretAssignmentForAgent(ctx context.Context, agentID, envName string) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM secrets s JOIN secret_agents a ON a.secret_id=s.id WHERE a.agent_id=$1 AND s.env_name=$2 AND s.revoked_at IS NULL)`, agentID, envName).Scan(&exists)
 	return exists, err
 }

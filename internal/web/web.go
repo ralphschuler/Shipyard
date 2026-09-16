@@ -1396,7 +1396,7 @@ func (a *App) deleteUsagePrice(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/settings/prices", 303)
 }
 func (a *App) testProvider(w http.ResponseWriter, r *http.Request) {
-	result, err := a.worker.CheckProvider(r.Context(), r.PathValue("provider"))
+	result, err := a.worker.CheckProviderForAgent(r.Context(), r.PathValue("provider"), r.URL.Query().Get("agent_id"))
 	if err != nil {
 		http.Error(w, "Provider-Test fehlgeschlagen: "+err.Error(), http.StatusBadRequest)
 		return

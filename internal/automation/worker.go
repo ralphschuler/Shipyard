@@ -989,8 +989,16 @@ func withOutputLastMessage(args []string, path string) []string {
 
 // CheckProvider verifies only the configured execution path. It never sends a
 // prompt or consumes model tokens: CLI providers answer --version, while API
-// providers are checked for the explicitly configured secret environment.
+// providers are checked for the explicitly configured secret and agent.
 func (w *Worker) CheckProvider(ctx context.Context, name string) (string, error) {
+	return w.checkProviderForAgent(ctx, name, "")
+}
+
+func (w *Worker) CheckProviderForAgent(ctx context.Context, name, agentID string) (string, error) {
+	return w.checkProviderForAgent(ctx, name, agentID)
+}
+
+func (w *Worker) checkProviderForAgent(ctx context.Context, name, agentID string) (string, error) {
 	provider, err := w.Store.Provider(ctx, name)
 	if err != nil {
 		return "", err
@@ -1002,7 +1010,10 @@ func (w *Worker) CheckProvider(ctx context.Context, name string) (string, error)
 		if provider.SecretEnv == "" {
 			return "", errors.New("keine Secret-Umgebungsvariable konfiguriert")
 		}
-		assigned, err := w.Store.HasActiveSecretAssignment(ctx, provider.SecretEnv)
+		if strings.TrimSpace(agentID) == "" {
+			return "", errors.New("Agent-Kontext ist für den Provider-Test erforderlich")
+		}
+		assigned, err := w.Store.HasActiveSecretAssignmentForAgent(ctx, agentID, provider.SecretEnv)
 		if err != nil {
 			return "", errors.New("zentrale Secret-Zuordnung konnte nicht geprüft werden")
 		}
