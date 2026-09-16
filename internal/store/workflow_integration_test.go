@@ -434,6 +434,79 @@ func TestWorkflowIntegrationQAReviewReturnRequiresNewAppliedDelivery(t *testing.
 	assertLatestReturnPayload(t, s, ctx, task.ID, false)
 }
 
+func TestWorkflowIntegrationAcceptedDeliveryCommitPersistence(t *testing.T) {
+	s := integrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "Accepted commit persistence", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	development := columnByName(t, columns, "Entwicklung")
+	task, err := s.CreateTask(ctx, board.ID, "Accepted commit persistence", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "Accepted commit agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule, err := s.CreateRuleWithActions(ctx, "Accepted commit rule", board.ID, "task.entered_column", development.ID, agent.ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, development.ID, "mcp"); err != nil {
+		t.Fatal(err)
+	}
+	events, err := s.PendingEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event domain.AutomationEvent
+	for _, candidate := range events {
+		if candidate.TaskID == task.ID && candidate.Type == "task.entered_column" {
+			event = candidate
+		}
+	}
+	if event.ID == "" {
+		t.Fatal("development transition did not create an automation event")
+	}
+	runs, err := s.CreateRunsForEvent(ctx, event, rule)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("create delivery run: runs=%d err=%v", len(runs), err)
+	}
+	run := runs[0]
+	if _, err = s.DB.Exec(ctx, `UPDATE agent_runs SET status='succeeded',gate_status='passed',source_workspace=$2 WHERE id=$1`, run.ID, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	const acceptedSHA = "0123456789abcdef0123456789abcdef01234567"
+	applied, err := s.MarkRunApplied(ctx, run.ID, acceptedSHA)
+	if err != nil || !applied {
+		t.Fatalf("mark run applied: applied=%t err=%v", applied, err)
+	}
+	delivery, err := s.RunDelivery(ctx, run.ID)
+	if err != nil || delivery.AcceptedCommitSHA != acceptedSHA || delivery.AppliedAt == nil {
+		t.Fatalf("persisted delivery = %#v, err=%v", delivery, err)
+	}
+	commits, err := s.AcceptedRunCommitSHAs(ctx, deliverySource(t, s, ctx, run.ID))
+	if err != nil || len(commits) != 1 || commits[0] != acceptedSHA {
+		t.Fatalf("accepted commit trust boundary = %#v, err=%v", commits, err)
+	}
+}
+
+func deliverySource(t *testing.T, s *Store, ctx context.Context, runID string) string {
+	t.Helper()
+	source, err := s.RunSource(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return source
+}
+
 func assertLatestReturnPayload(t *testing.T, s *Store, ctx context.Context, taskID string, wantChange bool) {
 	t.Helper()
 	var payload []byte

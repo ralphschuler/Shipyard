@@ -115,10 +115,14 @@ func TestRunCommitExistsIgnoresMarkerOnUnrelatedRef(t *testing.T) {
 	runGit(t, source, "add", "abandoned.txt")
 	runID := "unrelated-ref"
 	runGit(t, source, "commit", "-m", "taskboard: accept run "+runID)
+	unrelatedSHA, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
 	runGit(t, source, "switch", "main")
-	found, err := runCommitExists(context.Background(), source, "0000000000000000000000000000000000000000")
+	found, err := runCommitExists(context.Background(), source, unrelatedSHA)
 	if err != nil || found {
-		t.Fatalf("marker on unrelated ref = %t, %v", found, err)
+		t.Fatalf("commit on unrelated ref = %t, %v", found, err)
 	}
 }
 
@@ -152,6 +156,51 @@ func TestSyncManagedCheckoutKeepsAcceptedAheadCommit(t *testing.T) {
 	actual, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
 	if err != nil || actual != expected {
 		t.Fatalf("accepted HEAD changed during synchronization: got %s want %s (%v)", actual, expected, err)
+	}
+}
+
+func TestSyncManagedCheckoutKeepsMultipleAcceptedAheadCommits(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, t.TempDir(), "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+
+	for _, change := range []struct {
+		name string
+		body string
+	}{
+		{"first.txt", "first\n"},
+		{"second.txt", "second\n"},
+	} {
+		if err := os.WriteFile(filepath.Join(source, change.name), []byte(change.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, source, "add", change.name)
+		runGit(t, source, "commit", "-m", "taskboard: accept run "+change.name)
+	}
+	acceptedSHAs, err := gitOutput(context.Background(), source, "log", "--format=%H", "origin/master..HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shas := strings.Split(strings.TrimSpace(acceptedSHAs), "\n")
+	if len(shas) != 2 {
+		t.Fatalf("accepted commits = %q", acceptedSHAs)
+	}
+	if err := syncManagedCheckout(context.Background(), source, "master", shas...); err != nil {
+		t.Fatalf("follow-up synchronization with two accepted commits: %v", err)
+	}
+	actual, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
+	if err != nil || actual != shas[0] {
+		t.Fatalf("accepted HEAD changed during repeated synchronization: got %s want %s (%v)", actual, shas[0], err)
 	}
 }
 
