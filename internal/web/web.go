@@ -584,6 +584,7 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("POST /settings/secrets", a.createSecret)
 	m.HandleFunc("POST /settings/secrets/{id}/replace", a.replaceSecret)
 	m.HandleFunc("POST /settings/secrets/{id}/revoke", a.revokeSecret)
+	m.HandleFunc("POST /settings/secrets/{id}/delete", a.deleteSecret)
 	m.HandleFunc("POST /settings/secrets/{id}/agents", a.assignSecretAgents)
 	m.HandleFunc("GET /settings/prices", a.usagePrices)
 	m.HandleFunc("POST /settings/prices", a.saveUsagePrice)
@@ -1209,6 +1210,18 @@ func (a *App) revokeSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := a.store.RevokeSecret(r.Context(), u.ID, r.PathValue("id")); err != nil {
 		http.Error(w, "secret could not be revoked", 400)
+		return
+	}
+	http.Redirect(w, r, "/settings/secrets", 303)
+}
+func (a *App) deleteSecret(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok || !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	if err := a.store.DeleteSecret(r.Context(), u.ID, r.PathValue("id")); err != nil {
+		http.Error(w, "secret could not be deleted", 400)
 		return
 	}
 	http.Redirect(w, r, "/settings/secrets", 303)

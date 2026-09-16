@@ -68,6 +68,9 @@ func (s *Store) CreateSecret(ctx context.Context, actor, name, description, envN
 	if name == "" || envName == "" || value == "" {
 		return domain.Secret{}, errors.New("secret name, environment name and value are required")
 	}
+	if !isSafeSecretName(name) {
+		return domain.Secret{}, errors.New("invalid secret name")
+	}
 	if !isSafeEnvName(envName) {
 		return domain.Secret{}, errors.New("invalid secret environment name")
 	}
@@ -81,6 +84,17 @@ func (s *Store) CreateSecret(ctx context.Context, actor, name, description, envN
 		err = s.RecordAudit(ctx, actor, "secret.created", "secret", out.ID, map[string]string{"name": out.Name, "env_name": out.EnvName})
 	}
 	return out, err
+}
+func isSafeSecretName(v string) bool {
+	if len(v) == 0 || len(v) > 128 {
+		return false
+	}
+	for _, r := range v {
+		if !(r == '_' || r == '-' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
+			return false
+		}
+	}
+	return true
 }
 func isSafeEnvName(v string) bool {
 	if len(v) == 0 || len(v) > 128 {
@@ -170,6 +184,9 @@ func (s *Store) SetSecretAgents(ctx context.Context, actor, secretID string, age
 	return nil
 }
 func (s *Store) ReplaceSecret(ctx context.Context, actor, secretID, value string) error {
+	if strings.TrimSpace(value) == "" {
+		return errors.New("secret value is required")
+	}
 	ciphertext, nonce, err := sealSecret(value)
 	if err != nil {
 		return err
@@ -180,6 +197,13 @@ func (s *Store) ReplaceSecret(ctx context.Context, actor, secretID, value string
 	}
 	return err
 }
+func (s *Store) DeleteSecret(ctx context.Context, actor, secretID string) error {
+	if err := s.RecordAudit(ctx, actor, "secret.deleted", "secret", secretID, nil); err != nil {
+		return err
+	}
+	_, err := s.DB.Exec(ctx, "DELETE FROM secrets WHERE id=$1", secretID)
+	return err
+}
 func (s *Store) RevokeSecret(ctx context.Context, actor, secretID string) error {
 	_, err := s.DB.Exec(ctx, "UPDATE secrets SET revoked_at=now(),updated_at=now() WHERE id=$1", secretID)
 	if err == nil {
@@ -188,23 +212,23 @@ func (s *Store) RevokeSecret(ctx context.Context, actor, secretID string) error 
 	return err
 }
 func (s *Store) SecretValuesForAgent(ctx context.Context, agentID string) ([]domain.SecretValue, error) {
-	rows, err := s.DB.Query(ctx, `SELECT s.env_name,s.ciphertext,s.nonce FROM secrets s JOIN secret_agents a ON a.secret_id=s.id WHERE a.agent_id=$1 AND s.revoked_at IS NULL`, agentID)
+	rows, err := s.DB.Query(ctx, `SELECT s.id::text,s.env_name,s.ciphertext,s.nonce FROM secrets s JOIN secret_agents a ON a.secret_id=s.id WHERE a.agent_id=$1 AND s.revoked_at IS NULL`, agentID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []domain.SecretValue
 	for rows.Next() {
-		var env string
+		var id, env string
 		var c, n []byte
-		if err = rows.Scan(&env, &c, &n); err != nil {
+		if err = rows.Scan(&id, &env, &c, &n); err != nil {
 			return nil, err
 		}
 		v, e := openSecret(c, n)
 		if e != nil {
 			return nil, e
 		}
-		out = append(out, domain.SecretValue{EnvName: env, Value: v})
+		out = append(out, domain.SecretValue{ID: id, EnvName: env, Value: v})
 	}
 	return out, rows.Err()
 }

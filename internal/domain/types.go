@@ -240,7 +240,7 @@ type Secret struct {
 	AgentIDs                       []string
 	CreatedAt, UpdatedAt           time.Time
 }
-type SecretValue struct{ EnvName, Value string }
+type SecretValue struct{ ID, EnvName, Value string }
 type RunLog struct {
 	ID, RunID      string
 	Sequence       int

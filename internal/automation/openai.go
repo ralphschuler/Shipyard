@@ -237,7 +237,7 @@ func runToolCommand(ctx context.Context, worktree, command string) string {
 	return text
 }
 
-func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, prompt, worktree string) (string, openAIUsage, error) {
+func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree string) (string, openAIUsage, error) {
 	if strings.TrimSpace(provider.Model) == "" {
 		return "", openAIUsage{}, errors.New("OpenAI-Modell fehlt in den Provider-Einstellungen")
 	}
@@ -251,8 +251,7 @@ func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, pr
 	} else if _, err := exec.LookPath("bwrap"); err != nil {
 		return "", openAIUsage{}, errors.New("OpenAI-Agenten benötigen bubblewrap (bwrap); installiere das Paket bubblewrap auf dem Server und starte taskboard.service neu")
 	}
-	apiKey := os.Getenv(provider.SecretEnv)
-	if apiKey == "" {
+	if strings.TrimSpace(apiKey) == "" {
 		return "", openAIUsage{}, errors.New("OpenAI Secret-Umgebungsvariable ist nicht gesetzt")
 	}
 	endpoint, err := responsesURL(provider.BaseURL)

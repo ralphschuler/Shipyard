@@ -789,6 +789,15 @@ func (w *Worker) agentSecretEnvironment(ctx context.Context, agentID string) ([]
 	return env, nil
 }
 
+func secretValueForEnv(values []domain.SecretValue, envName string) (domain.SecretValue, bool) {
+	for _, value := range values {
+		if value.EnvName == envName {
+			return value, true
+		}
+	}
+	return domain.SecretValue{}, false
+}
+
 func providerCommand(configured string) (string, []string) {
 	// Every production run is prepared as a dedicated Git worktree before this
 	// command is assembled. Do not hide a broken workspace with
@@ -1685,6 +1694,12 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		_ = w.finish(ctx, run, "failed")
 		return
 	}
+	secretValues, secretErr := w.Store.SecretValuesForAgent(ctx, run.AgentID)
+	if secretErr != nil {
+		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", "Secret-Berechtigungen konnten nicht geladen werden")
+		_ = w.finish(ctx, run, "failed")
+		return
+	}
 	var out []byte
 	var structuredOutput string
 	var tokenUsage int
@@ -1693,7 +1708,14 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	var nativeCostMicrousd *int64
 	var serviceTier string
 	if provider.Provider == "openai" {
-		text, usage, responseErr := runOpenAIResponses(runCtx, provider, prompt, run.WorkspaceSnapshot)
+		secret, ok := secretValueForEnv(secretValues, provider.SecretEnv)
+		if !ok {
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", "OpenAI-Secret ist diesem Agent nicht zugeordnet")
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		_ = w.Store.RecordAudit(ctx, "", "secret.used", "secret", secret.ID, map[string]string{"actor": "agent-runner", "agent_id": run.AgentID, "run_id": run.ID})
+		text, usage, responseErr := runOpenAIResponses(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot)
 		out, tokenUsage, inputTokens, outputTokens, estimatedCostMicrousd, err = []byte(text), usage.TotalTokens, usage.InputTokens, usage.OutputTokens, usage.EstimatedCostMicrousd, responseErr
 		cachedInputTokens, cacheWriteTokens, reasoningTokens = usage.CachedInputTokens, usage.CacheWriteTokens, usage.ReasoningTokens
 		apiCalls, nativeCostMicrousd = usage.APICalls, usage.NativeCostMicrousd
@@ -1719,15 +1741,13 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			invocation += "  (Prompt über stdin)"
 		}
 		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Ausführungsbefehl: "+invocation)
-		env := agentEnvironment(provider.SecretEnv)
-		secretEnv, secretErr := w.agentSecretEnvironment(ctx, run.AgentID)
-		if secretErr != nil {
-			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", "Secret-Berechtigungen konnten nicht geladen werden")
-			_ = w.finish(ctx, run, "failed")
-			return
+		env := agentEnvironment("")
+		secretEnv := make([]string, 0, len(secretValues))
+		for _, secret := range secretValues {
+			secretEnv = append(secretEnv, secret.EnvName+"="+secret.Value)
+			_ = w.Store.RecordAudit(ctx, "", "secret.used", "secret", secret.ID, map[string]string{"actor": "agent-runner", "agent_id": run.AgentID, "run_id": run.ID})
 		}
 		env = append(env, secretEnv...)
-		_ = w.Store.RecordAudit(ctx, "agent-runner", "secret.used", "run", run.ID, map[string]string{"agent_id": run.AgentID})
 		_, streamErr := w.runInTmux(runCtx, run.ID, run.WorkspaceSnapshot, command, args, stdin, env)
 		err = streamErr
 		if provider.Provider == "codex" {

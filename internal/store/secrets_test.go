@@ -36,3 +36,16 @@ func TestSafeEnvironmentName(t *testing.T) {
 		}
 	}
 }
+
+func TestSafeSecretName(t *testing.T) {
+	for _, value := range []string{"OPENAI", "prod-api_key", "A1"} {
+		if !isSafeSecretName(value) {
+			t.Errorf("%q rejected", value)
+		}
+	}
+	for _, value := range []string{"", "prod api", "token/1"} {
+		if isSafeSecretName(value) {
+			t.Errorf("%q accepted", value)
+		}
+	}
+}
