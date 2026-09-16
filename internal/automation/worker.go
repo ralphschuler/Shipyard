@@ -442,7 +442,7 @@ func formatTaskContext(task domain.Task, board domain.Board, projects []domain.P
 	if len(projects) > 0 {
 		b.WriteString("\nProjektziele:\n")
 		for _, project := range projects {
-			fmt.Fprintf(&b, "- %s | %s | Branch: %s\n", project.Name, project.RepositoryURL, project.DefaultBranch)
+			fmt.Fprintf(&b, "- %s | %s | Branch: %s | Projekt-ID: %s\n", project.Name, project.RepositoryURL, project.DefaultBranch, project.ID)
 		}
 	}
 	if len(groups) > 0 {
@@ -475,6 +475,47 @@ func formatTaskContext(task domain.Task, board domain.Board, projects []domain.P
 	}
 	b.WriteString("--- ENDE AUFGABENKONTEXT ---")
 	return b.String()
+}
+
+// formatRegisteredProjects gives Triage a lossless catalogue. Repository URLs
+// are descriptive metadata; project_id is the only value valid in
+// taskboard-targets.project_ids.
+func formatRegisteredProjects(projects []domain.Project) string {
+	if len(projects) == 0 {
+		return ""
+	}
+	type boardRef struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	type projectRef struct {
+		ProjectID     string     `json:"project_id"`
+		Name          string     `json:"name"`
+		RepositoryURL string     `json:"repository_url"`
+		DefaultBranch string     `json:"default_branch"`
+		Boards        []boardRef `json:"boards"`
+	}
+	refs := make([]projectRef, 0, len(projects))
+	for _, project := range projects {
+		ref := projectRef{ProjectID: project.ID, Name: project.Name, RepositoryURL: project.RepositoryURL, DefaultBranch: project.DefaultBranch}
+		for _, board := range project.Boards {
+			ref.Boards = append(ref.Boards, boardRef{ID: board.ID, Name: board.Name})
+		}
+		refs = append(refs, ref)
+	}
+	encoded, err := json.Marshal(refs)
+	if err != nil {
+		return ""
+	}
+	return "\n\nRegistrierte Projekte (maschinenlesbarer Kontext):\n" + string(encoded) +
+		"\nVerwende für taskboard-targets.project_ids ausschließlich project_id-Werte im kanonischen UUID-Format. Beispiel: {\"project_ids\":[\"123e4567-e89b-12d3-a456-426614174000\"],\"group_ids\":[]}\n"
+}
+
+func requestedRouteIsCurrent(task domain.Task, route transitionRequest) bool {
+	if route.TargetColumnID != "" {
+		return route.TargetColumnID == task.ColumnID
+	}
+	return strings.EqualFold(strings.TrimSpace(route.Target), strings.TrimSpace(task.ColumnName))
 }
 
 func formatAllowedTransitions(transitions []domain.Transition, columns []domain.Column) string {
@@ -1597,6 +1638,10 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		comments, _ := w.Store.Comments(ctx, task.ID)
 		decisions, _ := w.Store.TaskDecisions(ctx, task.ID)
 		prompt += formatTaskContext(task, board, projects, groups, history, comments, decisions, started)
+		if strings.EqualFold(strings.TrimSpace(agent.Name), "Triage Agent") {
+			registered, _ := w.Store.Projects(ctx)
+			prompt += formatRegisteredProjects(registered)
+		}
 		allowed, _ := w.Store.Allowed(ctx, task.ID)
 		columns, _ := w.Store.Columns(ctx, task.BoardID)
 		prompt += formatAllowedTransitions(allowed, columns)
@@ -1726,6 +1771,16 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 				}
 			}
 			requestedRoute, hasRequestedRoute = requestedTransition(controlLogs)
+			if taskErr == nil && hasRequestedRoute {
+				// Reload after provider execution: another actor may have moved the
+				// task while the agent was working.
+				if currentTask, currentErr := w.Store.GetTask(ctx, task.ID); currentErr == nil {
+					task = currentTask
+				}
+			}
+			// A provider can have been given stale context, so check the live task
+			// status before processing its route. A request for the current column
+			// is consumed as a silent no-op and must not produce a warning.
 			interactions := requestedInteractions(controlLogs)
 			releaseRoute := false
 			if taskErr == nil && isQAColumn(task) && hasRequestedRoute {
@@ -1841,6 +1896,10 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		// returns a no-op or a deterministic rejection. Never fall back to the
 		// automation rule's success column in those cases.
 		run = suppressAutomationOutcome(run, true, awaitingDecision)
+		if taskErr == nil && requestedRouteIsCurrent(task, requestedRoute) {
+			_ = w.finish(ctx, run, "succeeded")
+			return
+		}
 		targetID := requestedRoute.TargetColumnID
 		var moved bool
 		var moveErr error

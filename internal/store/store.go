@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"taskboard/internal/domain"
 	"time"
@@ -24,6 +25,8 @@ type Store struct {
 
 var ErrNoRunCreated = errors.New("agent run already exists for this event")
 var ErrWorkspaceBusy = errors.New("workspace is busy")
+
+var canonicalUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 
 // Keep every positional AutomationRule query in one canonical order. pgx's
 // RowToStructByPos deliberately rejects a partial row; centralising this list
@@ -471,6 +474,14 @@ func (s *Store) EnsureProjectGroup(c context.Context, name, color string) (domai
 	return group, err
 }
 func (s *Store) SetTaskTargets(c context.Context, taskID string, projectIDs, groupIDs []string) error {
+	for kind, ids := range map[string][]string{"project": projectIDs, "group": groupIDs} {
+		for _, rawID := range ids {
+			id := strings.TrimSpace(rawID)
+			if !canonicalUUID.MatchString(id) {
+				return fmt.Errorf("ungültige %s-ID %q: erwartet wird eine kanonische UUID (z. B. 123e4567-e89b-12d3-a456-426614174000), keine Repository-URL", kind, rawID)
+			}
+		}
+	}
 	tx, err := s.DB.Begin(c)
 	if err != nil {
 		return err

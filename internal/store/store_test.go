@@ -86,3 +86,12 @@ func TestPersonalDevelopmentTemplateDefinesRecoveryPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestCanonicalUUIDRejectsRepositoryURL(t *testing.T) {
+	if canonicalUUID.MatchString("https://github.com/example/shipyard.git") {
+		t.Fatal("repository URL must not be accepted as a project UUID")
+	}
+	if !canonicalUUID.MatchString("123e4567-e89b-12d3-a456-426614174000") {
+		t.Fatal("canonical UUID example must be accepted")
+	}
+}

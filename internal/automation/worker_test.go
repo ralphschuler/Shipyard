@@ -505,6 +505,27 @@ func TestFormatAllowedTransitionsUsesIDsAndDisplayLabels(t *testing.T) {
 	}
 }
 
+func TestFormatRegisteredProjectsSeparatesUUIDFromRepositoryURL(t *testing.T) {
+	got := formatRegisteredProjects([]domain.Project{
+		{ID: "123e4567-e89b-12d3-a456-426614174000", Name: "Shipyard", RepositoryURL: "https://github.com/example/shipyard.git", DefaultBranch: "master", Boards: []domain.Board{{ID: "board-1", Name: "Shipyard"}}},
+	})
+	for _, expected := range []string{"\"project_id\":\"123e4567-e89b-12d3-a456-426614174000\"", "\"repository_url\":\"https://github.com/example/shipyard.git\"", "\"boards\":[{\"id\":\"board-1\",\"name\":\"Shipyard\"}]", "ausschließlich project_id-Werte"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("registered project context missing %q: %s", expected, got)
+		}
+	}
+}
+
+func TestRequestedRouteCurrentColumnIsSilentNoOp(t *testing.T) {
+	task := domain.Task{ColumnID: "development-id", ColumnName: "Entwicklung"}
+	if !requestedRouteIsCurrent(task, transitionRequest{TargetColumnID: task.ColumnID}) || !requestedRouteIsCurrent(task, transitionRequest{Target: task.ColumnName}) {
+		t.Fatal("current column was not recognized")
+	}
+	if requestedRouteIsCurrent(task, transitionRequest{TargetColumnID: "review-id"}) {
+		t.Fatal("different target was treated as self-transition")
+	}
+}
+
 func TestRequestedTransitionIsUnambiguous(t *testing.T) {
 	logs := []domain.RunLog{{Message: "```taskboard-transition\n{\"target\":\"In Progress\",\"comment\":\"Bitte Schnittstelle nachziehen.\"}\n```"}}
 	route, ok := requestedTransition(logs)
