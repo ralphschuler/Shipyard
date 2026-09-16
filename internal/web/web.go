@@ -1117,7 +1117,15 @@ func (a *App) saveAppearance(w http.ResponseWriter, r *http.Request) {
 	}
 	theme := r.FormValue("theme")
 	hints := r.FormValue("shortcut_hints") == "true"
-	if err := a.store.SaveUserPreferences(r.Context(), user.ID, theme, hints); err != nil {
+	language := r.FormValue("language")
+	if language == "" {
+		if prefs, err := a.store.UserPreferences(r.Context(), user.ID); err == nil && prefs.Language != "" {
+			language = prefs.Language
+		} else {
+			language = "de"
+		}
+	}
+	if err := a.store.SaveUserPreferences(r.Context(), user.ID, theme, hints, language); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -1127,6 +1135,7 @@ func (a *App) saveAppearance(w http.ResponseWriter, r *http.Request) {
 		hintValue = "true"
 	}
 	http.SetCookie(w, &http.Cookie{Name: "shipyard_shortcut_hints", Value: hintValue, Path: "/", MaxAge: 31536000, Secure: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "shipyard_language", Value: language, Path: "/", MaxAge: 31536000, Secure: true, SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, "/settings/appearance", http.StatusSeeOther)
 }
 func (a *App) saveProvider(w http.ResponseWriter, r *http.Request) {
@@ -1220,10 +1229,21 @@ func (a *App) deleteAutomation(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/automations", 303)
 }
 func language(r *http.Request) string {
+	if cookie, err := r.Cookie("shipyard_language"); err == nil {
+		if cookie.Value == "en" {
+			return "en"
+		}
+		if cookie.Value == "de" {
+			return "de"
+		}
+	}
 	if strings.HasPrefix(r.Header.Get("Accept-Language"), "de") {
 		return "de"
 	}
-	return "en"
+	if strings.HasPrefix(r.Header.Get("Accept-Language"), "en") {
+		return "en"
+	}
+	return "de"
 }
 func (a *App) render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")

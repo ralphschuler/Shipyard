@@ -35,6 +35,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { normalizeLanguage, translate, type Language } from "@/i18n";
 
 const Dashboard = lazy(() => import("@/features/dashboard"));
 type NavItem = {
@@ -44,48 +45,48 @@ type NavItem = {
   icon: typeof LayoutDashboard;
 };
 const nav: NavItem[] = [
-  { name: "Übersicht", path: "/", icon: LayoutDashboard },
+  { name: "overview", path: "/", icon: LayoutDashboard },
   {
-    name: "Projekte",
+    name: "projects",
     path: "/projects",
     endpoint: "/api/v1/projects",
     icon: FolderGit2,
   },
-  { name: "Boards", path: "/boards", endpoint: "/api/v1/boards", icon: Boxes },
-  { name: "Agents", path: "/agents", endpoint: "/api/v1/agents", icon: Bot },
+  { name: "boards", path: "/boards", endpoint: "/api/v1/boards", icon: Boxes },
+  { name: "agents", path: "/agents", endpoint: "/api/v1/agents", icon: Bot },
   {
-    name: "Automationen",
+    name: "automations",
     path: "/automations",
     endpoint: "/api/v1/automations",
     icon: Activity,
   },
-  { name: "Skills", path: "/skills", endpoint: "/api/v1/skills", icon: Wrench },
-  { name: "Runs", path: "/runs", endpoint: "/api/v1/runs", icon: Play },
+  { name: "skills", path: "/skills", endpoint: "/api/v1/skills", icon: Wrench },
+  { name: "runs", path: "/runs", endpoint: "/api/v1/runs", icon: Play },
   {
-    name: "Audit",
+    name: "audit",
     path: "/audit",
     endpoint: "/api/v1/audit",
     icon: ShieldCheck,
   },
-  { name: "Einstellungen", path: "/settings/providers", icon: Gauge },
+  { name: "settings", path: "/settings/providers", icon: Gauge },
 ];
 function routeFromHash() {
   return location.hash.slice(1) || "/";
 }
-function titleFor(route: string) {
+function titleFor(route: string, t: (key: string) => string) {
   const known = nav.find((item) => item.path === route)?.name;
-  if (known) return known;
-  if (route === "/settings") return "Einstellungen";
-  if (route === "/account") return "Konto & Zugriff";
+  if (known) return t(known);
+  if (route === "/settings") return t("settings");
+  if (route === "/account") return t("account");
   // Detail views intentionally keep their parent section in the persistent
   // header; the local page then supplies the concrete board, task or run name.
-  if (route === "/boards") return "Boards";
-  if (route === "/projects") return "Projekte";
-  if (route === "/agents") return "Agents";
-  if (route === "/automations") return "Automationen";
-  if (route === "/skills") return "Skills";
-  if (route === "/runs") return "Runs";
-  if (route === "/audit") return "Audit";
+  if (route === "/boards") return t("boards");
+  if (route === "/projects") return t("projects");
+  if (route === "/agents") return t("agents");
+  if (route === "/automations") return t("automations");
+  if (route === "/skills") return t("skills");
+  if (route === "/runs") return t("runs");
+  if (route === "/audit") return t("audit");
   return "Shipyard";
 }
 type LiveChange = {
@@ -141,6 +142,8 @@ function endpointUsesChange(endpoint: string, change: LiveChange) {
 export default function App() {
   const [route, setRoute] = useState(routeFromHash);
   const { data: appearance } = useAPI<any>("/api/v1/settings/appearance");
+  const [language, setLanguage] = useState<Language>(() => normalizeLanguage(localStorage.getItem("shipyard-language")));
+  const t = (key: string) => translate(language, key);
   const [dark, setDark] = useState(
     localStorage.getItem("shipyard-theme") === "dark",
   );
@@ -150,6 +153,18 @@ export default function App() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const mobileNavRef = useRef<HTMLElement>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  useEffect(() => {
+    if (appearance?.Language) setLanguage(normalizeLanguage(appearance.Language));
+  }, [appearance?.Language]);
+  useEffect(() => {
+    const changed = (event: Event) => setLanguage(normalizeLanguage((event as CustomEvent<string>).detail));
+    window.addEventListener("shipyard:language-change", changed);
+    return () => window.removeEventListener("shipyard:language-change", changed);
+  }, []);
+  useEffect(() => {
+    localStorage.setItem("shipyard-language", language);
+    document.documentElement.lang = language;
+  }, [language]);
   useEffect(() => {
     const update = () => setRoute(routeFromHash());
     addEventListener("hashchange", update);
@@ -266,7 +281,7 @@ export default function App() {
           type="button"
           variant="outline"
           size="icon"
-          aria-label="Navigation öffnen oder schließen"
+          aria-label={t("navigationToggle")}
           aria-controls="main-navigation"
           className="fixed left-3 top-3 z-30 md:left-4 md:top-4"
           onClick={toggleNavigation}
@@ -299,8 +314,8 @@ export default function App() {
                   onKeyDown={(event) => navigateNav(index, event)}
                   data-nav-index={index}
                   aria-current={selected ? "page" : undefined}
-                  aria-label={item.name}
-                  title={item.name}
+                  aria-label={t(item.name)}
+                  title={t(item.name)}
                   className={
                     selected
                       ? "flex h-9 items-center gap-3 rounded-md bg-accent px-3 text-sm font-medium text-accent-foreground"
@@ -308,7 +323,7 @@ export default function App() {
                   }
                 >
                   <Icon className="size-4" />
-                  {showNavLabels && item.name}
+                  {showNavLabels && t(item.name)}
                 </a>
               );
             })}
@@ -320,14 +335,14 @@ export default function App() {
               onClick={() => setDark(!dark)}
             >
               {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
-              {showNavLabels && (dark ? "Helles Design" : "Dunkles Design")}
+              {showNavLabels && (dark ? t("light") : t("dark"))}
             </Button>
           </div>
         </aside>
         {mobileNavOpen && (
           <button
             type="button"
-            aria-label="Navigation schließen"
+            aria-label={t("navigationClose")}
             className="fixed inset-0 z-10 bg-foreground/20 md:hidden"
             onClick={() => setMobileNavOpen(false)}
           />
@@ -335,7 +350,7 @@ export default function App() {
         <Dialog open={shortcutsOpen} onOpenChange={setShortcutsOpen}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Tastatursteuerung</DialogTitle>
+              <DialogTitle>{t("keyboardControl")}</DialogTitle>
               <DialogDescription>Die gesamte Oberfläche bleibt mit Standard-Fokussteuerung bedienbar.</DialogDescription>
             </DialogHeader>
             <dl className="grid gap-3 text-sm">
@@ -352,17 +367,15 @@ export default function App() {
             <div>
               <p className="text-sm font-medium text-primary">Operations</p>
               <h1 className="mt-1 text-3xl font-semibold tracking-tight">
-                {titleFor(route.split("/").slice(0, 2).join("/") || "/")}
+                {titleFor(route.split("/").slice(0, 2).join("/") || "/", t)}
               </h1>
               <p className="mt-2 text-sm text-muted-foreground">
-                {route === "/"
-                  ? "Arbeitsfluss, Agentenläufe und Entscheidungen an einem Ort."
-                  : "Verwalte die Ressourcen und Vorgänge deines Agenten-Systems."}
+                {route === "/" ? t("overviewDescription") : t("resourcesDescription")}
               </p>
             </div>
             <Badge variant="outline" className="h-fit gap-2 px-3 py-1.5">
               <span className="size-2 rounded-full bg-emerald-500" />
-              System verbunden
+              {t("connected")}
             </Badge>
           </header>
           {route.match(/^\/boards\/[^/]+\/workflow$/) ? (
@@ -386,7 +399,7 @@ export default function App() {
           ) : route === "/" ? (
             <Suspense fallback={<Loading />}><Dashboard /></Suspense>
           ) : active?.endpoint ? (
-            <ResourceList endpoint={active.endpoint} title={active.name} />
+            <ResourceList endpoint={active.endpoint} title={t(active.name)} />
           ) : (
             <Settings route={route} />
           )}
@@ -1462,8 +1475,11 @@ function AgentPolicy() {
 function Appearance() {
   const { data, error } = useAPI<any>("/api/v1/settings/appearance");
   const [message, setMessage] = useState("");
+  const [selectedLanguage, setSelectedLanguage] = useState<Language>("de");
   if (error) return <Failure />;
   if (!data) return <Loading />;
+  const currentLanguage = selectedLanguage === "de" && data.Language === "en" ? "en" : selectedLanguage;
+  const appearanceText = (key: string) => translate(currentLanguage, key);
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -1471,8 +1487,11 @@ function Appearance() {
         method: "POST",
         body: new FormData(e.target as HTMLFormElement),
       });
+      const nextLanguage = normalizeLanguage(new FormData(e.target as HTMLFormElement).get("language"));
+      setSelectedLanguage(nextLanguage);
+      window.dispatchEvent(new CustomEvent("shipyard:language-change", { detail: nextLanguage }));
       refreshData();
-      setMessage("Darstellung gespeichert.");
+      setMessage(translate(nextLanguage, "saved"));
     } catch (err) {
       setMessage(String(err));
     }
@@ -1480,15 +1499,25 @@ function Appearance() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Darstellung & Bedienung</CardTitle>
+        <CardTitle>{appearanceText("appearance")}</CardTitle>
         <CardDescription>
-          Lege Theme und sichtbare Tastaturhinweise fest.
+          {appearanceText("appearanceDescription")}
         </CardDescription>
       </CardHeader>
       <CardContent>
         <form className="grid gap-5" onSubmit={save}>
           <fieldset className="grid gap-2">
-            <legend className="font-medium">Darstellung</legend>
+            <legend className="font-medium">{appearanceText("language")}</legend>
+            <label className="grid gap-1 text-sm">
+              {appearanceText("languageDescription")}
+              <select name="language" value={currentLanguage} onChange={(event) => setSelectedLanguage(normalizeLanguage(event.target.value))}>
+                <option value="de">{appearanceText("german")}</option>
+                <option value="en">{appearanceText("english")}</option>
+              </select>
+            </label>
+          </fieldset>
+          <fieldset className="grid gap-2">
+            <legend className="font-medium">{appearanceText("display")}</legend>
             {["system", "light", "dark"].map((value) => (
               <label key={value} className="flex items-center gap-2 text-sm">
                 <input
@@ -1498,15 +1527,15 @@ function Appearance() {
                   defaultChecked={data.Theme === value}
                 />
                 {value === "system"
-                  ? "Systemdarstellung verwenden"
+                  ? appearanceText("systemTheme")
                   : value === "light"
-                    ? "Hell"
-                    : "Dunkel"}
+                    ? appearanceText("light")
+                    : appearanceText("dark")}
               </label>
             ))}
           </fieldset>
           <fieldset className="grid gap-2">
-            <legend className="font-medium">Tastatur</legend>
+            <legend className="font-medium">{appearanceText("keyboard")}</legend>
             <label className="flex items-center gap-2 text-sm">
               <input
                 name="shortcut_hints"
@@ -1514,11 +1543,11 @@ function Appearance() {
                 value="true"
                 defaultChecked={data.ShortcutHints}
               />{" "}
-              Hinweise zu Shortcuts anzeigen
+              {appearanceText("shortcutHints")}
             </label>
           </fieldset>
           <Button className="w-fit" type="submit">
-            Einstellungen speichern
+            {appearanceText("save")}
           </Button>
           {message && (
             <p className="text-sm text-muted-foreground">{message}</p>

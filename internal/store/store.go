@@ -130,17 +130,23 @@ func (s *Store) MarkLogin(c context.Context, id string) error {
 }
 func (s *Store) UserPreferences(c context.Context, userID string) (domain.UserPreferences, error) {
 	var p domain.UserPreferences
-	err := s.DB.QueryRow(c, `SELECT theme,shortcut_hints FROM workspace_preferences WHERE user_id=$1`, userID).Scan(&p.Theme, &p.ShortcutHints)
+	err := s.DB.QueryRow(c, `SELECT theme,shortcut_hints,language FROM workspace_preferences WHERE user_id=$1`, userID).Scan(&p.Theme, &p.ShortcutHints, &p.Language)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return domain.UserPreferences{Theme: "system", ShortcutHints: true}, nil
+		return domain.UserPreferences{Theme: "system", ShortcutHints: true, Language: "de"}, nil
+	}
+	if p.Language != "de" && p.Language != "en" {
+		p.Language = "de"
 	}
 	return p, err
 }
-func (s *Store) SaveUserPreferences(c context.Context, userID, theme string, hints bool) error {
+func (s *Store) SaveUserPreferences(c context.Context, userID, theme string, hints bool, language string) error {
 	if theme != "system" && theme != "light" && theme != "dark" {
 		return errors.New("invalid theme")
 	}
-	_, err := s.DB.Exec(c, `INSERT INTO workspace_preferences(user_id,theme,shortcut_hints,updated_at) VALUES($1,$2,$3,now()) ON CONFLICT(user_id) DO UPDATE SET theme=EXCLUDED.theme,shortcut_hints=EXCLUDED.shortcut_hints,updated_at=now()`, userID, theme, hints)
+	if language != "de" && language != "en" {
+		return errors.New("invalid language")
+	}
+	_, err := s.DB.Exec(c, `INSERT INTO workspace_preferences(user_id,theme,shortcut_hints,language,updated_at) VALUES($1,$2,$3,$4,now()) ON CONFLICT(user_id) DO UPDATE SET theme=EXCLUDED.theme,shortcut_hints=EXCLUDED.shortcut_hints,language=EXCLUDED.language,updated_at=now()`, userID, theme, hints, language)
 	return err
 }
 func (s *Store) CreateAPIToken(c context.Context, userID, name, hash, prefix string, expiry *time.Time) (domain.APIToken, error) {

@@ -37,6 +37,25 @@ func TestSameOrigin(t *testing.T) {
 	}
 }
 
+func TestLanguageDefaultsToGermanAndHonorsPreference(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "https://codex.local/", nil)
+	if got := language(request); got != "de" {
+		t.Fatalf("default language = %q, want de", got)
+	}
+	request.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	if got := language(request); got != "en" {
+		t.Fatalf("header language = %q, want en", got)
+	}
+	request.AddCookie(&http.Cookie{Name: "shipyard_language", Value: "de"})
+	if got := language(request); got != "de" {
+		t.Fatalf("cookie language = %q, want de", got)
+	}
+	request.AddCookie(&http.Cookie{Name: "shipyard_language", Value: "fr"})
+	if got := language(request); got != "de" {
+		t.Fatalf("invalid cookie language = %q, want de fallback", got)
+	}
+}
+
 func TestAdminArea(t *testing.T) {
 	if !isAdminArea("/settings/providers") || !isAdminArea("/agents") || !isAdminArea("/audit") {
 		t.Fatal("admin areas must be protected")
