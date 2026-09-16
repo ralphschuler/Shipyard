@@ -331,6 +331,13 @@ func webTemplateFunctions() template.FuncMap {
 			}
 		}
 		return out
+	}, "hasAgent": func(id string, assigned []string) bool {
+		for _, assignedID := range assigned {
+			if id == assignedID {
+				return true
+			}
+		}
+		return false
 	}, "tr": translate, "auditAction": auditAction, "auditStatus": auditStatus, "auditStatusClass": auditStatusClass, "runStatus": runStatusLabel, "gateStatus": gateStatusLabel, "excerpt": excerpt, "taskCount": func(count int) string {
 		if count == 1 {
 			return "1 Aufgabe"

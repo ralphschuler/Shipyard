@@ -140,6 +140,20 @@ func (s *Store) SetSecretAgents(ctx context.Context, actor, secretID string, age
 	if err != nil {
 		return err
 	}
+	for _, id := range agentIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		var conflict string
+		err = s.DB.QueryRow(ctx, `SELECT s.name FROM secrets s JOIN secret_agents a ON a.secret_id=s.id WHERE a.agent_id=$1 AND s.env_name=(SELECT env_name FROM secrets WHERE id=$2) AND s.id<>$2 AND s.revoked_at IS NULL LIMIT 1`, id, secretID).Scan(&conflict)
+		if err == nil {
+			return errors.New("secret environment name is already assigned to this agent")
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+	}
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
 		return err
@@ -231,4 +245,10 @@ func (s *Store) SecretValuesForAgent(ctx context.Context, agentID string) ([]dom
 		out = append(out, domain.SecretValue{ID: id, EnvName: env, Value: v})
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) HasActiveSecretAssignment(ctx context.Context, envName string) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM secrets s JOIN secret_agents a ON a.secret_id=s.id WHERE s.env_name=$1 AND s.revoked_at IS NULL)`, envName).Scan(&exists)
+	return exists, err
 }

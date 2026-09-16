@@ -1002,8 +1002,12 @@ func (w *Worker) CheckProvider(ctx context.Context, name string) (string, error)
 		if provider.SecretEnv == "" {
 			return "", errors.New("keine Secret-Umgebungsvariable konfiguriert")
 		}
-		if _, ok := os.LookupEnv(provider.SecretEnv); !ok {
-			return "", errors.New("konfigurierte Secret-Umgebungsvariable ist auf dem Server nicht gesetzt")
+		assigned, err := w.Store.HasActiveSecretAssignment(ctx, provider.SecretEnv)
+		if err != nil {
+			return "", errors.New("zentrale Secret-Zuordnung konnte nicht geprüft werden")
+		}
+		if !assigned {
+			return "", errors.New("kein aktives Secret ist einem Agent zugeordnet")
 		}
 		if _, err := exec.LookPath("bwrap"); err != nil {
 			return "", errors.New("OpenAI-Agenten benötigen bubblewrap für den isolierten Worktree")
@@ -1028,6 +1032,12 @@ func (w *Worker) CheckProvider(ctx context.Context, name string) (string, error)
 		result = result[:500]
 	}
 	return result, nil
+}
+
+func (w *Worker) recordSecretUse(ctx context.Context, run domain.AgentRun, secret domain.SecretValue) error {
+	return w.Store.RecordAudit(ctx, "", "secret.used", "secret", secret.ID, map[string]string{
+		"actor": "agent-runner", "agent_id": run.AgentID, "run_id": run.ID,
+	})
 }
 
 func (w *Worker) Start(ctx context.Context) {
@@ -1714,7 +1724,11 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			_ = w.finish(ctx, run, "failed")
 			return
 		}
-		_ = w.Store.RecordAudit(ctx, "", "secret.used", "secret", secret.ID, map[string]string{"actor": "agent-runner", "agent_id": run.AgentID, "run_id": run.ID})
+		if auditErr := w.recordSecretUse(ctx, run, secret); auditErr != nil {
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", "Secret-Nutzung konnte nicht auditiert werden")
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
 		text, usage, responseErr := runOpenAIResponses(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot)
 		out, tokenUsage, inputTokens, outputTokens, estimatedCostMicrousd, err = []byte(text), usage.TotalTokens, usage.InputTokens, usage.OutputTokens, usage.EstimatedCostMicrousd, responseErr
 		cachedInputTokens, cacheWriteTokens, reasoningTokens = usage.CachedInputTokens, usage.CacheWriteTokens, usage.ReasoningTokens
@@ -1745,7 +1759,11 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		secretEnv := make([]string, 0, len(secretValues))
 		for _, secret := range secretValues {
 			secretEnv = append(secretEnv, secret.EnvName+"="+secret.Value)
-			_ = w.Store.RecordAudit(ctx, "", "secret.used", "secret", secret.ID, map[string]string{"actor": "agent-runner", "agent_id": run.AgentID, "run_id": run.ID})
+			if auditErr := w.recordSecretUse(ctx, run, secret); auditErr != nil {
+				_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", "Secret-Nutzung konnte nicht auditiert werden")
+				_ = w.finish(ctx, run, "failed")
+				return
+			}
 		}
 		env = append(env, secretEnv...)
 		_, streamErr := w.runInTmux(runCtx, run.ID, run.WorkspaceSnapshot, command, args, stdin, env)
