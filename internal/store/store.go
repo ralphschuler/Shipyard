@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"taskboard/internal/domain"
 	"time"
@@ -47,6 +49,71 @@ var automationRuleSelect = strings.Join(automationRuleColumns, ",")
 // marked processed without creating a second coding run.
 var ErrAutomationActive = errors.New("automation already has an active run for this task")
 var ErrTaskAgentActive = errors.New("agent already has an active run for this task")
+
+// AutomationEventFingerprint is the durable semantic identity used by the
+// automation claim table. Transport-only fields are deliberately excluded;
+// object keys and unordered arrays are canonicalized before hashing.
+func AutomationEventFingerprint(event domain.AutomationEvent, rule domain.AutomationRule) (string, error) {
+	var payload any
+	if len(event.Payload) == 0 {
+		payload = map[string]any{}
+	} else if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return "", fmt.Errorf("automation payload is invalid JSON: %w", err)
+	}
+	canonical := canonicalAutomationPayload(payload)
+	object := map[string]any{
+		"version": 1, "task_id": event.TaskID, "rule_id": rule.ID,
+		"trigger_type": event.Type, "target_column_id": rule.TargetColumnID,
+		"return_generation": automationReturnGeneration(canonical), "payload": canonical,
+	}
+	raw, err := json.Marshal(object)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("%x", sum[:]), nil
+}
+
+func canonicalAutomationPayload(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		result := make(map[string]any, len(v))
+		for key, child := range v {
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "event_id", "delivery_id", "transport_id", "occurred_at", "received_at":
+				continue
+			}
+			result[key] = canonicalAutomationPayload(child)
+		}
+		return result
+	case []any:
+		items := make([]any, len(v))
+		for i, child := range v {
+			items[i] = canonicalAutomationPayload(child)
+		}
+		sort.SliceStable(items, func(i, j int) bool {
+			left, _ := json.Marshal(items[i])
+			right, _ := json.Marshal(items[j])
+			return string(left) < string(right)
+		})
+		return items
+	default:
+		return value
+	}
+}
+
+func automationReturnGeneration(payload any) string {
+	object, ok := payload.(map[string]any)
+	if !ok {
+		return ""
+	}
+	for _, key := range []string{"return_generation", "qa_return_generation", "rollback_generation", "generation"} {
+		if value, ok := object[key]; ok {
+			return fmt.Sprint(value)
+		}
+	}
+	return ""
+}
 
 func Open(ctx context.Context, url string) (*Store, error) {
 	p, e := pgxpool.New(ctx, url)
@@ -2089,6 +2156,9 @@ func (s *Store) RefreshRunBatch(c context.Context, id string) (domain.AgentRunBa
 		status=CASE WHEN counts.queued+counts.running>0 THEN 'running' WHEN counts.failed>0 AND (counts.succeeded>0 OR counts.cancelled>0) THEN 'partial' WHEN counts.failed>0 THEN 'failed' WHEN counts.cancelled>0 AND counts.succeeded>0 THEN 'partial' WHEN counts.cancelled>0 THEN 'cancelled' ELSE 'succeeded' END,updated_at=now()
 		FROM counts WHERE b.id=$1 RETURNING b.id,b.task_id,b.agent_id,COALESCE(b.rule_id::text,''),COALESCE(b.event_id::text,''),b.status,b.total_targets,b.succeeded_targets,b.failed_targets,b.cancelled_targets,b.created_at,b.updated_at)
 		SELECT * FROM updated`, id).Scan(&batch.ID, &batch.TaskID, &batch.AgentID, &batch.RuleID, &batch.EventID, &batch.Status, &batch.TotalTargets, &batch.SucceededTargets, &batch.FailedTargets, &batch.CancelledTargets, &batch.CreatedAt, &batch.UpdatedAt)
+	if err == nil {
+		_, err = s.DB.Exec(c, `UPDATE automation_event_claims SET status=CASE WHEN $2='partial' THEN 'failed' ELSE $2 END,updated_at=now() WHERE batch_id=$1`, id, batch.Status)
+	}
 	return batch, err
 }
 func (s *Store) ConsumeBatchOutcome(c context.Context, id string) (bool, error) {
@@ -2522,6 +2592,28 @@ func (s *Store) CreateRunsForEvent(c context.Context, event domain.AutomationEve
 		return nil, e
 	}
 	defer tx.Rollback(c)
+	fingerprint, e := AutomationEventFingerprint(event, rule)
+	if e != nil {
+		return nil, e
+	}
+	var claimID string
+	e = tx.QueryRow(c, `INSERT INTO automation_event_claims(fingerprint,event_id,task_id,rule_id,target_column_id,return_generation,payload)
+		VALUES($1,NULLIF($2,'')::uuid,$3,NULLIF($4,'')::uuid,NULLIF($5,'')::uuid,$6,$7)
+		ON CONFLICT (fingerprint) DO NOTHING RETURNING id`, fingerprint, event.ID, event.TaskID, rule.ID, rule.TargetColumnID,
+		automationReturnGeneration(canonicalAutomationPayloadValue(event.Payload)), event.Payload).Scan(&claimID)
+	if errors.Is(e, pgx.ErrNoRows) {
+		var claimStatus string
+		if statusErr := tx.QueryRow(c, "SELECT status FROM automation_event_claims WHERE fingerprint=$1", fingerprint).Scan(&claimStatus); statusErr != nil {
+			return nil, statusErr
+		}
+		if claimStatus == "queued" || claimStatus == "running" {
+			return nil, ErrAutomationActive
+		}
+		return nil, ErrNoRunCreated
+	}
+	if e != nil {
+		return nil, e
+	}
 	var cooldown int
 	if e = tx.QueryRow(c, "SELECT cooldown_minutes FROM automation_rules WHERE id=$1", rule.ID).Scan(&cooldown); e != nil {
 		return nil, e
@@ -2582,11 +2674,23 @@ func (s *Store) CreateRunsForEvent(c context.Context, event domain.AutomationEve
 	if len(runs) == 0 {
 		return nil, ErrNoRunCreated
 	}
+	if _, e = tx.Exec(c, "UPDATE automation_event_claims SET batch_id=$2,updated_at=now() WHERE id=$1", claimID, batch.ID); e != nil {
+		return nil, e
+	}
 	if e = tx.Commit(c); e != nil {
 		return nil, e
 	}
 	return runs, nil
 }
+
+func canonicalAutomationPayloadValue(raw json.RawMessage) any {
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return map[string]any{}
+	}
+	return canonicalAutomationPayload(value)
+}
+
 func (s *Store) MarkEventProcessed(c context.Context, id string) error {
 	_, e := s.DB.Exec(c, "UPDATE automation_events SET processed_at=now() WHERE id=$1", id)
 	return e
@@ -2611,6 +2715,10 @@ func (s *Store) AbandonEvent(c context.Context, event domain.AutomationEvent, me
 	defer tx.Rollback(c)
 	tag, err := tx.Exec(c, "UPDATE automation_events SET processed_at=now(),last_error=$2 WHERE id=$1 AND processed_at IS NULL", event.ID, message)
 	if err != nil || tag.RowsAffected() == 0 {
+		return false, err
+	}
+	if _, err = tx.Exec(c, `UPDATE automation_event_claims SET status='blocked',attempts=attempts+1,last_error=$2,updated_at=now()
+		WHERE event_id=$1 AND status IN ('queued','running')`, event.ID, message); err != nil {
 		return false, err
 	}
 	if event.TaskID != "" {

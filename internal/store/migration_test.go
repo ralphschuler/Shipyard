@@ -90,3 +90,16 @@ func TestAcceptedDeliveryCommitMigrationStoresGitObjectIdentity(t *testing.T) {
 		}
 	}
 }
+
+func TestAutomationFingerprintMigrationHasAtomicDurableClaim(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/042_automation_event_fingerprints.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"automation_event_claims", "fingerprint TEXT NOT NULL UNIQUE", "status TEXT NOT NULL", "attempts INTEGER", "batch_id UUID"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("fingerprint migration is missing %q", required)
+		}
+	}
+}
