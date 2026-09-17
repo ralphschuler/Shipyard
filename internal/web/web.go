@@ -2602,7 +2602,7 @@ func (a *App) taskData(ctx context.Context, id string) (taskPage, error) {
 	if e != nil {
 		return taskPage{}, e
 	}
-	targetProjects, e := a.store.TaskTargetProjects(ctx, t.ID)
+	targetProjects, e := a.store.EffectiveTaskTargetProjects(ctx, t.ID)
 	if e != nil {
 		return taskPage{}, e
 	}
@@ -2610,7 +2610,7 @@ func (a *App) taskData(ctx context.Context, id string) (taskPage, error) {
 	if e != nil {
 		return taskPage{}, e
 	}
-	targets, e := a.store.TaskRepositoryTargets(ctx, t.ID)
+	targets, e := a.store.EffectiveTaskRepositoryTargets(ctx, t.ID)
 	if e != nil {
 		return taskPage{}, e
 	}

@@ -118,3 +118,16 @@ func TestNormalizeTargetIDsRejectsRepositoryURLWithFormatDiagnostic(t *testing.T
 		}
 	}
 }
+
+func TestBoardInheritanceEligibleColumn(t *testing.T) {
+	for _, name := range []string{"Backlog", "Entwicklung", "In Progress"} {
+		if !boardInheritanceEligibleColumn(name) {
+			t.Errorf("%q should allow board target inheritance", name)
+		}
+	}
+	for _, name := range []string{"Inbox", "Review", "Erledigt", "QA"} {
+		if boardInheritanceEligibleColumn(name) {
+			t.Errorf("%q should not trigger board target inheritance", name)
+		}
+	}
+}

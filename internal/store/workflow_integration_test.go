@@ -95,6 +95,90 @@ func TestWorkflowIntegrationGermanIDsIgnoreDisplayLabels(t *testing.T) {
 	}
 }
 
+func TestWorkflowIntegrationPersistsInheritedTargetForHistoricalTask(t *testing.T) {
+	s := integrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "Inherited target", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	project, err := s.CreateProject(ctx, "唯一iges Repository", "https://example.invalid/shipyard.git", "master", t.TempDir(), []string{board.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask(ctx, board.ID, "Historical task", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.DB.Exec(ctx, "DELETE FROM task_repository_targets WHERE task_id=$1", task.ID); err != nil {
+		t.Fatal(err)
+	}
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlog := columnByName(t, columns, "Backlog")
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "test"); err != nil || !moved {
+		t.Fatalf("move to backlog: moved=%t err=%v", moved, err)
+	}
+	targets, err := s.TaskRepositoryTargets(ctx, task.ID)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("inherited targets = %#v err=%v", targets, err)
+	}
+	if targets[0].ProjectID != project.ID || targets[0].TargetSource != "inherited" {
+		t.Fatalf("unexpected inherited target: %#v", targets[0])
+	}
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "retry"); err != nil || moved {
+		t.Fatalf("same-column retry must be idempotent: moved=%t err=%v", moved, err)
+	}
+}
+
+func TestWorkflowIntegrationOpenInteractionsIgnoreCompletedTasks(t *testing.T) {
+	s := integrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "Completed interaction", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	task, err := s.CreateTask(ctx, board.ID, "Completed task", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "Interaction test agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.DB.Exec(ctx, `INSERT INTO agent_interactions(task_id,agent_id,title,schema) VALUES($1,$2,'stale project choice','{}'::jsonb)`, task.ID, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	open, err := s.OpenInteractions(ctx, task.ID)
+	if err != nil || len(open) != 1 {
+		t.Fatalf("active interaction = %#v err=%v", open, err)
+	}
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := columnByName(t, columns, "Erledigt")
+	review := columnByName(t, columns, "Review")
+	development := columnByName(t, columns, "Entwicklung")
+	backlog := columnByName(t, columns, "Backlog")
+	for _, column := range []domain.Column{backlog, development, review, done} {
+		if _, err = s.MoveTaskToColumnID(ctx, task.ID, column.ID, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	open, err = s.OpenInteractions(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 0 {
+		t.Fatalf("completed task still has blocking interactions: %#v", open)
+	}
+}
+
 func TestWorkflowIntegrationEnglishIDsRemainCompatible(t *testing.T) {
 	s := integrationStore(t)
 	ctx := context.Background()
