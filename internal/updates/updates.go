@@ -268,6 +268,7 @@ func (c Client) DownloadAndVerify(ctx context.Context, artifactURL, expected str
 	if err != nil {
 		return nil, err
 	}
+	c.authorize(req)
 	req.Header.Set("Accept", "application/octet-stream")
 	res, err := httpClient.Do(req)
 	if err != nil {
@@ -300,12 +301,10 @@ func (c Client) latest(ctx context.Context, repo string) (githubRelease, error) 
 	if err != nil {
 		return githubRelease{}, err
 	}
+	c.authorize(req)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "Shipyard-Updates")
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
-	}
-	res, err := c.HTTP.Do(req)
+	res, err := c.httpClient().Do(req)
 	if err != nil {
 		return githubRelease{}, err
 	}
@@ -328,12 +327,10 @@ func (c Client) tagCommit(ctx context.Context, repo, tag string) (githubCommit, 
 	if err != nil {
 		return githubCommit{}, err
 	}
+	c.authorize(req)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "Shipyard-Updates")
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
-	}
-	res, err := c.HTTP.Do(req)
+	res, err := c.httpClient().Do(req)
 	if err != nil {
 		return githubCommit{}, err
 	}
@@ -357,12 +354,10 @@ func (c Client) branchContains(ctx context.Context, repo, branch, commit string)
 	if err != nil {
 		return false, err
 	}
+	c.authorize(req)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "Shipyard-Updates")
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
-	}
-	res, err := c.HTTP.Do(req)
+	res, err := c.httpClient().Do(req)
 	if err != nil {
 		return false, err
 	}
@@ -377,6 +372,26 @@ func (c Client) branchContains(ctx context.Context, repo, branch, commit string)
 	return comparison.Status == "identical" || comparison.Status == "behind", nil
 }
 
+func (c Client) httpClient() *http.Client {
+	if c.HTTP != nil {
+		return c.HTTP
+	}
+	return http.DefaultClient
+}
+
+// authorize shares the configured credential across release metadata and
+// artifact requests, but never sends it to an arbitrary HTTPS destination.
+// Release artifacts are required to come from github.com before installation.
+func (c Client) authorize(req *http.Request) {
+	if strings.TrimSpace(c.Token) == "" || req.URL == nil {
+		return
+	}
+	host := strings.ToLower(req.URL.Hostname())
+	if host == "api.github.com" || host == "github.com" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+}
+
 func Resolve(ctx context.Context, current Current, repo, branch string, client Client) Snapshot {
 	if client.HTTP == nil {
 		client.HTTP = http.DefaultClient
@@ -385,6 +400,11 @@ func Resolve(ctx context.Context, current Current, repo, branch string, client C
 	if err := ValidateReleaseAllowlist(client.ApprovedTags); err != nil {
 		s.Status = "unverified"
 		s.Reason = releasePolicyReason(err)
+		return s
+	}
+	if strings.TrimSpace(client.Token) == "" {
+		s.Status = "unavailable"
+		s.Reason = "TASKBOARD_GITHUB_TOKEN ist nicht konfiguriert. Hinterlege ein least-privilege GitHub-Token mit reinem Leserecht."
 		return s
 	}
 	r, err := client.latest(ctx, repo)
@@ -469,10 +489,9 @@ func githubErrorReason(err error, token string) string {
 	case http.StatusUnauthorized:
 		return "GitHub-Zugriffstoken ist ungültig oder abgelaufen. Prüfe TASKBOARD_GITHUB_TOKEN."
 	case http.StatusForbidden:
-		if strings.TrimSpace(token) == "" {
-			return "Die öffentliche GitHub-API ist rate-limitiert oder verweigert den Zugriff. Ein TASKBOARD_GITHUB_TOKEN ist für öffentliche Repositories optional, kann das Rate-Limit aber erhöhen."
-		}
 		return "GitHub-API-Zugriff verweigert oder Rate-Limit erreicht. Prüfe Token-Berechtigungen und versuche es später erneut."
+	case http.StatusTooManyRequests:
+		return "GitHub-API-Rate-Limit erreicht. Prüfe Token-Berechtigungen und versuche es später erneut."
 	case http.StatusNotFound:
 		return "GitHub-Repository oder Release wurde nicht gefunden. Prüfe Repository- und Branch-Konfiguration."
 	default:

@@ -43,9 +43,9 @@ if [[ -z "$branch" || "$branch" == *$'\n'* ]]; then
   printf 'TASKBOARD_GITHUB_BRANCH is missing or malformed\n' >&2
   exit 1
 fi
-if [[ "$token" == *$'\n'* ]]; then
-  printf 'TASKBOARD_GITHUB_TOKEN is malformed\n' >&2
-  exit 1
+if [[ -z "${token//[[:space:]]/}" || "$token" == *$'\n'* || "$token" == "replace-with-read-only-token" ]]; then
+	printf 'TASKBOARD_GITHUB_TOKEN is missing or malformed; configure a least-privilege read-only GitHub token\n' >&2
+	exit 1
 fi
 if [[ -z "${allowlist//[[:space:]]/}" ]]; then
   printf 'TASKBOARD_GITHUB_RELEASE_ALLOWLIST is missing; configure exact tags or a patch prefix such as v0.1.*\n' >&2
@@ -68,8 +68,4 @@ if (( entry_count == 0 )); then
   exit 1
 fi
 
-token_state="optional-not-configured"
-if [[ -n "$token" ]]; then
-  token_state="present"
-fi
-printf 'update configuration valid: repository=%s branch=%s policy_entries=%s token=%s\n' "$repository" "$branch" "$entry_count" "$token_state"
+printf 'update configuration valid: repository=%s branch=%s policy_entries=%s token=present\n' "$repository" "$branch" "$entry_count"

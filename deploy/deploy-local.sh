@@ -17,6 +17,10 @@ trap cleanup EXIT
 
 cd "$project_dir"
 if [[ "${TASKBOARD_SKIP_UPDATE_CONFIG_CHECK:-0}" != "1" ]]; then
+  if [[ ! -e "$update_env_file" ]]; then
+    sudo -n install -o agent -g agent -m 600 deploy/taskboard.env.example "$update_env_file"
+    echo "Update-Konfigurationsdatei wurde als Vorlage angelegt: $update_env_file" >&2
+  fi
   TASKBOARD_ENV_FILE="$update_env_file" ./deploy/validate-update-config.sh
 fi
 if [[ -f frontend/package.json ]]; then
@@ -38,6 +42,7 @@ chmod 0755 "$staged_binary"
 DATABASE_URL="$database_url" TASKBOARD_BACKUP_DIR="$backup_dir" ./deploy/backup-postgres.sh
 
 sudo -n systemctl stop "$service_name"
+sudo -n systemctl daemon-reload
 if [[ -f "$live_binary" ]]; then
   cp "$live_binary" "$previous_binary"
 fi
