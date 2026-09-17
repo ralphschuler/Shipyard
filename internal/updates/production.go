@@ -1,0 +1,216 @@
+package updates
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"taskboard/internal/store"
+	"time"
+)
+
+const (
+	productionBinaryPath = "/home/agent/taskboard/taskboard"
+	productionHealthURL  = "http://127.0.0.1:8080/healthz"
+)
+
+// productionAdapter is deliberately bound to the host's known deployment
+// paths. It never accepts a command, binary path, or restart target from the
+// release payload or the browser.
+type productionAdapter struct {
+	store        *store.Store
+	binary       string
+	previous     string
+	backupScript string
+	backupDir    string
+	databaseURL  string
+	writeMu      sync.Mutex
+}
+
+// NewProductionOrchestrator wires the explicit host adapter used by the
+// running Shipyard service. The default web constructor remains nil-safe for
+// tests and non-production embeddings; the production entry point calls this
+// constructor explicitly.
+func NewProductionOrchestrator(s *store.Store) *Orchestrator {
+	root := strings.TrimSpace(os.Getenv("TASKBOARD_INSTALL_ROOT"))
+	if root == "" {
+		root = "/home/agent/taskboard"
+	}
+	p := &productionAdapter{
+		store:        s,
+		binary:       filepath.Join(root, "taskboard"),
+		previous:     filepath.Join(root, "taskboard.previous-update"),
+		backupScript: filepath.Join(root, "deploy", "backup-postgres.sh"),
+		backupDir:    envOr("TASKBOARD_BACKUP_DIR", filepath.Join(root, "backups")),
+		databaseURL:  envOr("DATABASE_URL", "postgres://taskboard:taskboard@localhost:5432/taskboard?sslmode=disable"),
+	}
+	return &Orchestrator{
+		Backup:            p.backup,
+		DownloadAndVerify: p.downloadAndVerify,
+		VerifyArtifact:    p.verifyArtifact,
+		Verify:            p.verify,
+		Migrate:           p.migrate,
+		Switch:            p.switchBinary,
+		// Restart is intentionally deferred until after the HTTP response. The
+		// helper runs as a transient systemd unit outside taskboard.service.
+		Restart:      p.restart,
+		Health:       p.health,
+		Rollback:     p.rollback,
+		AfterSuccess: p.afterSuccess,
+	}
+}
+
+func envOr(key, fallback string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func (p *productionAdapter) backup(ctx context.Context, _ Snapshot) error {
+	if info, err := os.Stat(p.backupScript); err != nil || info.Mode()&0111 == 0 {
+		return errors.New("backup adapter is unavailable")
+	}
+	cmd := exec.CommandContext(ctx, p.backupScript)
+	cmd.Env = append(os.Environ(), "DATABASE_URL="+p.databaseURL, "TASKBOARD_BACKUP_DIR="+p.backupDir)
+	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("backup adapter failed: %w", err)
+	}
+	return nil
+}
+
+func (p *productionAdapter) downloadAndVerify(ctx context.Context, artifactURL, checksum string) ([]byte, error) {
+	client := Client{HTTP: http.DefaultClient, BaseURL: os.Getenv("TASKBOARD_GITHUB_API_URL"), Token: os.Getenv("TASKBOARD_GITHUB_TOKEN")}
+	return client.DownloadAndVerify(ctx, artifactURL, checksum)
+}
+
+func (p *productionAdapter) verifyArtifact(_ context.Context, snapshot Snapshot, artifact []byte) error {
+	if !snapshot.Release.Verified || !snapshot.Release.Compatible || len(artifact) < 4 {
+		return errors.New("release artifact is not verified")
+	}
+	if string(artifact[:4]) != "\x7fELF" {
+		return errors.New("release artifact is not an executable")
+	}
+	name := strings.ToLower(snapshot.Release.ArtifactName)
+	if !strings.Contains(name, strings.ToLower(runtime.GOOS)) || !strings.Contains(name, strings.ToLower(runtime.GOARCH)) {
+		return errors.New("release artifact is incompatible with this host")
+	}
+	digest := sha256.Sum256(artifact)
+	if !strings.EqualFold(hex.EncodeToString(digest[:]), snapshot.Release.Checksum) {
+		return errors.New("release artifact checksum changed")
+	}
+	return nil
+}
+
+func (p *productionAdapter) verify(ctx context.Context, _ Snapshot) error {
+	return p.health(ctx, Snapshot{})
+}
+
+func (p *productionAdapter) migrate(ctx context.Context, _ Snapshot) error {
+	if p.store == nil {
+		return errors.New("database migration adapter is unavailable")
+	}
+	return p.store.Migrate(ctx)
+}
+
+func (p *productionAdapter) switchBinary(_ context.Context, _ Snapshot, artifact []byte) error {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	current, err := os.ReadFile(p.binary)
+	if err != nil {
+		return fmt.Errorf("read current binary: %w", err)
+	}
+	mode := os.FileMode(0755)
+	if info, statErr := os.Stat(p.binary); statErr == nil && info.Mode().Perm()&0111 != 0 {
+		mode = info.Mode().Perm()
+	}
+	if err := atomicWrite(p.previous, current, mode); err != nil {
+		return fmt.Errorf("save rollback binary: %w", err)
+	}
+	if err := atomicWrite(p.binary, artifact, mode); err != nil {
+		return fmt.Errorf("install release binary: %w", err)
+	}
+	return nil
+}
+
+func atomicWrite(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".taskboard-update-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
+func (p *productionAdapter) restart(context.Context, Snapshot) error {
+	// The actual restart is scheduled by AfterSuccess. Returning successfully
+	// here lets the API send its JSON response before systemd stops this process.
+	return nil
+}
+
+func (p *productionAdapter) health(ctx context.Context, _ Snapshot) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, productionHealthURL, nil)
+	if err != nil {
+		return err
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("healthcheck returned HTTP %d", res.StatusCode)
+	}
+	return nil
+}
+
+func (p *productionAdapter) rollback(_ context.Context, _ Snapshot) error {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	previous, err := os.ReadFile(p.previous)
+	if err != nil {
+		return fmt.Errorf("read rollback binary: %w", err)
+	}
+	if err := atomicWrite(p.binary, previous, 0755); err != nil {
+		return fmt.Errorf("restore rollback binary: %w", err)
+	}
+	return nil
+}
+
+func (p *productionAdapter) afterSuccess() {
+	// taskboard.service has NoNewPrivileges=true, so a process-local sudo or
+	// systemd-run cannot elevate to restart itself. Restart=on-failure is already
+	// part of the hardened unit; exit only after net/http has flushed the success
+	// response and let systemd start the atomically installed binary.
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		os.Exit(75)
+	}()
+}

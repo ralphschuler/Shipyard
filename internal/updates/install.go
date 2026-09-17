@@ -37,6 +37,10 @@ type Orchestrator struct {
 	Restart  func(context.Context, Snapshot) error
 	Health   func(context.Context, Snapshot) error
 	Rollback func(context.Context, Snapshot) error
+	// AfterSuccess runs after the HTTP response has been written. Production
+	// adapters use this hook for a deferred service restart so the process does
+	// not terminate before the browser receives the installation result.
+	AfterSuccess func()
 }
 
 func (o Orchestrator) Install(ctx context.Context, snapshot Snapshot, report func(Progress)) error {

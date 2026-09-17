@@ -132,11 +132,11 @@ func TestInstallUpdateRequiresExplicitConfirmation(t *testing.T) {
 
 func TestActiveUpdateRunsQueryExcludesTheConfirmingSession(t *testing.T) {
 	query, args := activeUpdateRunsQuery("current-session-token-hash")
-	if len(args) != 1 || args[0] != "current-session-token-hash" {
-		t.Fatalf("query args = %#v, want the confirming session hash", args)
+	if len(args) != 0 {
+		t.Fatalf("query args = %#v, want no browser-session arguments", args)
 	}
-	if !strings.Contains(query, "token_hash <> $1") {
-		t.Fatalf("query does not exclude the confirming session: %s", query)
+	if strings.Contains(query, "user_sessions") {
+		t.Fatalf("query incorrectly treats browser sessions as active work: %s", query)
 	}
 }
 
