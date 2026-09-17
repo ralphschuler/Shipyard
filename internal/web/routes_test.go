@@ -69,6 +69,9 @@ func TestUpdatesAPIFailsClosedForUnverifiedRelease(t *testing.T) {
 	if !strings.Contains(payload["reason"].(string), "TASKBOARD_GITHUB_RELEASE_ALLOWLIST") {
 		t.Fatalf("reason = %#v", payload["reason"])
 	}
+	if checkedAt, ok := payload["checked_at"].(string); !ok || strings.TrimSpace(checkedAt) == "" {
+		t.Fatalf("checked_at = %#v, want a timestamp", payload["checked_at"])
+	}
 }
 
 type updateRoundTripper func(*http.Request) (*http.Response, error)

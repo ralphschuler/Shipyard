@@ -2026,7 +2026,7 @@ func (a *App) integrationsAPI(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) updatesAPI(w http.ResponseWriter, r *http.Request) {
 	snapshot := a.resolveUpdates(r)
-	writeAPI(w, map[string]any{"current": snapshot.Current, "source": map[string]string{"provider": snapshot.Provider, "repository": snapshot.Repository, "branch": snapshot.Branch}, "status": snapshot.Status, "release": snapshot.Release, "installable": snapshot.Installable, "reason": snapshot.Reason}, nil)
+	writeAPI(w, map[string]any{"current": snapshot.Current, "source": map[string]string{"provider": snapshot.Provider, "repository": snapshot.Repository, "branch": snapshot.Branch}, "status": snapshot.Status, "release": snapshot.Release, "installable": snapshot.Installable, "reason": snapshot.Reason, "checked_at": time.Now().UTC()}, nil)
 }
 
 func (a *App) resolveUpdates(r *http.Request) updates.Snapshot {
