@@ -161,6 +161,17 @@ func TestIntegrationPRMergedRequiresMergedState(t *testing.T) {
 	}
 }
 
+func TestReusablePRRequiresOpenOrMergedState(t *testing.T) {
+	closed := []byte(`{"number":7,"url":"https://example.test/pr/7","state":"CLOSED","mergedAt":null}`)
+	if pr := reusablePR(closed); pr.Number != 0 {
+		t.Fatalf("closed pull request was reused: %#v", pr)
+	}
+	open := []byte(`{"number":8,"url":"https://example.test/pr/8","state":"OPEN","mergedAt":null}`)
+	if pr := reusablePR(open); pr.Number != 8 || pr.URL == "" {
+		t.Fatalf("open pull request was not reused: %#v", pr)
+	}
+}
+
 func TestRunCommitExistsProvidesIdempotentDeliveryMarker(t *testing.T) {
 	source := t.TempDir()
 	runGit(t, source, "init", "-b", "main")

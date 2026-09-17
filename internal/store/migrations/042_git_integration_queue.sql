@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS repository_integration_queue (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE repository_integration_queue
+  ADD COLUMN IF NOT EXISTS claimed_until TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS repository_integration_queue_pending
   ON repository_integration_queue(repository_path, next_attempt_at, created_at)
+  WHERE status IN ('queued','running','pushed','pr_open');
+CREATE INDEX IF NOT EXISTS repository_integration_queue_claim
+  ON repository_integration_queue(repository_path, next_attempt_at, claimed_until, created_at)
   WHERE status IN ('queued','running','pushed','pr_open');

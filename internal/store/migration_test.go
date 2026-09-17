@@ -117,6 +117,19 @@ func TestAutomationFingerprintMigrationHasAtomicDurableClaim(t *testing.T) {
 	}
 }
 
+func TestGitIntegrationQueueMigrationSupportsLeasedClaims(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/042_git_integration_queue.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"claimed_until TIMESTAMPTZ", "status IN ('queued','running','pushed','pr_open')", "repository_integration_queue_claim"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("git integration queue migration is missing %q", required)
+		}
+	}
+}
+
 func TestAutomationPayloadRepairMigrationRecreatesCanonicalFunction(t *testing.T) {
 	body, err := migrationFiles.ReadFile("migrations/044_repair_automation_payload_function.sql")
 	if err != nil {

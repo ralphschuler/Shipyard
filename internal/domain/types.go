@@ -234,6 +234,7 @@ type IntegrationJob struct {
 	BaseSHA, HeadSHA, Status, Step, PRURL, LastError         string
 	PRNumber, Attempts                                       int
 	NextAttemptAt                                            time.Time
+	ClaimedUntil                                             *time.Time
 	CreatedAt, UpdatedAt                                     time.Time
 }
 type UsageReport struct {

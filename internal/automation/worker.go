@@ -912,6 +912,34 @@ func integrationPRMerged(output []byte) bool {
 	return json.Unmarshal(output, &state) == nil && strings.EqualFold(state.State, "MERGED") && state.MergedAt != nil && strings.TrimSpace(*state.MergedAt) != ""
 }
 
+type integrationPR struct {
+	Number   int     `json:"number"`
+	URL      string  `json:"url"`
+	State    string  `json:"state"`
+	MergedAt *string `json:"mergedAt"`
+}
+
+func reusablePR(output []byte) integrationPR {
+	var pr integrationPR
+	if json.Unmarshal(output, &pr) != nil {
+		return integrationPR{}
+	}
+	return reusablePRCandidate(pr)
+}
+
+func reusablePRCandidate(pr integrationPR) integrationPR {
+	if pr.Number == 0 || strings.TrimSpace(pr.URL) == "" {
+		return integrationPR{}
+	}
+	if strings.EqualFold(pr.State, "OPEN") {
+		return pr
+	}
+	if strings.EqualFold(pr.State, "MERGED") && pr.MergedAt != nil && strings.TrimSpace(*pr.MergedAt) != "" {
+		return pr
+	}
+	return integrationPR{}
+}
+
 // processIntegrationQueue is deliberately restartable: every step is stored
 // before the next external Git operation. A transient push/PR failure leaves
 // the job visible and eligible for a later poll instead of losing delivery.
@@ -923,9 +951,15 @@ func (w *Worker) processIntegrationQueue(ctx context.Context) {
 	for _, job := range jobs {
 		if err := w.processIntegrationJob(ctx, job); err != nil {
 			if isIntegrationConflict(err) {
+				var recordErr error
 				if run, runErr := w.Store.Run(ctx, job.RunID); runErr == nil {
-					_ = w.recordIntegrationConflict(ctx, run, err)
+					recordErr = w.recordIntegrationConflict(ctx, run, err)
 				}
+				updateErr := w.Store.UpdateIntegration(ctx, job.ID, "failed", "conflict", job.BaseSHA, job.HeadSHA, job.PRURL, err.Error(), job.PRNumber, job.Attempts+1)
+				if recordErr != nil || updateErr != nil {
+					_ = w.Store.UpdateIntegration(ctx, job.ID, "failed", "conflict", job.BaseSHA, job.HeadSHA, job.PRURL, errors.Join(err, recordErr, updateErr).Error(), job.PRNumber, job.Attempts+1)
+				}
+				continue
 			}
 			_ = w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, err.Error(), job.PRNumber, job.Attempts+1)
 		}
@@ -985,6 +1019,9 @@ func (w *Worker) processIntegrationJob(ctx context.Context, job domain.Integrati
 		if err = w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts); err != nil {
 			return err
 		}
+		if err = w.Store.SetRunIntegration(ctx, job.RunID, job.Branch, job.BaseSHA, job.HeadSHA, job.Status, job.PRURL, job.PRNumber); err != nil {
+			return err
+		}
 	}
 	if job.Step == "rebase" {
 		if _, err = gitOutput(ctx, integrationPath, "rebase", "origin/"+job.DefaultBranch); err != nil {
@@ -998,6 +1035,9 @@ func (w *Worker) processIntegrationJob(ctx context.Context, job domain.Integrati
 		}
 		job.Step = "push"
 		if err = w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts); err != nil {
+			return err
+		}
+		if err = w.Store.SetRunIntegration(ctx, job.RunID, job.Branch, job.BaseSHA, job.HeadSHA, job.Status, job.PRURL, job.PRNumber); err != nil {
 			return err
 		}
 	}
@@ -1021,14 +1061,16 @@ func (w *Worker) processIntegrationJob(ctx context.Context, job domain.Integrati
 		if remoteErr != nil {
 			return fmt.Errorf("Remote-URL für PR konnte nicht gelesen werden: %w", remoteErr)
 		}
-		out, ghErr := exec.CommandContext(ctx, "gh", "-R", remote, "pr", "list", "--head", job.Branch, "--base", job.DefaultBranch, "--state", "all", "--json", "number,url", "--limit", "1").CombinedOutput()
+		out, ghErr := exec.CommandContext(ctx, "gh", "-R", remote, "pr", "list", "--head", job.Branch, "--base", job.DefaultBranch, "--state", "all", "--json", "number,url,state,mergedAt", "--limit", "20").CombinedOutput()
 		if ghErr == nil {
-			var existing []struct {
-				Number int    `json:"number"`
-				URL    string `json:"url"`
-			}
-			if json.Unmarshal(out, &existing) == nil && len(existing) > 0 && existing[0].Number > 0 && existing[0].URL != "" {
-				job.PRNumber, job.PRURL = existing[0].Number, existing[0].URL
+			var existing []integrationPR
+			if json.Unmarshal(out, &existing) == nil {
+				for _, candidate := range existing {
+					if reusable := reusablePRCandidate(candidate); reusable.Number > 0 {
+						job.PRNumber, job.PRURL = reusable.Number, reusable.URL
+						break
+					}
+				}
 			}
 		}
 		if job.PRNumber == 0 {
