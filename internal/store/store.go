@@ -391,11 +391,17 @@ func (s *Store) AllRunsBefore(ctx context.Context, limit int, before *time.Time,
 	if limit < 1 || limit > 500 {
 		limit = 50
 	}
+	if err := s.RefreshQueueState(ctx); err != nil {
+		return nil, err
+	}
 	rows, err := s.DB.Query(ctx, `SELECT r.id,r.task_id,t.title,r.agent_id,a.name,r.status,r.summary,r.error_message,
 		CASE WHEN r.status='queued' THEN 1+(SELECT count(*) FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id))) ELSE 0 END,
-		CASE WHEN r.status='queued' THEN CASE WHEN EXISTS(SELECT 1 FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id))) THEN 'Wartet auf vorherige Runs im Workspace' WHEN (SELECT count(*) FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running') >= a.max_parallel_runs THEN 'Workspace ist ausgelastet' ELSE '' END ELSE '' END,
+		CASE WHEN r.status='queued' THEN r.queue_wait_reason ELSE '' END,
 		COALESCE((SELECT active.id::text FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running' ORDER BY active.started_at,active.created_at,active.id LIMIT 1),''),
-		CASE WHEN r.status='queued' THEN now()+interval '3 seconds' ELSE NULL END,
+		COALESCE((SELECT activeAgent.name FROM agents activeAgent JOIN agent_runs active ON active.agent_id=activeAgent.id WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running' ORDER BY active.started_at,active.created_at,active.id LIMIT 1),''),
+		CASE WHEN r.status='queued' THEN r.workspace_snapshot ELSE '' END,
+		CASE WHEN r.status='queued' AND r.queue_wait_reason <> '' THEN r.queue_wait_started_at ELSE NULL END,
+		CASE WHEN r.status='queued' THEN r.queue_next_attempt_at ELSE NULL END,
 		r.started_at,r.finished_at,r.created_at,r.duration_seconds
 		FROM agent_runs r JOIN tasks t ON t.id=r.task_id JOIN agents a ON a.id=r.agent_id
 		WHERE ($2::timestamptz IS NULL OR r.created_at<$2 OR (r.created_at=$2 AND r.id::text<$3))
@@ -841,7 +847,10 @@ func (s *Store) Dashboard(c context.Context) (domain.Dashboard, error) {
 	if err != nil {
 		return d, err
 	}
-	if err = s.DB.QueryRow(c, `SELECT count(*) FILTER (WHERE status='queued'),count(*) FILTER (WHERE status='queued' AND (EXISTS (SELECT 1 FROM agent_runs prior WHERE prior.workspace_snapshot=agent_runs.workspace_snapshot AND prior.status='queued' AND (prior.created_at<agent_runs.created_at OR (prior.created_at=agent_runs.created_at AND prior.id<agent_runs.id))) OR (SELECT count(*) FROM agent_runs active WHERE active.workspace_snapshot=agent_runs.workspace_snapshot AND active.status='running') >= (SELECT max_parallel_runs FROM agents WHERE id=agent_runs.agent_id))),count(*) FILTER (WHERE status='running'),count(*) FILTER (WHERE status='succeeded'),count(*) FILTER (WHERE status='failed') FROM agent_runs`).Scan(&d.Runs.Queued, &d.Runs.ResourceWaiting, &d.Runs.Running, &d.Runs.Succeeded, &d.Runs.Failed); err != nil {
+	if err = s.RefreshQueueState(c); err != nil {
+		return d, err
+	}
+	if err = s.DB.QueryRow(c, `SELECT count(*) FILTER (WHERE status='queued'),count(*) FILTER (WHERE status='queued' AND queue_wait_reason <> ''),count(*) FILTER (WHERE status='running'),count(*) FILTER (WHERE status='succeeded'),count(*) FILTER (WHERE status='failed') FROM agent_runs`).Scan(&d.Runs.Queued, &d.Runs.ResourceWaiting, &d.Runs.Running, &d.Runs.Succeeded, &d.Runs.Failed); err != nil {
 		return d, err
 	}
 	if err = s.DB.QueryRow(c, `SELECT COALESCE(sum(estimated_cost_microusd),0) FROM agent_runs`).Scan(&d.EstimatedCostMicrousd); err != nil {
@@ -2249,7 +2258,16 @@ func (s *Store) CreateRun(c context.Context, task, agent, rule string) (domain.A
 func (s *Store) createRunWithWorkspace(c context.Context, task string, a domain.Agent, agent, rule, workspace, targetProject, batchID string) (domain.AgentRun, error) {
 	var r domain.AgentRun
 	e := s.DB.QueryRow(c, "INSERT INTO agent_runs(task_id,agent_id,rule_id,batch_id,prompt_snapshot,workspace_snapshot,source_workspace,target_project_id,skill_snapshot) VALUES($1,$2,NULLIF($3,'')::uuid,NULLIF($4,'')::uuid,$5,$6,$6,NULLIF($7,'')::uuid,COALESCE((SELECT jsonb_agg(jsonb_build_object('name',s.name,'path',i.install_path)) FROM agent_skills x JOIN installed_skills i ON i.id=x.installed_skill_id JOIN skills s ON s.id=i.skill_id WHERE x.agent_id=$2),'[]'::jsonb)) RETURNING id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at", task, agent, rule, batchID, a.Prompt, workspace, targetProject).Scan(&r.ID, &r.TaskID, &r.AgentID, &r.RuleID, &r.BatchID, &r.Status, &r.PromptSnapshot, &r.WorkspaceSnapshot, &r.TargetProject, &r.Summary, &r.ErrorMessage, &r.StartedAt, &r.FinishedAt, &r.CreatedAt)
-	return r, e
+	if e != nil {
+		return r, e
+	}
+	if e = s.RecordAudit(c, "", "agent_run.queued", "agent_run", r.ID, map[string]string{
+		"workspace": workspace,
+		"source":    "manual",
+	}); e != nil {
+		return domain.AgentRun{}, e
+	}
+	return r, nil
 }
 func (s *Store) TaskWorkspace(c context.Context, taskID, fallback string) string {
 	targets, err := s.TaskRepositoryTargets(c, taskID)
@@ -2663,11 +2681,18 @@ func (s *Store) QueuedRuns(c context.Context) ([]domain.AgentRun, error) {
 // RefreshQueueState persists the current resource explanation and a bounded
 // retry point. It is safe to call from every worker cycle and after restart.
 func (s *Store) RefreshQueueState(c context.Context) error {
-	_, err := s.DB.Exec(c, `UPDATE agent_runs r SET
-		queue_wait_started_at=COALESCE(r.queue_wait_started_at,r.created_at),
-		queue_wait_reason=CASE WHEN EXISTS (SELECT 1 FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id))) THEN 'Wartet auf vorherige Runs im Workspace' WHEN (SELECT count(*) FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running') >= (SELECT max_parallel_runs FROM agents WHERE id=r.agent_id) THEN 'Workspace ist ausgelastet' ELSE '' END,
-		queue_next_attempt_at=CASE WHEN EXISTS (SELECT 1 FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id))) OR (SELECT count(*) FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running') >= (SELECT max_parallel_runs FROM agents WHERE id=r.agent_id) THEN GREATEST(r.queue_next_attempt_at,now()+interval '3 seconds') ELSE LEAST(r.queue_next_attempt_at,now()) END
-		WHERE r.status='queued'`)
+	_, err := s.DB.Exec(c, `WITH state AS (
+		SELECT r.id,
+			(EXISTS (SELECT 1 FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id)))
+			 OR (SELECT count(*) FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running') >= (SELECT max_parallel_runs FROM agents WHERE id=r.agent_id)) AS blocked,
+			EXISTS (SELECT 1 FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id))) AS has_prior
+		FROM agent_runs r WHERE r.status='queued'
+	)
+	UPDATE agent_runs r SET
+		queue_wait_started_at=CASE WHEN state.blocked THEN COALESCE(r.queue_wait_started_at,r.created_at) ELSE NULL END,
+		queue_wait_reason=CASE WHEN NOT state.blocked THEN '' WHEN state.has_prior THEN 'Wartet auf vorherige Runs im Workspace' ELSE 'Workspace ist ausgelastet' END,
+		queue_next_attempt_at=CASE WHEN state.blocked THEN CASE WHEN r.queue_wait_started_at IS NULL THEN now()+interval '3 seconds' WHEN r.queue_next_attempt_at > now() THEN r.queue_next_attempt_at ELSE now() END ELSE now() END
+	FROM state WHERE r.id=state.id`)
 	return err
 }
 

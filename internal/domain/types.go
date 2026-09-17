@@ -195,8 +195,8 @@ type WorktreeCleanupCandidate struct {
 type RunOverview struct {
 	ID, TaskID, TaskTitle, AgentID, AgentName, Status, Summary, ErrorMessage string
 	QueuePosition                                                            int
-	QueueReason, BlockingRunID                                               string
-	QueueNextAttemptAt                                                       *time.Time
+	QueueReason, BlockingRunID, QueueBlockingAgent, QueueWorkspace           string
+	QueueWaitingSince, QueueNextAttemptAt                                    *time.Time
 	StartedAt, FinishedAt                                                    *time.Time
 	CreatedAt                                                                time.Time
 	DurationSeconds                                                          int
