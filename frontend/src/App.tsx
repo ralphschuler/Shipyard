@@ -2673,7 +2673,6 @@ function BoardDetail({ id }: { id: string }) {
   const [labelsOpen, setLabelsOpen] = useState(false);
   const [settings, setSettings] = useState(false);
   const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
   const [message, setMessage] = useState("");
   const [draggedTask, setDraggedTask] = useState("");
   const touchDrag = useRef<{ taskID: string; startX: number; startY: number; active: boolean } | undefined>(undefined);
@@ -2830,15 +2829,7 @@ function BoardDetail({ id }: { id: string }) {
                     )}
                   </div>
                 </details>
-                <label className="grid gap-2 text-sm font-medium">
-                  Beschreibung
-                  <textarea
-                    name="description"
-                    className="min-h-28 rounded-lg border bg-transparent p-2"
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                  />
-                </label>
+                <DescriptionEditor initialValue="" />
                 <DialogFooter>
                   <Button type="submit">Aufgabe speichern</Button>
                 </DialogFooter>

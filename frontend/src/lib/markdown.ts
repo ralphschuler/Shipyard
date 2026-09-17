@@ -13,7 +13,9 @@ export type MarkdownBlock =
 
 const unsafeScheme = /^(?:javascript|vbscript|data):/i;
 const htmlTag = /<[^>]*>/g;
-const linkPattern = /\[([^\]]+)\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g;
+// Keep one balanced parenthesized segment in URLs so an unsafe URL such as
+// javascript:alert(1) is consumed in full instead of leaking a trailing ")".
+const linkPattern = /\[([^\]]+)\]\(([^\s]*(?:\([^)]*\)[^\s]*)?)(?:\s+"[^"]*")?\)/g;
 
 function safeUrl(value: string) {
   const href = value.trim();
@@ -41,7 +43,7 @@ function inline(value: string): MarkdownInline[] {
   return result.filter((part) => part.text || part.link);
 }
 
-function plainOrInline(value: string): Pick<MarkdownBlock, "text" | "inline"> {
+function plainOrInline(value: string): { text: string; inline?: MarkdownInline[] } {
   const parts = inline(value);
   const hasLink = parts.some((part) => part.link);
   return hasLink ? { text: parts.map((part) => part.text).join(""), inline: parts } : { text: parts.map((part) => part.text).join("") };
@@ -68,11 +70,11 @@ export function parseMarkdown(source: string): MarkdownBlock[] {
       const code: string[] = [];
       while (index < lines.length && !/^\s*```\s*$/.test(lines[index])) code.push(lines[index++]);
       if (index < lines.length) index += 1;
-      blocks.push({ type: "code", language: fence[1], text: code.join("\n") });
+      blocks.push({ type: "code", language: fence[1] ?? "", text: code.join("\n") });
       continue;
     }
     const heading = line.match(/^\s*(#{1,6})\s+(.+?)\s*#*\s*$/);
-    if (heading) { blocks.push({ type: "heading", level: heading[1].length, text: plainOrInline(heading[2]).text }); index += 1; continue; }
+    if (heading) { blocks.push({ type: "heading", level: heading[1].length, text: plainOrInline(heading[2] ?? "").text }); index += 1; continue; }
     if (line.trimStart().startsWith(">")) {
       const quote: string[] = [];
       while (index < lines.length && lines[index].trimStart().startsWith(">")) quote.push(lines[index++].trimStart().slice(1).trim());
