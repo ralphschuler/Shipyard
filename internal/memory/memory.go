@@ -73,14 +73,16 @@ type Fact struct {
 	ExpiresAt                      *time.Time
 }
 type FactInput struct {
-	Subject, Predicate string          `json:"subject"`
-	Object             json.RawMessage `json:"object"`
-	Confidence         float64         `json:"confidence"`
-	HighImpact         bool            `json:"high_impact"`
-	MessageID, RunID   string          `json:"message_id"`
-	ValidFrom          time.Time       `json:"valid_from"`
-	ValidUntil         *time.Time      `json:"valid_until"`
-	ChangeReason       string          `json:"change_reason"`
+	Subject      string          `json:"subject"`
+	Predicate    string          `json:"predicate"`
+	Object       json.RawMessage `json:"object"`
+	Confidence   float64         `json:"confidence"`
+	HighImpact   bool            `json:"high_impact"`
+	MessageID    string          `json:"message_id"`
+	RunID        string          `json:"run_id"`
+	ValidFrom    time.Time       `json:"valid_from"`
+	ValidUntil   *time.Time      `json:"valid_until"`
+	ChangeReason string          `json:"change_reason"`
 }
 type RetrievalItem struct {
 	Kind, ID, Text string

@@ -70,3 +70,18 @@ func TestFactVersionVisibleAtHonorsValidityWindow(t *testing.T) {
 		t.Fatal("validity window must be half-open")
 	}
 }
+
+func TestFactInputJSONTagsPreserveDistinctFields(t *testing.T) {
+	in := FactInput{Subject: "person", Predicate: "likes", MessageID: "message-1", RunID: "run-1"}
+	b, err := json.Marshal(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["subject"] != "person" || got["predicate"] != "likes" || got["message_id"] != "message-1" || got["run_id"] != "run-1" {
+		t.Fatalf("distinct fields were not preserved: %s", b)
+	}
+}
