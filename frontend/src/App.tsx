@@ -37,6 +37,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ChatBubble } from "@/components/ui/chat-bubble";
+import { MarkdownContent } from "@/components/markdown-content";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { normalizeLanguage, translate, type Language } from "@/i18n";
 
@@ -2672,7 +2673,6 @@ function BoardDetail({ id }: { id: string }) {
   const [labelsOpen, setLabelsOpen] = useState(false);
   const [settings, setSettings] = useState(false);
   const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
   const [message, setMessage] = useState("");
   const [draggedTask, setDraggedTask] = useState("");
   const touchDrag = useRef<{ taskID: string; startX: number; startY: number; active: boolean } | undefined>(undefined);
@@ -2829,15 +2829,7 @@ function BoardDetail({ id }: { id: string }) {
                     )}
                   </div>
                 </details>
-                <label className="grid gap-2 text-sm font-medium">
-                  Beschreibung
-                  <textarea
-                    name="description"
-                    className="min-h-28 rounded-lg border bg-transparent p-2"
-                    value={description}
-                    onChange={(e) => setDescription(e.target.value)}
-                  />
-                </label>
+                <DescriptionEditor initialValue="" />
                 <DialogFooter>
                   <Button type="submit">Aufgabe speichern</Button>
                 </DialogFooter>
@@ -3170,9 +3162,7 @@ function TaskDetail({ id }: { id: string }) {
             </Button>
           </div>
           <h2 className="mt-5 text-2xl font-semibold">{task.Title}</h2>
-          <p className="mt-3 whitespace-pre-wrap text-sm text-muted-foreground">
-            {task.Description || "Keine Beschreibung."}
-          </p>
+          {task.Description ? <MarkdownContent source={task.Description} className="mt-3 text-sm" /> : <p className="mt-3 text-sm text-muted-foreground">Keine Beschreibung.</p>}
           {message && (
             <p className="mt-3 text-sm text-destructive">{message}</p>
           )}
@@ -3197,9 +3187,7 @@ function TaskDetail({ id }: { id: string }) {
                   </p>
                   <h3 className="mt-1 font-medium">{interaction.Title}</h3>
                   {interaction.Body && (
-                    <p className="mt-2 text-sm text-muted-foreground">
-                      {interaction.Body}
-                    </p>
+                    <MarkdownContent source={interaction.Body} className="mt-2 text-sm text-muted-foreground" />
                   )}
                   <form
                     className="mt-3 grid gap-3"
@@ -3288,7 +3276,7 @@ function TaskDetail({ id }: { id: string }) {
                       timestamp={entry.CreatedAt ? new Date(entry.CreatedAt).toLocaleString("de-DE") : undefined}
                       side={automated ? "incoming" : "outgoing"}
                     >
-                      <p className="whitespace-pre-wrap">{entry.Body}</p>
+                      <MarkdownContent source={entry.Body || ""} className="text-sm" />
                     </ChatBubble>
                   );
                 })}
@@ -3447,14 +3435,7 @@ function TaskDetail({ id }: { id: string }) {
               Titel
               <Input name="title" required defaultValue={task.Title} />
             </label>
-            <label className="grid gap-1 text-sm">
-              Beschreibung
-              <textarea
-                name="description"
-                className="min-h-24 rounded-md border bg-transparent p-2"
-                defaultValue={task.Description}
-              />
-            </label>
+            <DescriptionEditor initialValue={task.Description || ""} />
             <label className="grid gap-1 text-sm">
               Priorität
               <select
@@ -3625,6 +3606,22 @@ function TaskDetail({ id }: { id: string }) {
       </Dialog>
     </>
   );
+}
+
+function DescriptionEditor({ initialValue }: { initialValue: string }) {
+  const [value, setValue] = useState(initialValue);
+  const [preview, setPreview] = useState(false);
+  return <div className="grid gap-2">
+    <div className="flex items-center justify-between gap-3">
+      <label htmlFor="task-description" className="text-sm">Beschreibung</label>
+      <div className="flex gap-1" role="tablist" aria-label="Beschreibung bearbeiten">
+        <Button type="button" size="sm" variant={preview ? "ghost" : "secondary"} onClick={() => setPreview(false)} role="tab" aria-selected={!preview}>Markdown</Button>
+        <Button type="button" size="sm" variant={preview ? "secondary" : "ghost"} onClick={() => setPreview(true)} role="tab" aria-selected={preview}>Vorschau</Button>
+      </div>
+    </div>
+    {preview ? <div className="min-h-24 rounded-md border bg-muted/30 p-3" role="tabpanel" aria-label="Markdown-Vorschau"><MarkdownContent source={value} /></div> : <textarea id="task-description" name="description" className="min-h-32 rounded-md border bg-transparent p-2" value={value} onChange={(event) => setValue(event.target.value)} aria-label="Beschreibung als Markdown" />}
+    {preview && <textarea className="sr-only" tabIndex={-1} aria-hidden="true" name="description" value={value} readOnly />}
+  </div>;
 }
 
 function Automations() {
