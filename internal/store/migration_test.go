@@ -129,3 +129,21 @@ func TestRetireAgentsMigrationPreservesHistoricalIdentities(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentMemoryMigrationEnforcesScopeHistoryAndActiveVersion(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/046_agent_memory.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{
+		"memory_conversations", "memory_audit_events", "provenance_json", "search_vector",
+		"UNIQUE(tenant_id,user_id,project_id,task_id,agent_id,dedupe_key)",
+		"CREATE UNIQUE INDEX memory_one_active_version ON memory_fact_versions(fact_id) WHERE active",
+		"current_version_id UUID", "high_impact BOOLEAN",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("memory migration missing %q", required)
+		}
+	}
+}
