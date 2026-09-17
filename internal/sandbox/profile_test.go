@@ -33,3 +33,17 @@ func TestMountAndEffectivePolicyValidation(t *testing.T) {
 		t.Fatalf("explicit QA network policy rejected: %v", err)
 	}
 }
+
+func TestBuiltInProfilesCannotLoseTheirSecurityInvariants(t *testing.T) {
+	cases := []Profile{
+		{Name: "strict", Mounts: []string{"worktree"}, NetworkMode: "qa-network", WriteMode: "worktree", Active: true},
+		{Name: "development", Mounts: []string{"worktree"}, NetworkMode: "none", WriteMode: "readonly", Active: true},
+		{Name: "qa-readonly", Mounts: []string{"worktree"}, NetworkMode: "none", WriteMode: "worktree", Active: true},
+		{Name: "release-bridge", Mounts: []string{"worktree"}, NetworkMode: "bridge-only", WriteMode: "readonly", Active: false},
+	}
+	for _, profile := range cases {
+		if err := ValidateProfile(profile); err == nil {
+			t.Fatalf("modified built-in profile %q was accepted", profile.Name)
+		}
+	}
+}

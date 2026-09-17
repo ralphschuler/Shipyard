@@ -53,6 +53,11 @@ func ValidateProfile(p Profile) error {
 	if p.WriteMode != "worktree" && p.WriteMode != "readonly" {
 		return errors.New("ungültiger Sandbox-Schreibmodus")
 	}
+	if builtin, ok := profiles[p.Name]; ok {
+		if len(p.Mounts) != len(builtin.Mounts) || p.Mounts[0] != builtin.Mounts[0] || p.NetworkMode != builtin.NetworkMode || p.WriteMode != builtin.WriteMode || p.Active != builtin.Active {
+			return fmt.Errorf("Sicherheitsinvarianten des Built-in-Profils %q dürfen nicht geändert werden", p.Name)
+		}
+	}
 	if p.Name == "release-bridge" && (p.NetworkMode != "bridge-only" || p.WriteMode != "readonly") {
 		return errors.New("release-bridge benötigt bridge-only und readonly")
 	}
