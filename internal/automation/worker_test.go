@@ -38,6 +38,24 @@ func TestReportedCLIUsagePreservesExplicitZeroClasses(t *testing.T) {
 	}
 }
 
+func TestEstimateUsageCostKeepsHypotheticalCostForIncompleteSubscriptionRun(t *testing.T) {
+	input, output := int64(1_000_000), int64(1_000_000)
+	price := domain.UsagePrice{Version: "catalog-2026-09", Input: &input, Output: &output}
+	report := domain.UsageReport{Status: "incomplete", CostSource: "unknown", InputTokens: ptrInt64(2), OutputTokens: ptrInt64(3)}
+
+	if !estimateUsageCost(&report, price) {
+		t.Fatal("known token usage on an incomplete run must receive a catalog estimate")
+	}
+	if report.CostSource != "estimated" || report.CalculatedCostMicrousd == nil || *report.CalculatedCostMicrousd != 5 {
+		t.Fatalf("unexpected estimated cost report: %#v", report)
+	}
+	if report.PriceVersion != price.Version || report.CostCalculatedAt == nil {
+		t.Fatalf("estimate metadata missing: %#v", report)
+	}
+}
+
+func ptrInt64(value int64) *int64 { return &value }
+
 func runGit(t *testing.T, directory string, args ...string) {
 	t.Helper()
 	command := exec.Command("git", append([]string{"-C", directory}, args...)...)
