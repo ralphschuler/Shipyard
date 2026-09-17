@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 var shaPattern = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
@@ -20,6 +21,7 @@ var branchPattern = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 type Request struct {
 	TaskID, ProjectID, RepositoryURL, SourcePath, SourceBranch, TargetBranch string
 	CommitSHA, DiffSummary, Tests, ReviewNotes                               string
+	SecretValues                                                             []string
 	DoneApproved                                                             bool
 }
 
@@ -45,6 +47,25 @@ type Result struct {
 	PR      PullRequest
 	Marker  string
 	Updated bool
+}
+
+var publishLocks sync.Map
+
+func redact(value string, secrets []string) string {
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret != "" {
+			value = strings.ReplaceAll(value, secret, "[REDACTED]")
+		}
+	}
+	return value
+}
+
+func safeError(prefix string, err error, secrets []string) error {
+	if err == nil {
+		return errors.New(redact(prefix, secrets))
+	}
+	return errors.New(redact(prefix+": "+err.Error(), secrets))
 }
 
 func (r Request) validate() error {
@@ -73,45 +94,64 @@ func (r Request) validate() error {
 
 func Publish(ctx context.Context, request Request, pusher Pusher, github GitHub) (Result, error) {
 	if err := request.validate(); err != nil {
-		return Result{}, err
+		return Result{}, safeError("release validation failed", err, request.SecretValues)
 	}
 	if pusher == nil || github == nil {
-		return Result{}, errors.New("release adapters are not configured")
+		return Result{}, safeError("release adapters are not configured", nil, request.SecretValues)
 	}
 	owner, repo, err := githubRepository(request.RepositoryURL)
 	if err != nil {
-		return Result{}, err
+		return Result{}, safeError("repository validation failed", err, request.SecretValues)
 	}
 	marker := "<!-- shipyard-release-task:" + request.TaskID + " -->"
-	push := PushInput{RepositoryPath: request.SourcePath, Remote: "origin", Branch: request.SourceBranch, CommitSHA: request.CommitSHA}
-	if err := pusher.Push(ctx, push); err != nil {
-		return Result{}, fmt.Errorf("accepted branch push failed: %w", err)
-	}
+	lockKey := owner + "/" + repo + "\x00" + request.SourceBranch + "\x00" + request.TargetBranch + "\x00" + marker
+	lock := &sync.Mutex{}
+	actual, _ := publishLocks.LoadOrStore(lockKey, lock)
+	lock = actual.(*sync.Mutex)
+	lock.Lock()
+	// Keep the keyed mutex for the lifetime of the process. Deleting it after
+	// Unlock would let a third retry create a new mutex while a second retry
+	// is still queued on the old one.
+	defer lock.Unlock()
+
 	body := prBody(request, marker)
 	in := PullRequestInput{Repository: owner + "/" + repo, Title: "Shipyard: " + request.TaskID, Head: request.SourceBranch, Base: request.TargetBranch, Body: body}
 	existing, err := github.FindPR(ctx, owner, repo, request.SourceBranch, request.TargetBranch, marker)
 	if err != nil {
-		return Result{}, fmt.Errorf("matching PR lookup failed: %w", err)
+		return Result{}, safeError("matching PR lookup failed", err, request.SecretValues)
+	}
+	push := PushInput{RepositoryPath: request.SourcePath, Remote: "origin", Branch: request.SourceBranch, CommitSHA: request.CommitSHA}
+	if err := pusher.Push(ctx, push); err != nil {
+		return Result{}, safeError("accepted branch push failed", err, request.SecretValues)
 	}
 	if existing != nil {
 		if existing.Number <= 0 {
-			return Result{}, errors.New("matching PR has no valid number")
+			return Result{}, safeError("matching PR has no valid number", nil, request.SecretValues)
 		}
 		pr, err := github.UpdatePR(ctx, existing.Number, in)
 		if err != nil {
-			return Result{}, fmt.Errorf("matching PR update failed: %w", err)
+			return Result{}, safeError("matching PR update failed", err, request.SecretValues)
 		}
 		if err := validatePR(pr); err != nil {
-			return Result{}, err
+			return Result{}, safeError("updated PR validation failed", err, request.SecretValues)
 		}
 		return Result{PR: pr, Marker: marker, Updated: true}, nil
 	}
 	pr, err := github.CreatePR(ctx, in)
 	if err != nil {
-		return Result{}, fmt.Errorf("PR creation failed: %w", err)
+		// A concurrent process may have created the matching PR between lookup
+		// and creation. Re-read it and update rather than creating a duplicate.
+		existing, lookupErr := github.FindPR(ctx, owner, repo, request.SourceBranch, request.TargetBranch, marker)
+		if lookupErr == nil && existing != nil && existing.Number > 0 {
+			pr, updateErr := github.UpdatePR(ctx, existing.Number, in)
+			if updateErr == nil && validatePR(pr) == nil {
+				return Result{PR: pr, Marker: marker, Updated: true}, nil
+			}
+		}
+		return Result{}, safeError("PR creation failed", err, request.SecretValues)
 	}
 	if err := validatePR(pr); err != nil {
-		return Result{}, err
+		return Result{}, safeError("created PR validation failed", err, request.SecretValues)
 	}
 	return Result{PR: pr, Marker: marker}, nil
 }
@@ -136,7 +176,7 @@ func githubRepository(raw string) (string, string, error) {
 }
 
 func prBody(r Request, marker string) string {
-	return strings.Join([]string{marker, "## Shipyard task", r.TaskID, "", "- Project: `" + r.ProjectID + "`", "- Source branch: `" + r.SourceBranch + "`", "- Target branch: `" + r.TargetBranch + "`", "- Accepted commit: `" + r.CommitSHA + "`", "", "## Change summary", r.DiffSummary, "", "## Tests", r.Tests, "", "## Review notes", r.ReviewNotes}, "\n")
+	return strings.Join([]string{marker, "## Shipyard task", r.TaskID, "", "- Project: `" + r.ProjectID + "`", "- Source branch: `" + r.SourceBranch + "`", "- Target branch: `" + r.TargetBranch + "`", "- Accepted commit: `" + r.CommitSHA + "`", "", "## Change summary", redact(r.DiffSummary, r.SecretValues), "", "## Tests", redact(r.Tests, r.SecretValues), "", "## Review notes", redact(r.ReviewNotes, r.SecretValues)}, "\n")
 }
 
 type GitPusher struct{}
@@ -148,7 +188,18 @@ func (GitPusher) Push(ctx context.Context, in PushInput) error {
 	if in.Remote == "" {
 		return errors.New("push remote is required")
 	}
-	cmd := exec.CommandContext(ctx, "git", "-C", in.RepositoryPath, "push", in.Remote, in.CommitSHA+":refs/heads/"+in.Branch)
+	if !shaPattern.MatchString(in.CommitSHA) {
+		return errors.New("accepted commit must be a full SHA-1")
+	}
+	if !branchPattern.MatchString(in.Branch) || strings.Contains(in.Branch, "..") {
+		return errors.New("invalid push branch")
+	}
+	cmd := exec.CommandContext(ctx, "git", "-C", in.RepositoryPath, "rev-parse", "--verify", "HEAD^{commit}")
+	output, err := cmd.Output()
+	if err != nil || !strings.EqualFold(strings.TrimSpace(string(output)), in.CommitSHA) {
+		return errors.New("accepted commit is not the managed checkout HEAD")
+	}
+	cmd = exec.CommandContext(ctx, "git", "-C", in.RepositoryPath, "push", in.Remote, in.CommitSHA+":refs/heads/"+in.Branch)
 	if _, err := cmd.CombinedOutput(); err != nil {
 		// Git may echo remote URLs or credential-helper diagnostics. Never pass
 		// raw command output to an audit/comment channel.
@@ -186,8 +237,9 @@ func (c Client) endpoint(path string) (string, error) {
 	if base == "" {
 		base = "https://api.github.com"
 	}
-	if !strings.HasPrefix(base, "https://") {
-		return "", errors.New("GitHub API must use HTTPS")
+	u, err := url.Parse(base)
+	if err != nil || u.Scheme != "https" || strings.ToLower(u.Host) != "api.github.com" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Path != "" {
+		return "", errors.New("GitHub API must be the canonical HTTPS api.github.com endpoint")
 	}
 	return base + path, nil
 }
