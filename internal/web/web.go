@@ -2391,11 +2391,12 @@ func (a *App) page(c context.Context, id, errText string, lang string) (boardPag
 	if e != nil {
 		return boardPage{}, e
 	}
+	targetProjects, e := a.store.EffectiveTaskTargetProjectsForTasks(c, tasks)
+	if e != nil {
+		return boardPage{}, e
+	}
 	for i := range tasks {
-		tasks[i].TargetProjects, e = a.store.EffectiveTaskTargetProjects(c, tasks[i].ID)
-		if e != nil {
-			return boardPage{}, e
-		}
+		tasks[i].TargetProjects = targetProjects[tasks[i].ID]
 	}
 	tr, e := a.store.Transitions(c, id)
 	labels, labelErr := a.store.Labels(c, id)

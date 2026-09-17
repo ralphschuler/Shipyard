@@ -37,3 +37,21 @@ func TestFilterBoardTasksSupportsPartialAndEmptyQueries(t *testing.T) {
 		t.Fatalf("empty query result length = %d, want %d", len(got), len(tasks))
 	}
 }
+
+func TestFilterBoardTasksMatchesExactTermsAndReturnsEmptyResults(t *testing.T) {
+	tasks := []domain.Task{
+		{ID: "exact", BoardID: "board-a", Title: "Release vorbereiten", Description: "Notizen prüfen"},
+		{ID: "partial", BoardID: "board-a", Title: "Release planen", Description: "Zeitplan abstimmen"},
+	}
+
+	query := url.Values{"search": []string{"Release vorbereiten"}}
+	got := filterBoardTasks(tasks, "board-a", query)
+	if len(got) != 1 || got[0].ID != "exact" {
+		t.Fatalf("exact search result = %#v, want exact task only", got)
+	}
+
+	query.Set("search", "does-not-exist")
+	if got := filterBoardTasks(tasks, "board-a", query); len(got) != 0 {
+		t.Fatalf("empty search result = %#v, want no tasks", got)
+	}
+}

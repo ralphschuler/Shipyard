@@ -771,6 +771,87 @@ func (s *Store) EffectiveTaskTargetProjects(c context.Context, taskID string) ([
 	}
 	return projects, nil
 }
+
+// EffectiveTaskTargetProjectsForTasks loads effective project targets for a
+// board projection in bounded queries. It preserves the single-project board
+// fallback used by EffectiveTaskTargetProjects without issuing one query per
+// task.
+func (s *Store) EffectiveTaskTargetProjectsForTasks(c context.Context, tasks []domain.Task) (map[string][]domain.Project, error) {
+	result := make(map[string][]domain.Project, len(tasks))
+	if len(tasks) == 0 {
+		return result, nil
+	}
+	taskIDs := make([]string, 0, len(tasks))
+	boardIDs := make([]string, 0, len(tasks))
+	seenBoards := make(map[string]struct{}, len(tasks))
+	for _, task := range tasks {
+		taskIDs = append(taskIDs, task.ID)
+		if _, ok := seenBoards[task.BoardID]; !ok {
+			seenBoards[task.BoardID] = struct{}{}
+			boardIDs = append(boardIDs, task.BoardID)
+		}
+	}
+
+	rows, err := s.DB.Query(c, `
+		SELECT targets.task_id,p.id,p.name,p.repository_url,p.default_branch,p.local_path,p.last_synced_at,p.last_sync_error,p.created_at,p.updated_at
+		FROM (
+			SELECT task_id,project_id FROM task_target_projects WHERE task_id = ANY($1)
+			UNION
+			SELECT g.task_id,m.project_id
+			FROM task_target_groups g JOIN project_group_members m ON m.group_id=g.group_id
+			WHERE g.task_id = ANY($1)
+		) targets
+		JOIN projects p ON p.id=targets.project_id
+		ORDER BY targets.task_id,p.name`, taskIDs)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var taskID string
+		var project domain.Project
+		if err := rows.Scan(&taskID, &project.ID, &project.Name, &project.RepositoryURL, &project.DefaultBranch, &project.LocalPath, &project.LastSyncedAt, &project.LastSyncError, &project.CreatedAt, &project.UpdatedAt); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		result[taskID] = append(result[taskID], project)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	boardProjects := make(map[string][]domain.Project, len(boardIDs))
+	boardRows, err := s.DB.Query(c, `
+		SELECT bp.board_id,p.id,p.name,p.repository_url,p.default_branch,p.local_path,p.last_synced_at,p.last_sync_error,p.created_at,p.updated_at
+		FROM board_projects bp JOIN projects p ON p.id=bp.project_id
+		WHERE bp.board_id = ANY($1)
+		ORDER BY bp.board_id,p.name`, boardIDs)
+	if err != nil {
+		return nil, err
+	}
+	for boardRows.Next() {
+		var boardID string
+		var project domain.Project
+		if err := boardRows.Scan(&boardID, &project.ID, &project.Name, &project.RepositoryURL, &project.DefaultBranch, &project.LocalPath, &project.LastSyncedAt, &project.LastSyncError, &project.CreatedAt, &project.UpdatedAt); err != nil {
+			boardRows.Close()
+			return nil, err
+		}
+		boardProjects[boardID] = append(boardProjects[boardID], project)
+	}
+	if err := boardRows.Err(); err != nil {
+		boardRows.Close()
+		return nil, err
+	}
+	boardRows.Close()
+
+	for _, task := range tasks {
+		if len(result[task.ID]) == 0 && len(boardProjects[task.BoardID]) == 1 {
+			result[task.ID] = boardProjects[task.BoardID]
+		}
+	}
+	return result, nil
+}
 func (s *Store) TaskTargetGroups(c context.Context, taskID string) ([]domain.ProjectGroup, error) {
 	rows, err := s.DB.Query(c, `SELECT g.id,g.name,g.description,g.color,g.created_at,g.updated_at FROM project_groups g JOIN task_target_groups t ON t.group_id=g.id WHERE t.task_id=$1 ORDER BY g.name`, taskID)
 	if err != nil {
