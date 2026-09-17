@@ -14,6 +14,39 @@ func TestEmbeddedTemplatesParse(t *testing.T) {
 	}
 }
 
+func TestTaskTabsRemainAccessibleAndKeepChangesActionsInHeader(t *testing.T) {
+	page, err := files.ReadFile("templates/task.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(page)
+	backlink := strings.Index(html, `class="task-nav"`)
+	tabs := strings.Index(html, `role="tablist"`)
+	title := strings.Index(html, `class="task-hero"`)
+	if backlink < 0 || tabs < 0 || title < 0 || !(backlink < tabs && tabs < title) {
+		t.Fatalf("task header order must be board backlink, tabs, title: backlink=%d tabs=%d title=%d", backlink, tabs, title)
+	}
+	for _, required := range []string{
+		`id="tab-conversation" role="tab"`, `id="tab-info" role="tab"`, `id="tab-changes" role="tab"`,
+		`role="tabpanel" aria-labelledby="tab-conversation"`, `role="tabpanel" aria-labelledby="tab-info"`, `role="tabpanel" aria-labelledby="tab-changes"`,
+		`action="/runs/{{.ID}}/apply"`,
+	} {
+		if !strings.Contains(html, required) {
+			t.Fatalf("task tabs contract is missing %q", required)
+		}
+	}
+	script, err := files.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(script)
+	for _, required := range []string{"history.pushState", "addEventListener('popstate'", "ArrowRight", "tabIndex=selected?0:-1", "panel.hidden"} {
+		if !strings.Contains(js, required) {
+			t.Fatalf("task tab behavior contract is missing %q", required)
+		}
+	}
+}
+
 func TestTelemetryBreakdownIsVisibleInClassicViews(t *testing.T) {
 	run, err := files.ReadFile("templates/run.html")
 	if err != nil {

@@ -726,6 +726,53 @@ func syncManagedCheckout(ctx context.Context, path, branch string, acceptedCommi
 	return managedCheckoutProblem("divergent", files, "lokaler HEAD und origin/"+branch+" haben keinen gemeinsamen geradlinigen Stand")
 }
 
+// applyRunPatch applies exactly one isolated run to the managed checkout. The
+// caller must hold the repository apply lock. Keeping this boundary separate
+// makes the destructive-safety and conflict behavior testable with real Git
+// repositories without requiring a database-backed Worker.
+func applyRunPatch(ctx context.Context, source, worktree, runID string) (string, error) {
+	if dirty, checkErr := exec.CommandContext(ctx, "git", "-C", source, "status", "--porcelain").Output(); checkErr != nil {
+		return "", checkErr
+	} else if strings.TrimSpace(string(dirty)) != "" {
+		return "", managedCheckoutProblem("nicht sauber", strings.TrimSpace(string(dirty)), "fremde oder manuelle Änderungen würden von dieser Übernahme berührt")
+	}
+	// --binary makes newly created binary files representable in the patch.
+	diff, diffErr := exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--binary", "HEAD").Output()
+	if diffErr != nil {
+		return "", diffErr
+	}
+	if strings.TrimSpace(string(diff)) == "" {
+		return "", errors.New("dieser Run enthält keine übernehmbaren Änderungen")
+	}
+	// Do not combine --check and --3way: Git may write conflict markers even
+	// while checking a patch. A plain check is intentionally non-mutating; the
+	// subsequent 3-way apply is allowed only after this preflight succeeds.
+	check := exec.CommandContext(ctx, "git", "-C", source, "apply", "--check", "-")
+	check.Stdin = strings.NewReader(string(diff))
+	if out, checkErr := check.CombinedOutput(); checkErr != nil {
+		files, _ := gitOutput(ctx, source, "diff", "--name-only", "HEAD")
+		return "", managedCheckoutProblem("in einem Drei-Wege-Konflikt nicht konfliktfrei übernehmbar", files, strings.TrimSpace(string(out)))
+	}
+	apply := exec.CommandContext(ctx, "git", "-C", source, "apply", "--3way", "-")
+	apply.Stdin = strings.NewReader(string(diff))
+	if out, applyErr := apply.CombinedOutput(); applyErr != nil {
+		files, _ := gitOutput(ctx, source, "diff", "--name-only", "HEAD")
+		return "", managedCheckoutProblem("in einem Drei-Wege-Konflikt", files, strings.TrimSpace(string(out)))
+	}
+	if out, addErr := exec.CommandContext(ctx, "git", "-C", source, "add", "-A").CombinedOutput(); addErr != nil {
+		return "", errors.New(strings.TrimSpace(string(out)))
+	}
+	commit := exec.CommandContext(ctx, "git", "-C", source, "-c", "user.name=Taskboard", "-c", "user.email=taskboard@local", "commit", "-m", "taskboard: accept run "+runID)
+	if out, commitErr := commit.CombinedOutput(); commitErr != nil {
+		return "", errors.New(strings.TrimSpace(string(out)))
+	}
+	commitSHA, err := gitOutput(ctx, source, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("Übernahme-Commit konnte nicht verifiziert werden: %w", err)
+	}
+	return commitSHA, nil
+}
+
 // runInTmux keeps a real interactive terminal for each CLI provider while
 // mirroring every pane byte into the durable run log. The separate logfile
 // avoids tmux's finite scrollback being the source of truth.
@@ -1405,34 +1452,8 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 		return errors.New("Worktree für diesen Run nicht verfügbar")
 	}
 	if !alreadyCommitted {
-		// --binary makes newly created binary files representable in the patch.
-		// Without it a successful diff gate could still fail at `git apply` later.
-		diff, diffErr := exec.Command("git", "-C", worktree, "diff", "--binary", "HEAD").Output()
-		if diffErr != nil {
-			return diffErr
-		}
-		if strings.TrimSpace(string(diff)) == "" {
-			return errors.New("dieser Run enthält keine übernehmbaren Änderungen")
-		}
-		cmd := exec.Command("git", "-C", source, "apply", "--3way", "-")
-		check := exec.Command("git", "-C", source, "apply", "--check", "--3way", "-")
-		check.Stdin = strings.NewReader(string(diff))
-		if out, checkErr := check.CombinedOutput(); checkErr != nil {
-			files, _ := gitOutput(ctx, source, "diff", "--name-only", "HEAD")
-			return managedCheckoutProblem("nicht konfliktfrei übernehmbar", files, strings.TrimSpace(string(out)))
-		}
-		cmd.Stdin = strings.NewReader(string(diff))
-		if out, applyErr := cmd.CombinedOutput(); applyErr != nil {
-			files, _ := gitOutput(ctx, source, "diff", "--name-only", "HEAD")
-			return managedCheckoutProblem("in einem Drei-Wege-Konflikt", files, strings.TrimSpace(string(out)))
-		}
-		commit := exec.Command("git", "-C", source, "add", "-A")
-		if out, addErr := commit.CombinedOutput(); addErr != nil {
-			return errors.New(strings.TrimSpace(string(out)))
-		}
-		commit = exec.Command("git", "-C", source, "-c", "user.name=Taskboard", "-c", "user.email=taskboard@local", "commit", "-m", "taskboard: accept run "+runID)
-		if out, commitErr := commit.CombinedOutput(); commitErr != nil {
-			return errors.New(strings.TrimSpace(string(out)))
+		if _, err := applyRunPatch(ctx, source, worktree, runID); err != nil {
+			return err
 		}
 	} else {
 		_ = w.Store.AddRunLog(ctx, runID, "warning", "Vorhandener Übernahme-Commit erkannt; Delivery wird ohne erneutes Anwenden wiederhergestellt.")

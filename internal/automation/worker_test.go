@@ -3,6 +3,7 @@ package automation
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -272,6 +273,124 @@ func TestSyncManagedCheckoutBlocksUnacceptedLocalCommit(t *testing.T) {
 	err := syncManagedCheckout(context.Background(), source, "master")
 	if err == nil || !strings.Contains(err.Error(), "nicht als akzeptierte Delivery verifiziert") || !strings.Contains(err.Error(), "manual.txt") {
 		t.Fatalf("unaccepted local commit diagnosis = %v", err)
+	}
+}
+
+func TestApplyRunPatchAcceptsTwoSequentialRunWorktrees(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+
+	for index, change := range []struct {
+		name string
+		body string
+	}{
+		{"first.txt", "first\n"},
+		{"second.txt", "second\n"},
+	} {
+		runID := fmt.Sprintf("follow-up-%d", index+1)
+		worktree := filepath.Join(t.TempDir(), runID)
+		runGit(t, source, "worktree", "add", worktree, "HEAD")
+		if err := os.WriteFile(filepath.Join(worktree, change.name), []byte(change.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, worktree, "add", change.name)
+		// Keep the run worktree uncommitted: Apply consumes its reviewable diff.
+		if _, err := applyRunPatch(context.Background(), source, worktree, runID); err != nil {
+			t.Fatalf("apply %s: %v", runID, err)
+		}
+		if err := removeRunWorktree(context.Background(), runID, source, worktree); err != nil {
+			t.Fatalf("cleanup %s: %v", runID, err)
+		}
+	}
+	for _, name := range []string{"first.txt", "second.txt"} {
+		if _, err := os.Stat(filepath.Join(source, name)); err != nil {
+			t.Fatalf("sequential delivery did not retain %s: %v", name, err)
+		}
+	}
+	commits, err := gitOutput(context.Background(), source, "log", "--format=%s", "-2")
+	if err != nil || !strings.Contains(commits, "taskboard: accept run follow-up-1") || !strings.Contains(commits, "taskboard: accept run follow-up-2") {
+		t.Fatalf("sequential delivery audit commits = %q, %v", commits, err)
+	}
+}
+
+func TestApplyRunPatchReportsThreeWayConflictAndPreservesDiff(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	file := filepath.Join(source, "shared.txt")
+	if err := os.WriteFile(file, []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "shared.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	worktree := filepath.Join(t.TempDir(), "conflict")
+	runGit(t, source, "worktree", "add", worktree, "HEAD")
+	if err := os.WriteFile(filepath.Join(worktree, "shared.txt"), []byte("run change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Advance the managed checkout independently on the same hunk.
+	if err := os.WriteFile(file, []byte("manual change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "shared.txt")
+	runGit(t, source, "commit", "-m", "unrelated accepted change")
+
+	err := func() error {
+		_, applyErr := applyRunPatch(context.Background(), source, worktree, "conflicting-run")
+		return applyErr
+	}()
+	if err == nil || !strings.Contains(err.Error(), "Drei-Wege-Konflikt") || !strings.Contains(err.Error(), "shared.txt") {
+		t.Fatalf("conflict diagnosis = %v", err)
+	}
+	contents, readErr := os.ReadFile(file)
+	if readErr != nil || string(contents) != "manual change\n" {
+		t.Fatalf("conflict altered managed checkout: %q, %v", contents, readErr)
+	}
+	if err := removeRunWorktree(context.Background(), "conflicting-run", source, worktree); err != nil {
+		t.Fatalf("conflict cleanup: %v", err)
+	}
+}
+
+func TestApplyRunPatchBlocksDirtyCheckoutWithoutChangingIt(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	file := filepath.Join(source, "manual.txt")
+	if err := os.WriteFile(file, []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "manual.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	worktree := filepath.Join(t.TempDir(), "dirty-run")
+	runGit(t, source, "worktree", "add", worktree, "HEAD")
+	if err := os.WriteFile(filepath.Join(worktree, "delivery.txt"), []byte("delivery\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("manual edit\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := func() error {
+		_, applyErr := applyRunPatch(context.Background(), source, worktree, "dirty-run")
+		return applyErr
+	}()
+	if err == nil || !strings.Contains(err.Error(), "manual.txt") || !strings.Contains(err.Error(), "nichts zurückgesetzt") {
+		t.Fatalf("dirty diagnosis = %v", err)
+	}
+	contents, readErr := os.ReadFile(file)
+	if readErr != nil || string(contents) != "manual edit\n" {
+		t.Fatalf("dirty checkout was altered: %q, %v", contents, readErr)
+	}
+	if err := removeRunWorktree(context.Background(), "dirty-run", source, worktree); err != nil {
+		t.Fatalf("dirty cleanup: %v", err)
 	}
 }
 
