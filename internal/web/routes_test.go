@@ -78,6 +78,7 @@ func (f updateRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 func TestUpdatesAPIUsesGitHubMetadataOnly(t *testing.T) {
 	t.Setenv("TASKBOARD_VERSION", "1.2.0")
 	t.Setenv("TASKBOARD_GITHUB_RELEASE_ALLOWLIST", "v1.3.0")
+	t.Setenv("TASKBOARD_GITHUB_TOKEN", "read-only-token")
 	t.Setenv("TASKBOARD_UPDATE_VERSION", "9.9.9")
 	t.Setenv("TASKBOARD_UPDATE_VERIFIED", "true")
 	commit := "0123456789012345678901234567890123456789"
@@ -143,6 +144,7 @@ func TestActiveUpdateRunsQueryExcludesTheConfirmingSession(t *testing.T) {
 func TestInstallUpdateRunsOnlyAfterVerifiedSnapshot(t *testing.T) {
 	t.Setenv("TASKBOARD_VERSION", "1.2.0")
 	t.Setenv("TASKBOARD_GITHUB_RELEASE_ALLOWLIST", "v1.3.0")
+	t.Setenv("TASKBOARD_GITHUB_TOKEN", "read-only-token")
 	commit := "0123456789012345678901234567890123456789"
 	transport := updateRoundTripper(func(r *http.Request) (*http.Response, error) {
 		var body string
