@@ -27,5 +27,9 @@ persistent gespeicherte Repository-Queue an. Diese arbeitet Fetch, Rebase,
 wiederanlaufbare Schritte ab. Ein Dienstneustart oder ein temporärer Remote-
 Fehler verliert daher keine Delivery; der nächste Queue-Lauf setzt beim
 gespeicherten Schritt fort. Branch, Basis-/Head-SHA, Queue-Status und PR-
-Metadaten werden am Run gespeichert und angezeigt. Ein PR wird anschließend
-über die normalen Provider-Checks gemergt.
+Metadaten werden am Run gespeichert und angezeigt. Nach der PR-Erstellung bleibt
+der Queue-Eintrag im Status `pr_open`; der Provider-Merge wird wiederanlaufbar
+überwacht. Erst nach bestätigtem Merge wird der verwaltete Checkout per
+Fast-Forward auf `origin/<default-branch>` synchronisiert. Ein Rebase-Konflikt
+in diesem Ablauf setzt den Task auf Needs action und protokolliert die
+betroffenen Dateien.

@@ -113,6 +113,54 @@ func TestRepositoryApplyLockSerializesConcurrentDelivery(t *testing.T) {
 	secondUnlock()
 }
 
+func TestEnsureTaskBranchFetchesCurrentDefaultBeforeCreation(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, t.TempDir(), "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+
+	// Advance the remote in a separate clone so the local origin/master is stale.
+	other := filepath.Join(t.TempDir(), "other")
+	runGit(t, t.TempDir(), "clone", remote, other)
+	runGit(t, other, "config", "user.name", "Test")
+	runGit(t, other, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(other, "remote.txt"), []byte("remote\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, other, "add", "remote.txt")
+	runGit(t, other, "commit", "-m", "remote advance")
+	runGit(t, other, "push", "origin", "master")
+
+	branch, err := ensureTaskBranch(context.Background(), source, "task-from-current-remote")
+	if err != nil {
+		t.Fatalf("ensure task branch: %v", err)
+	}
+	if branch != "task/task-from-current-remote" {
+		t.Fatalf("branch = %q", branch)
+	}
+	if _, err := gitOutput(context.Background(), source, "show", branch+":remote.txt"); err != nil {
+		t.Fatalf("task branch was not based on the current remote default: %v", err)
+	}
+}
+
+func TestIntegrationPRMergedRequiresMergedState(t *testing.T) {
+	if integrationPRMerged([]byte(`{"state":"OPEN","mergedAt":null}`)) {
+		t.Fatal("open pull request reported as merged")
+	}
+	if !integrationPRMerged([]byte(`{"state":"MERGED","mergedAt":"2026-09-17T16:00:00Z"}`)) {
+		t.Fatal("merged pull request was not recognized")
+	}
+}
+
 func TestRunCommitExistsProvidesIdempotentDeliveryMarker(t *testing.T) {
 	source := t.TempDir()
 	runGit(t, source, "init", "-b", "main")

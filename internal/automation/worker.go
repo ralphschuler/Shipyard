@@ -904,6 +904,14 @@ func integrationPushArgs(branch, defaultBranch string) ([]string, error) {
 	return []string{"push", "--force-with-lease", "origin", branch + ":" + branch}, nil
 }
 
+func integrationPRMerged(output []byte) bool {
+	var state struct {
+		State    string  `json:"state"`
+		MergedAt *string `json:"mergedAt"`
+	}
+	return json.Unmarshal(output, &state) == nil && strings.EqualFold(state.State, "MERGED") && state.MergedAt != nil && strings.TrimSpace(*state.MergedAt) != ""
+}
+
 // processIntegrationQueue is deliberately restartable: every step is stored
 // before the next external Git operation. A transient push/PR failure leaves
 // the job visible and eligible for a later poll instead of losing delivery.
@@ -914,6 +922,11 @@ func (w *Worker) processIntegrationQueue(ctx context.Context) {
 	}
 	for _, job := range jobs {
 		if err := w.processIntegrationJob(ctx, job); err != nil {
+			if isIntegrationConflict(err) {
+				if run, runErr := w.Store.Run(ctx, job.RunID); runErr == nil {
+					_ = w.recordIntegrationConflict(ctx, run, err)
+				}
+			}
 			_ = w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, err.Error(), job.PRNumber, job.Attempts+1)
 		}
 	}
@@ -925,6 +938,30 @@ func (w *Worker) processIntegrationJob(ctx context.Context, job domain.Integrati
 		return err
 	}
 	defer unlock()
+	if job.Step == "done" && job.Status == "pr_open" {
+		remote, remoteErr := gitOutput(ctx, job.RepositoryPath, "remote", "get-url", "origin")
+		if remoteErr != nil {
+			return fmt.Errorf("Remote-URL für Merge-Prüfung konnte nicht gelesen werden: %w", remoteErr)
+		}
+		out, viewErr := exec.CommandContext(ctx, "gh", "-R", remote, "pr", "view", job.Branch, "--json", "state,mergedAt").CombinedOutput()
+		if viewErr != nil {
+			return fmt.Errorf("PR-Status konnte nicht gelesen werden: %s", strings.TrimSpace(string(out)))
+		}
+		if !integrationPRMerged(out) {
+			return w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts)
+		}
+		if current := repositoryBranch(ctx, job.RepositoryPath); current != job.DefaultBranch {
+			return fmt.Errorf("verwalteter Checkout steht auf %q statt auf Default-Branch %q", current, job.DefaultBranch)
+		}
+		if err := syncManagedCheckout(ctx, job.RepositoryPath, job.DefaultBranch, job.HeadSHA); err != nil {
+			return fmt.Errorf("verwalteter Checkout konnte nach Merge nicht synchronisiert werden: %w", err)
+		}
+		if err := w.Store.SetRunIntegration(ctx, job.RunID, job.Branch, job.BaseSHA, job.HeadSHA, "merged", job.PRURL, job.PRNumber); err != nil {
+			return err
+		}
+		job.Status = "succeeded"
+		return w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts)
+	}
 	integrationPath := filepath.Join(taskIntegrationDirectory(job.RepositoryPath), "queue-"+job.ID)
 	if err := os.MkdirAll(filepath.Dir(integrationPath), 0o700); err != nil {
 		return err
@@ -951,7 +988,9 @@ func (w *Worker) processIntegrationJob(ctx context.Context, job domain.Integrati
 	}
 	if job.Step == "rebase" {
 		if _, err = gitOutput(ctx, integrationPath, "rebase", "origin/"+job.DefaultBranch); err != nil {
-			return fmt.Errorf("Rebase für %s fehlgeschlagen: %w", job.Branch, err)
+			files, _ := gitOutput(ctx, integrationPath, "diff", "--name-only", "--diff-filter=U")
+			_ = exec.CommandContext(context.Background(), "git", "-C", integrationPath, "rebase", "--abort").Run()
+			return managedCheckoutProblem("in der Task-Branch nicht konfliktfrei rebasierbar", files, fmt.Sprintf("Rebase für %s fehlgeschlagen: %v", job.Branch, err))
 		}
 		job.HeadSHA, err = gitOutput(ctx, integrationPath, "rev-parse", "HEAD")
 		if err != nil {
@@ -1016,7 +1055,9 @@ func (w *Worker) processIntegrationJob(ctx context.Context, job domain.Integrati
 		if err = w.Store.SetRunIntegration(ctx, job.RunID, job.Branch, job.BaseSHA, job.HeadSHA, "pr_open", job.PRURL, job.PRNumber); err != nil {
 			return err
 		}
-		job.Step, job.Status = "done", "succeeded"
+		// Keep the row pending until the provider confirms the merge. This makes
+		// managed-checkout synchronization restartable and observable.
+		job.Step, job.Status = "done", "pr_open"
 		return w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts)
 	}
 	return nil
@@ -1063,6 +1104,11 @@ func ensureTaskBranch(ctx context.Context, source, taskID string) (string, error
 	}
 	base := "HEAD"
 	defaultBranch := repositoryBranch(ctx, source)
+	// The task branch must start from the current configured default branch,
+	// not from a stale remote-tracking ref left by an earlier run.
+	if _, err := gitOutput(ctx, source, "fetch", "--no-tags", "origin", defaultBranch); err != nil {
+		return "", fmt.Errorf("aktueller Remote-Default-Branch konnte nicht gefetcht werden: %w", err)
+	}
 	if _, err := gitOutput(ctx, source, "rev-parse", "--verify", "origin/"+defaultBranch); err == nil {
 		base = "origin/" + defaultBranch
 	}

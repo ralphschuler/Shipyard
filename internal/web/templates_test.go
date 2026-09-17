@@ -112,6 +112,19 @@ func TestTelemetryBreakdownIsVisibleInClassicViews(t *testing.T) {
 	}
 }
 
+func TestRunTemplateShowsGitIntegrationMetadata(t *testing.T) {
+	page, err := files.ReadFile("templates/run.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(page)
+	for _, required := range []string{".Delivery.IntegrationBranch", ".Delivery.IntegrationBaseSHA", ".Delivery.IntegrationHeadSHA", ".Delivery.IntegrationStatus", ".Delivery.PRURL", ".Delivery.PRNumber"} {
+		if !strings.Contains(html, required) {
+			t.Fatalf("run template is missing integration metadata %q", required)
+		}
+	}
+}
+
 // Navigation is progressively enhanced by app.js so every legacy, server
 // rendered view receives the same complete route set. This contract prevents
 // a new page from silently dropping Runs, Audit or Settings again when an old
