@@ -125,3 +125,27 @@ test("manual update check reports an available release", async ({ page }) => {
   await expect(page.getByText("1.1.0")).toBeVisible();
   await expect(page.getByLabel("Last checked")).toBeVisible();
 });
+
+test("manual update check treats malformed responses as a readable failure", async ({ page }) => {
+  let checks = 0;
+  await page.route("**/api/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/v1/settings/appearance") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ Theme: "light", Language: "en" }) });
+      return;
+    }
+    if (path === "/api/v1/settings/updates") {
+      checks += 1;
+      await route.fulfill({ contentType: "application/json", body: checks === 1 ? JSON.stringify(updateFixture) : JSON.stringify({}) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+
+  await page.goto("/app/#/settings/updates");
+  await page.getByRole("button", { name: "Check for updates now" }).click();
+
+  await expect(page.getByRole("alert")).toContainText("update check");
+  await expect(page.getByRole("status")).toContainText("could not be completed");
+  await expect(page.getByText("1.0.0")).toBeVisible();
+});

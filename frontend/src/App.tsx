@@ -1519,6 +1519,18 @@ type UpdateData = {
   checked_at?: string;
 };
 
+function isUpdateData(value: unknown): value is UpdateData {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const update = value as Partial<UpdateData>;
+  const current = update.current;
+  const source = update.source;
+  return Boolean(
+    current && typeof current === "object" && typeof current.version === "string" && typeof current.commit === "string" &&
+    source && typeof source === "object" && typeof source.provider === "string" && typeof source.repository === "string" && typeof source.branch === "string" &&
+    typeof update.status === "string",
+  );
+}
+
 function Updates({ language }: { language: Language }) {
   const { data, error } = useAPI<any>("/api/v1/settings/updates");
   const t = (key: string) => translate(language, key);
@@ -1549,8 +1561,8 @@ function Updates({ language }: { language: Language }) {
     try {
       const response = await fetch("/api/v1/settings/updates", { credentials: "same-origin", cache: "no-store" });
       const payload = await response.json().catch(() => null);
-      if (!response.ok || !payload || typeof payload !== "object") throw new Error(t("updatesCheckFailed"));
-      setManualData(payload as UpdateData);
+      if (!response.ok || !isUpdateData(payload)) throw new Error(t("updatesCheckFailed"));
+      setManualData(payload);
       setCheckError(undefined);
     } catch {
       setCheckError({
