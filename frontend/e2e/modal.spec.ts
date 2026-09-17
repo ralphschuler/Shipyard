@@ -45,6 +45,46 @@ const apiFixtures: Record<string, unknown> = {
     Transitions: [],
     Groups: [],
   },
+  "/api/v1/tasks/task-1": {
+    Task: {
+      ID: "task-1",
+      Title: "Modal-Layout prüfen",
+      Description: "Eine produktive Task-Ansicht mit Dialogen.",
+      Priority: "high",
+      BoardID: "board-1",
+      Labels: [],
+    },
+    Interactions: [{
+      ID: "interaction-1",
+      Title: "Welche Oberfläche soll geprüft werden?",
+      Body: "Bitte wähle eine Oberfläche.",
+      Fields: [{
+        ID: "surface",
+        Label: "Oberfläche",
+        Type: "select",
+        Required: true,
+        Options: [{ Value: "web", Label: "Web" }, { Value: "mobile", Label: "Mobile" }],
+      }],
+    }],
+    Comments: [],
+    Allowed: [],
+    Columns: {},
+    BoardLabels: [],
+    Agents: [],
+    Runs: [],
+    History: [],
+  },
+  "/api/v1/runs/run-1": {
+    run: { ID: "run-1", Status: "succeeded" },
+    task: { ID: "task-1", Title: "Modal-Layout prüfen" },
+    delivery: {
+      GateStatus: "passed",
+      DiffSummary: "1 Datei geändert",
+      GateOutput: "Alle Prüfungen bestanden",
+      AppliedAt: null,
+    },
+    usage: {},
+  },
 };
 const legacyStyles = await readFile(path.resolve(import.meta.dirname, "../../internal/web/static/app.css"), "utf8");
 
@@ -187,6 +227,72 @@ test("React board filters keep each board's state isolated", async ({ page }) =>
   await page.goto("/app/#/boards/board-filter");
   await expect(page.getByRole("searchbox", { name: "Aufgaben suchen" })).toHaveValue("login");
   await expect(page.getByText("1 Aufgabe gefunden")).toBeVisible();
+});
+
+test("productive task edit dialog traps focus and keeps the backdrop inert", async ({ page }) => {
+  await mockReactBackend(page);
+  await page.setViewportSize({ width: 390, height: 240 });
+  await page.goto("/app/#/tasks/task-1");
+
+  const trigger = page.getByRole("button", { name: "Bearbeiten" });
+  await expect(trigger).toBeVisible();
+  await trigger.click();
+
+  const dialog = page.getByRole("dialog", { name: "Aufgabe bearbeiten" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Titel")).toBeFocused();
+  await expect(dialog).toHaveCSS("background-color", /rgb/);
+
+  for (let index = 0; index < 10; index++) {
+    await page.keyboard.press("Tab");
+    await expect(dialog).toContainText("Aufgabe bearbeiten");
+    expect(await page.evaluate(() => {
+      const active = document.activeElement;
+      const dialog = document.querySelector('[role="dialog"]');
+      return active === dialog || dialog?.contains(active);
+    })).toBe(true);
+  }
+  for (let index = 0; index < 4; index++) {
+    await page.keyboard.press("Shift+Tab");
+    expect(await page.evaluate(() => document.activeElement?.closest('[role="dialog"]') !== null)).toBe(true);
+  }
+
+  let backdropClicked = false;
+  await page.evaluate(() => {
+    document.querySelector("main")?.addEventListener("click", () => {
+      document.body.dataset.backdropClicked = "true";
+    });
+  });
+  await page.mouse.click(2, 2);
+  backdropClicked = (await page.locator("body").getAttribute("data-backdrop-clicked")) === "true";
+  expect(backdropClicked).toBe(false);
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(trigger).toBeFocused();
+});
+
+test("productive interaction and change-approval flows remain usable", async ({ page }) => {
+  await mockReactBackend(page);
+  let answerBody = "";
+  await page.route("**/interactions/interaction-1/answer", async (route) => {
+    answerBody = route.request().postData() || "";
+    await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+  });
+  await page.goto("/app/#/tasks/task-1");
+  await page.getByLabel("Oberfläche").selectOption("web");
+  await page.getByRole("button", { name: "Antwort speichern" }).click();
+  expect(answerBody).toContain("surface=web");
+  await expect(page.getByRole("button", { name: "Bearbeiten" })).toBeVisible();
+
+  await page.route("**/runs/run-1/diff", (route) => route.fulfill({ status: 200, body: "+ modal" }));
+  await page.goto("/app/#/runs/run-1");
+  await page.getByRole("button", { name: "Änderungen übernehmen" }).click();
+  const dialog = page.getByRole("dialog", { name: "Änderungen übernehmen?" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Bestätigen und übernehmen" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
 });
 
 test("legacy dialog enhancement keeps nested forms usable and restores focus", async ({ page }) => {
