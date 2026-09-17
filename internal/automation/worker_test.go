@@ -1232,6 +1232,9 @@ func TestQAReleaseRequestIsAStableHumanDecision(t *testing.T) {
 	if got, want := len(request.Fields[0].Options), 4; got != want {
 		t.Fatalf("QA options = %d, want %d", got, want)
 	}
+	if got := request.Fields[0].Options[1].Label; got != "Überarbeiten" {
+		t.Fatalf("QA rework label = %q, want Überarbeiten", got)
+	}
 }
 
 func TestIsQAColumnUsesTheTaskColumnRatherThanAgentName(t *testing.T) {

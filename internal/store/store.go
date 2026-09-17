@@ -2028,6 +2028,25 @@ func (s *Store) ResolveInteractionAndMove(c context.Context, id, answerer, freef
 	if i.Status != "open" {
 		return i, nil, errors.New("interaction is not open")
 	}
+	if i.DecisionKey == "qa_release" {
+		var currentColumnID, boardID string
+		if err = tx.QueryRow(c, `SELECT t.column_id,t.board_id FROM tasks t WHERE t.id=$1 FOR UPDATE`, i.TaskID).Scan(&currentColumnID, &boardID); err != nil {
+			return i, nil, err
+		}
+		columns, columnsErr := workflowColumnsTx(c, tx, boardID)
+		transitions, transitionsErr := workflowTransitionsFromTx(c, tx, boardID, currentColumnID)
+		if columnsErr != nil || transitionsErr != nil {
+			if columnsErr != nil {
+				return i, nil, columnsErr
+			}
+			return i, nil, transitionsErr
+		}
+		if qaTarget := qaDecisionTarget(i.DecisionKey, response, currentColumnID, columns, transitions); qaTarget != "" {
+			// The semantic QA decision owns the route. An optional legacy form
+			// target must not turn "Überarbeiten" into a release or vice versa.
+			targetColumnID = qaTarget
+		}
+	}
 	// A selected workflow step hands the task back to the workflow itself. Its
 	// entered-column event will pick the appropriate specialist exactly once;
 	// creating an additional manual continuation here would race that rule.
@@ -2140,6 +2159,80 @@ func (s *Store) ResolveInteractionAndMove(c context.Context, id, answerer, freef
 		return i, nil, err
 	}
 	return i, runs, nil
+}
+
+func workflowColumnsTx(c context.Context, tx pgx.Tx, boardID string) ([]domain.Column, error) {
+	rows, err := tx.Query(c, "SELECT id,name,column_type FROM workflow_columns WHERE board_id=$1 ORDER BY position", boardID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := []domain.Column{}
+	for rows.Next() {
+		var column domain.Column
+		if err := rows.Scan(&column.ID, &column.Name, &column.Type); err != nil {
+			return nil, err
+		}
+		columns = append(columns, column)
+	}
+	return columns, rows.Err()
+}
+
+func workflowTransitionsFromTx(c context.Context, tx pgx.Tx, boardID, fromColumnID string) ([]domain.Transition, error) {
+	rows, err := tx.Query(c, "SELECT id,board_id,from_column_id,to_column_id,action_name FROM transitions WHERE board_id=$1 AND from_column_id=$2", boardID, fromColumnID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	transitions := []domain.Transition{}
+	for rows.Next() {
+		var transition domain.Transition
+		if err := rows.Scan(&transition.ID, &transition.BoardID, &transition.FromColumnID, &transition.ToColumnID, &transition.ActionName); err != nil {
+			return nil, err
+		}
+		transitions = append(transitions, transition)
+	}
+	return transitions, rows.Err()
+}
+
+func qaDecisionTarget(key string, response []byte, currentColumnID string, columns []domain.Column, transitions []domain.Transition) string {
+	if strings.TrimSpace(key) != "qa_release" || strings.TrimSpace(currentColumnID) == "" {
+		return ""
+	}
+	var answers map[string][]string
+	if json.Unmarshal(response, &answers) != nil || len(answers["release_decision"]) != 1 {
+		return ""
+	}
+	value := strings.ToLower(strings.TrimSpace(answers["release_decision"][0]))
+	wantedType, wantedNames := "", map[string]bool{}
+	switch value {
+	case "approve":
+		wantedType = "done"
+	case "rework":
+		wantedNames = map[string]bool{"in progress": true, "entwicklung": true, "development": true}
+	default:
+		return ""
+	}
+	columnTypes := make(map[string]string, len(columns))
+	columnNames := make(map[string]string, len(columns))
+	for _, column := range columns {
+		columnTypes[column.ID] = column.Type
+		columnNames[column.ID] = strings.ToLower(strings.TrimSpace(column.Name))
+	}
+	target := ""
+	for _, transition := range transitions {
+		if transition.FromColumnID != currentColumnID || transition.ToColumnID == currentColumnID {
+			continue
+		}
+		if (wantedType != "" && columnTypes[transition.ToColumnID] != wantedType) || (wantedType == "" && !wantedNames[columnNames[transition.ToColumnID]]) {
+			continue
+		}
+		if target != "" {
+			return ""
+		}
+		target = transition.ToColumnID
+	}
+	return target
 }
 func (s *Store) CreateLabel(c context.Context, b, n, color string) (domain.Label, error) {
 	var l domain.Label

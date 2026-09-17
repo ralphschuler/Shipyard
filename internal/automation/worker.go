@@ -332,7 +332,7 @@ func qaReleaseRequest() interactionRequest {
 			Required: true,
 			Options: []interactionOption{
 				{Value: "approve", Label: "Freigeben"},
-				{Value: "rework", Label: "Nacharbeit"},
+				{Value: "rework", Label: "Überarbeiten"},
 				{Value: "backlog", Label: "Neu planen"},
 				{Value: "later", Label: "Später entscheiden"},
 			},
