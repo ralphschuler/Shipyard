@@ -102,7 +102,14 @@ test("React board filters search and combine status, priority, label, and projec
   await expect(page.getByText("2 Aufgaben gefunden")).toBeVisible();
   await expect(page.getByText("task-other")).toHaveCount(0);
 
+  await search.fill("mobile navigation");
+  await expect(page.getByText("1 Aufgabe gefunden")).toBeVisible();
+  await expect(page.getByText("UX prüfen")).toBeVisible();
+  await expect(page.getByText("Login reparieren")).toBeHidden();
+  await search.fill("login");
   await page.getByLabel("Projekt").selectOption("project-a");
+  await expect(page.getByText("2 Aufgaben gefunden")).toBeVisible();
+  await page.getByRole("button", { name: /Projekt: Website zurücksetzen/ }).click();
   await expect(page.getByText("2 Aufgaben gefunden")).toBeVisible();
 });
 
