@@ -25,6 +25,7 @@
           </div>
           <button data-open-modal="new-agent">Agent anlegen</button>
         </header>
+        <section aria-label="Sandbox-Profile"><h2>Sandbox-Profile</h2><p><small>Whitelisted Richtlinien; Mounts sind fest auf den Worktree begrenzt.</small></p><div class="management-list">{{range .SandboxProfiles}}<form method="post" action="/sandbox-profiles/{{.Name}}"><label>{{.Name}}<input name="description" value="{{.Description}}" required></label><small>Mount: worktree · Netzwerk: {{.NetworkMode}} · Schreiben: {{.WriteMode}}</small><input type="hidden" name="network_mode" value="{{.NetworkMode}}"><input type="hidden" name="write_mode" value="{{.WriteMode}}"><label><input type="checkbox" name="active" value="true" checked> Aktiv</label><button class="secondary">Profil speichern</button></form>{{end}}<form method="post" action="/sandbox-profiles"><h3>Profil anlegen</h3><input name="name" placeholder="z. B. qa-local" required pattern="[a-z][a-z0-9-]{1,63}"><input name="description" placeholder="Beschreibung" required><select name="network_mode"><option value="none">none</option><option value="bridge-only">bridge-only</option></select><select name="write_mode"><option value="readonly">readonly</option><option value="worktree">worktree</option></select><button>Sandbox-Profil anlegen</button></form></div></section>
         <section class="management-list agent-list" aria-label="Agent-Profile">
           {{range .Agents}}
           <article>

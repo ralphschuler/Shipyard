@@ -222,6 +222,19 @@ func openAISandboxArgsForProfile(worktree, command, profile string) ([]string, e
 	if err != nil || policy.NetworkMode == "bridge-only" {
 		return nil, errors.New("sandbox profile does not permit direct provider commands")
 	}
+	return openAISandboxArgsForPolicy(abs, command, policy)
+}
+
+func openAISandboxArgsForPolicy(abs, command string, policy sandbox.Profile) ([]string, error) {
+	if _, err := sandbox.EffectiveProfile(policy, abs); err != nil || policy.NetworkMode == "bridge-only" {
+		return nil, errors.New("sandbox profile does not permit direct provider commands")
+	}
+	args := []string{"--die-with-parent", "--unshare-all", "--new-session"}
+	for _, directory := range []string{"/usr", "/bin", "/lib", "/lib64"} {
+		if _, statErr := os.Stat(directory); statErr == nil {
+			args = append(args, "--ro-bind", directory, directory)
+		}
+	}
 	workspaceBind := "--bind"
 	if policy.WriteMode == "readonly" {
 		workspaceBind = "--ro-bind"
@@ -239,13 +252,25 @@ func runToolCommand(ctx context.Context, worktree, command string) string {
 }
 
 func runToolCommandForProfile(ctx context.Context, worktree, command, profile string) string {
+	policy, err := sandbox.Effective(profile, worktree)
+	if err != nil {
+		return "error: invalid worktree"
+	}
+	return runToolCommandWithPolicy(ctx, worktree, command, policy)
+}
+
+func runToolCommandWithPolicy(ctx context.Context, worktree, command string, policy sandbox.Profile) string {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return "error: empty command"
 	}
 	// This protects against accidental parent-directory execution while the
 	// service-level sandbox remains the outer security boundary.
-	args, err := openAISandboxArgsForProfile(worktree, command, profile)
+	abs, err := filepath.Abs(worktree)
+	if err != nil {
+		return "error: invalid worktree"
+	}
+	args, err := openAISandboxArgsForPolicy(abs, command, policy)
 	if err != nil {
 		return "error: invalid worktree"
 	}
@@ -275,6 +300,14 @@ func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, ap
 }
 
 func runOpenAIResponsesForProfile(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree, profile string) (string, openAIUsage, error) {
+	policy, err := sandbox.Effective(profile, worktree)
+	if err != nil {
+		return "", openAIUsage{}, err
+	}
+	return runOpenAIResponsesWithPolicy(ctx, provider, apiKey, prompt, worktree, policy)
+}
+
+func runOpenAIResponsesWithPolicy(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree string, policy sandbox.Profile) (string, openAIUsage, error) {
 	if strings.TrimSpace(provider.Model) == "" {
 		return "", openAIUsage{}, errors.New("OpenAI-Modell fehlt in den Provider-Einstellungen")
 	}
@@ -351,7 +384,7 @@ func runOpenAIResponsesForProfile(ctx context.Context, provider domain.ProviderS
 				outputs = append(outputs, map[string]string{"type": "function_call_output", "call_id": item.CallID, "output": "error: invalid command arguments"})
 				continue
 			}
-			output := runToolCommandForProfile(ctx, worktree, args.Command, profile)
+			output := runToolCommandWithPolicy(ctx, worktree, args.Command, policy)
 			transcript = append(transcript, "$ "+args.Command+"\n"+output)
 			outputs = append(outputs, map[string]string{"type": "function_call_output", "call_id": item.CallID, "output": output})
 		}

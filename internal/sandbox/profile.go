@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 )
 
 // Profile is the small, versioned policy vocabulary understood by the worker.
@@ -32,6 +33,32 @@ func All() []Profile {
 	return result
 }
 
+var profileName = regexp.MustCompile(`^[a-z][a-z0-9-]{1,63}$`)
+
+// ValidateProfile enforces the policy vocabulary at every persistence/API
+// boundary. Callers never get to provide raw bubblewrap arguments or paths.
+func ValidateProfile(p Profile) error {
+	if !profileName.MatchString(p.Name) || p.Name == "danger-full-access" {
+		return errors.New("ungültiger whitelisted Sandbox-Profilname")
+	}
+	if err := ValidateMounts(p.Mounts); err != nil {
+		return err
+	}
+	if len(p.Mounts) != 1 || p.Mounts[0] != "worktree" {
+		return errors.New("Sandbox-Profile dürfen nur den Worktree mounten")
+	}
+	if p.NetworkMode != "none" && p.NetworkMode != "bridge-only" {
+		return errors.New("ungültiger Sandbox-Netzwerkmodus")
+	}
+	if p.WriteMode != "worktree" && p.WriteMode != "readonly" {
+		return errors.New("ungültiger Sandbox-Schreibmodus")
+	}
+	if p.Name == "release-bridge" && (p.NetworkMode != "bridge-only" || p.WriteMode != "readonly") {
+		return errors.New("release-bridge benötigt bridge-only und readonly")
+	}
+	return nil
+}
+
 func Get(name string) (Profile, error) {
 	p, ok := profiles[name]
 	if !ok || !p.Active {
@@ -56,6 +83,13 @@ func ValidateMounts(mounts []string) error {
 func Effective(name, worktree string) (Profile, error) {
 	p, err := Get(name)
 	if err != nil {
+		return Profile{}, err
+	}
+	return EffectiveProfile(p, worktree)
+}
+
+func EffectiveProfile(p Profile, worktree string) (Profile, error) {
+	if err := ValidateProfile(p); err != nil {
 		return Profile{}, err
 	}
 	if !filepath.IsAbs(worktree) || worktree == "/" {
