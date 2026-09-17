@@ -904,25 +904,14 @@ func (s *Store) DashboardFiltered(c context.Context, from, to *time.Time, provid
 	// telemetry. Keep those metrics on the same filtered run/task population
 	// when a telemetry filter is active. For an entirely unfiltered request,
 	// preserve the operational population, including tasks without agent runs.
-	taskConditions := "TRUE"
-	if from != nil || to != nil || provider != "" || model != "" || agent != "" {
-		taskConditions = `EXISTS (SELECT 1 FROM agent_runs ar WHERE ar.task_id=t.id
-			AND ($1::timestamptz IS NULL OR ar.created_at >= $1)
-			AND ($2::timestamptz IS NULL OR ar.created_at < $2)
-			AND ($3='' OR ar.usage_provider=$3)
-			AND ($4='' OR ar.usage_model=$4)
-			AND (NULLIF($5,'')::uuid IS NULL OR ar.agent_id=NULLIF($5,'')::uuid))`
-	}
-	if board != "" {
-		taskConditions += ` AND (NULLIF($6,'')::uuid IS NULL OR t.board_id=NULLIF($6,'')::uuid)`
-	}
+	taskConditions, taskArgs := dashboardTaskFilter(from, to, provider, model, agent, board)
 	taskWhere := `WHERE ` + taskConditions
 	where := `WHERE ($1::timestamptz IS NULL OR r.created_at >= $1) AND ($2::timestamptz IS NULL OR r.created_at < $2) AND ($3='' OR r.usage_provider=$3) AND ($4='' OR r.usage_model=$4) AND (NULLIF($5,'')::uuid IS NULL OR r.agent_id=NULLIF($5,'')::uuid) AND (NULLIF($6,'')::uuid IS NULL OR r.task_id IN (SELECT id FROM tasks WHERE board_id=NULLIF($6,'')::uuid))`
 	args := []any{from, to, provider, model, agent, board}
-	if err = s.DB.QueryRow(c, `SELECT count(*),count(*) FILTER (WHERE t.completed_at IS NULL),count(*) FILTER (WHERE t.completed_at IS NOT NULL) FROM tasks t `+taskWhere, args...).Scan(&d.Total, &d.Active, &d.Completed); err != nil {
+	if err = s.DB.QueryRow(c, `SELECT count(*),count(*) FILTER (WHERE t.completed_at IS NULL),count(*) FILTER (WHERE t.completed_at IS NOT NULL) FROM tasks t `+taskWhere, taskArgs...).Scan(&d.Total, &d.Active, &d.Completed); err != nil {
 		return d, err
 	}
-	columns, err := s.DB.Query(c, `SELECT b.name || ' / ' || c.name,count(t.id) FROM workflow_columns c JOIN boards b ON b.id=c.board_id LEFT JOIN tasks t ON t.column_id=c.id `+taskWhere+` GROUP BY b.name,c.id,c.name,c.position HAVING count(t.id)>0 ORDER BY b.name,c.position`, args...)
+	columns, err := s.DB.Query(c, `SELECT b.name || ' / ' || c.name,count(t.id) FROM workflow_columns c JOIN boards b ON b.id=c.board_id LEFT JOIN tasks t ON t.column_id=c.id `+taskWhere+` GROUP BY b.name,c.id,c.name,c.position HAVING count(t.id)>0 ORDER BY b.name,c.position`, taskArgs...)
 	if err != nil {
 		return d, err
 	}
@@ -931,7 +920,7 @@ func (s *Store) DashboardFiltered(c context.Context, from, to *time.Time, provid
 	if err != nil {
 		return d, err
 	}
-	priorities, err := s.DB.Query(c, `SELECT t.priority,count(*) FROM tasks t `+taskWhere+` GROUP BY t.priority ORDER BY t.priority`, args...)
+	priorities, err := s.DB.Query(c, `SELECT t.priority,count(*) FROM tasks t `+taskWhere+` GROUP BY t.priority ORDER BY t.priority`, taskArgs...)
 	if err != nil {
 		return d, err
 	}
@@ -1000,13 +989,16 @@ func (s *Store) DashboardFiltered(c context.Context, from, to *time.Time, provid
 		taskSeriesTo = &end
 	}
 	taskSeriesConditions := "TRUE"
+	seriesArgs := []any{taskSeriesFrom, taskSeriesTo}
 	if from != nil || to != nil || provider != "" || model != "" || agent != "" {
 		taskSeriesConditions = `EXISTS (SELECT 1 FROM agent_runs ar WHERE ar.task_id=t.id AND ($3::timestamptz IS NULL OR ar.created_at >= $3) AND ($4::timestamptz IS NULL OR ar.created_at < $4) AND ($5='' OR ar.usage_provider=$5) AND ($6='' OR ar.usage_model=$6) AND (NULLIF($7,'')::uuid IS NULL OR ar.agent_id=NULLIF($7,'')::uuid))`
+		seriesArgs = append(seriesArgs, from, to, provider, model, agent)
 	}
 	if board != "" {
-		taskSeriesConditions += ` AND (NULLIF($8,'')::uuid IS NULL OR t.board_id=NULLIF($8,'')::uuid)`
+		placeholder := len(seriesArgs) + 1
+		taskSeriesConditions += fmt.Sprintf(` AND (NULLIF($%d,'')::uuid IS NULL OR t.board_id=NULLIF($%d,'')::uuid)`, placeholder, placeholder)
+		seriesArgs = append(seriesArgs, board)
 	}
-	seriesArgs := append([]any{taskSeriesFrom, taskSeriesTo}, args...)
 	createdTasks, err := s.DB.Query(c, `SELECT to_char(day,'DD.MM'),count(t.id)::int FROM generate_series($1::timestamptz,$2::timestamptz-interval '1 day',interval '1 day') day LEFT JOIN tasks t ON t.created_at >= day AND t.created_at < day + interval '1 day' AND `+taskSeriesConditions+` GROUP BY day ORDER BY day`, seriesArgs...)
 	if err != nil {
 		return d, err
@@ -1023,6 +1015,26 @@ func (s *Store) DashboardFiltered(c context.Context, from, to *time.Time, provid
 	d.CompletedSeries, err = pgx.CollectRows(completedTasks, pgx.RowToStructByPos[domain.Metric])
 	completedTasks.Close()
 	return d, err
+}
+
+func dashboardTaskFilter(from, to *time.Time, provider, model, agent, board string) (string, []any) {
+	conditions := "TRUE"
+	args := make([]any, 0, 6)
+	if from != nil || to != nil || provider != "" || model != "" || agent != "" {
+		conditions = `EXISTS (SELECT 1 FROM agent_runs ar WHERE ar.task_id=t.id
+			AND ($1::timestamptz IS NULL OR ar.created_at >= $1)
+			AND ($2::timestamptz IS NULL OR ar.created_at < $2)
+			AND ($3='' OR ar.usage_provider=$3)
+			AND ($4='' OR ar.usage_model=$4)
+			AND (NULLIF($5,'')::uuid IS NULL OR ar.agent_id=NULLIF($5,'')::uuid))`
+		args = append(args, from, to, provider, model, agent)
+	}
+	if board != "" {
+		placeholder := len(args) + 1
+		conditions += fmt.Sprintf(` AND (NULLIF($%d,'')::uuid IS NULL OR t.board_id=NULLIF($%d,'')::uuid)`, placeholder, placeholder)
+		args = append(args, board)
+	}
+	return conditions, args
 }
 
 func (s *Store) DashboardAttention(c context.Context) (domain.DashboardAttention, error) {
