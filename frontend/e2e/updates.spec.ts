@@ -67,6 +67,10 @@ test("manual update check shows failure and retry without duplicate requests", a
     }
     if (path === "/api/v1/settings/updates") {
       checks += 1;
+      if (checks === 3) {
+        await route.abort("failed");
+        return;
+      }
       if (checks === 2) {
         await new Promise((resolve) => setTimeout(resolve, 150));
         await route.fulfill({ contentType: "application/json", body: JSON.stringify(updateFixture) });
@@ -98,6 +102,9 @@ test("manual update check shows failure and retry without duplicate requests", a
   await expect(page.getByRole("alert")).toContainText("update check", { timeout: 2_000 });
   expect(checks).toBe(3);
   await expect(checkButton).toBeEnabled();
+  await checkButton.click();
+  await expect(page.getByRole("status")).toContainText("System is up to date");
+  expect(checks).toBe(4);
 });
 
 test("manual update check reports an available release", async ({ page }) => {
@@ -128,6 +135,10 @@ test("manual update check reports an available release", async ({ page }) => {
 
 test("manual update check treats malformed responses as a readable failure", async ({ page }) => {
   let checks = 0;
+  const malformedFixture = {
+    ...updateFixture,
+    current: { ...updateFixture.current, builtAt: { unexpected: true } },
+  };
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/v1/settings/appearance") {
@@ -136,7 +147,7 @@ test("manual update check treats malformed responses as a readable failure", asy
     }
     if (path === "/api/v1/settings/updates") {
       checks += 1;
-      await route.fulfill({ contentType: "application/json", body: checks === 1 ? JSON.stringify(updateFixture) : JSON.stringify({}) });
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify(checks === 1 ? updateFixture : malformedFixture) });
       return;
     }
     await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });

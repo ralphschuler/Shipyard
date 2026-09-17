@@ -1520,13 +1520,22 @@ type UpdateData = {
 };
 
 function isUpdateData(value: unknown): value is UpdateData {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const update = value as Partial<UpdateData>;
+  const isRecord = (candidate: unknown): candidate is Record<string, unknown> => Boolean(candidate && typeof candidate === "object" && !Array.isArray(candidate));
+  const hasOptionalString = (record: Record<string, unknown>, key: string) => !(key in record) || typeof record[key] === "string";
+  const hasOptionalBoolean = (record: Record<string, unknown>, key: string) => !(key in record) || typeof record[key] === "boolean";
+  if (!isRecord(value)) return false;
+  const update = value;
   const current = update.current;
   const source = update.source;
+  const release = update.release;
+  if (!isRecord(current) || !isRecord(source)) return false;
+  if (!hasOptionalString(current, "builtAt") || !hasOptionalString(update, "reason") || !hasOptionalString(update, "checked_at")) return false;
+  if ("installable" in update && typeof update.installable !== "boolean") return false;
+  if (release !== undefined && !isRecord(release)) return false;
+  if (release && (!hasOptionalString(release, "version") || !hasOptionalString(release, "commit") || !hasOptionalString(release, "publishedAt") || !hasOptionalString(release, "changelog") || !hasOptionalString(release, "url") || !hasOptionalBoolean(release, "verified") || !hasOptionalBoolean(release, "compatible") || !hasOptionalBoolean(release, "migrationRequired"))) return false;
   return Boolean(
-    current && typeof current === "object" && typeof current.version === "string" && typeof current.commit === "string" &&
-    source && typeof source === "object" && typeof source.provider === "string" && typeof source.repository === "string" && typeof source.branch === "string" &&
+    typeof current.version === "string" && typeof current.commit === "string" &&
+    typeof source.provider === "string" && typeof source.repository === "string" && typeof source.branch === "string" &&
     typeof update.status === "string",
   );
 }
