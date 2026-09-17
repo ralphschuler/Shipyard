@@ -71,12 +71,24 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 ### Releases
 
-Jeder Push auf `master` (einschließlich eines gemergten Pull Requests) startet
-`.github/workflows/release.yml`. Die Action baut reproduzierbare Linux-
-Artefakte für `amd64` und `arm64`, versieht sie mit der Build-Version und
-veröffentlicht ein idempotentes GitHub-Release samt `SHA256SUMS`. Ein manueller
-`workflow_dispatch` ist für einen erneuten Lauf verfügbar; das Release wird bei
-einem Retry aktualisiert statt doppelt angelegt.
+`.github/workflows/release.yml` baut reproduzierbare Linux-Artefakte für
+`amd64` und `arm64` und veröffentlicht ein idempotentes GitHub-Release samt
+`SHA256SUMS`. Der Workflow läuft ausschließlich per manuellem
+`workflow_dispatch` oder wöchentlich freitags um 09:00 UTC; ein Merge auf
+`master` löst keinen Release aus. Bei einem Retry wird das Release aktualisiert
+statt doppelt angelegt.
+
+### GitHub-Update-Prüfung
+
+Die laufende Installation braucht für die Release-Prüfung ein externes
+Environment-File. Kopiere `deploy/taskboard.env.example` nach
+`/etc/taskboard/taskboard.env`, setze dort ein least-privilege GitHub-Token und
+die Repository-/Branch-/Allowlist-Werte, und beschränke die Dateirechte auf
+600 oder 640. Exakte Release-Tags sowie Patch-Präfixe wie `v0.1.*` sind erlaubt;
+Signatur, Zielbranch, Repository und SHA-256-Artefaktprüfung bleiben immer
+aktiv. `deploy/validate-update-config.sh` prüft die Konfiguration ohne das
+Token auszugeben. Das Deploy- und Produktionsprüfskript führen außerdem einen
+authentifizierten Update-Check-Smoke-Test aus.
 
 ### Produktionsnahe Automation-Integrationstests
 

@@ -143,6 +143,53 @@ func TestResolveRejectsReleaseOutsideExplicitAllowlist(t *testing.T) {
 	}
 }
 
+func TestValidateReleaseAllowlistSupportsExactTagsAndPatchPrefixes(t *testing.T) {
+	for _, policy := range [][]string{{"v0.1.5"}, {"v0.1.*"}, {"  v0.1.*  ", "v1.2.3"}} {
+		if err := ValidateReleaseAllowlist(policy); err != nil {
+			t.Fatalf("policy %v rejected: %v", policy, err)
+		}
+	}
+	if !tagApproved("v0.1.7", []string{"v0.1.*"}) {
+		t.Fatal("patch prefix should approve a future patch release")
+	}
+	if tagApproved("v0.2.0", []string{"v0.1.*"}) {
+		t.Fatal("patch prefix must not approve another minor release")
+	}
+	if err := ValidateReleaseAllowlist(nil); !errors.Is(err, ErrReleaseAllowlistMissing) {
+		t.Fatalf("missing policy error = %v", err)
+	}
+	if err := ValidateReleaseAllowlist([]string{"latest"}); !errors.Is(err, ErrReleaseAllowlistMalformed) {
+		t.Fatalf("malformed policy error = %v", err)
+	}
+}
+
+func TestClientUsesConfiguredGitHubToken(t *testing.T) {
+	var authorization string
+	client := Client{Token: "github-token", HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		authorization = r.Header.Get("Authorization")
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v0.1.5"}`)), Header: make(http.Header)}, nil
+	})}}
+	if _, err := client.latest(context.Background(), "ralphschuler/Shipyard"); err != nil {
+		t.Fatal(err)
+	}
+	if authorization != "Bearer github-token" {
+		t.Fatalf("authorization = %q", authorization)
+	}
+}
+
+func TestResolveReportsMissingTokenWithoutProviderBody(t *testing.T) {
+	client := Client{ApprovedTags: []string{"v0.1.*"}, HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusForbidden, Status: "403 Forbidden", Body: io.NopCloser(strings.NewReader("provider secret response")), Header: make(http.Header)}, nil
+	})}, GOOS: "linux", GOARCH: "amd64"}
+	snapshot := Resolve(context.Background(), Current{Version: "v0.1.3"}, "ralphschuler/Shipyard", "master", client)
+	if snapshot.Status != "unavailable" || !strings.Contains(snapshot.Reason, "TASKBOARD_GITHUB_TOKEN") {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+	if strings.Contains(snapshot.Reason, "provider secret") {
+		t.Fatalf("provider response leaked: %q", snapshot.Reason)
+	}
+}
+
 func TestOrchestratorBacksUpBeforeInstallAndRollsBackAfterFailure(t *testing.T) {
 	var calls []string
 	var switchedArtifact []byte

@@ -16,9 +16,15 @@ import (
 )
 
 var (
-	shaPattern      = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
-	checksumPattern = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
-	versionPattern  = regexp.MustCompile(`^v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:[-+][0-9A-Za-z.-]+)?$`)
+	shaPattern          = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
+	checksumPattern     = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+	versionPattern      = regexp.MustCompile(`^v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:[-+][0-9A-Za-z.-]+)?$`)
+	patchReleasePattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.\*$`)
+)
+
+var (
+	ErrReleaseAllowlistMissing   = errors.New("release allowlist is not configured")
+	ErrReleaseAllowlistMalformed = errors.New("release allowlist contains a malformed entry")
 )
 
 type Current struct {
@@ -76,6 +82,19 @@ type githubCommit struct {
 
 type githubComparison struct {
 	Status string `json:"status"`
+}
+
+// githubAPIError deliberately stores only the operation and HTTP metadata.
+// Response bodies are not retained because they may contain credentials or
+// other provider-controlled data that must never reach the UI or run logs.
+type githubAPIError struct {
+	Operation  string
+	StatusCode int
+	Status     string
+}
+
+func (e *githubAPIError) Error() string {
+	return fmt.Sprintf("%s returned HTTP %d", e.Operation, e.StatusCode)
 }
 
 func (r *githubRelease) UnmarshalJSON(b []byte) error {
@@ -198,11 +217,40 @@ type Client struct {
 
 func tagApproved(tag string, approved []string) bool {
 	for _, candidate := range approved {
-		if strings.TrimSpace(candidate) == tag {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == tag {
+			return true
+		}
+		// The release workflow increments the patch component. A patch-only
+		// prefix (for example v0.1.*) permits future stable patch releases
+		// without turning the trust policy into an unrestricted wildcard.
+		if patchReleasePattern.MatchString(candidate) && versionPattern.MatchString(tag) && strings.HasPrefix(tag, strings.TrimSuffix(candidate, "*")) {
 			return true
 		}
 	}
 	return false
+}
+
+// ValidateReleaseAllowlist validates the explicit release trust policy before
+// any network request is made. Exact semantic-version tags and patch-only
+// prefixes are supported; empty or malformed policies fail closed.
+func ValidateReleaseAllowlist(approved []string) error {
+	valid := 0
+	for _, candidate := range approved {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		valid++
+		if versionPattern.MatchString(candidate) || patchReleasePattern.MatchString(candidate) {
+			continue
+		}
+		return fmt.Errorf("%w: %s", ErrReleaseAllowlistMalformed, candidate)
+	}
+	if valid == 0 {
+		return ErrReleaseAllowlistMissing
+	}
+	return nil
 }
 
 // DownloadAndVerify downloads only the URL selected from the trusted GitHub
@@ -263,7 +311,7 @@ func (c Client) latest(ctx context.Context, repo string) (githubRelease, error) 
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return githubRelease{}, fmt.Errorf("GitHub release lookup returned %s", res.Status)
+		return githubRelease{}, &githubAPIError{Operation: "GitHub release lookup", StatusCode: res.StatusCode, Status: res.Status}
 	}
 	var out githubRelease
 	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
@@ -291,7 +339,7 @@ func (c Client) tagCommit(ctx context.Context, repo, tag string) (githubCommit, 
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return githubCommit{}, fmt.Errorf("GitHub tag lookup returned %s", res.Status)
+		return githubCommit{}, &githubAPIError{Operation: "GitHub tag lookup", StatusCode: res.StatusCode, Status: res.Status}
 	}
 	var out githubCommit
 	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
@@ -320,7 +368,7 @@ func (c Client) branchContains(ctx context.Context, repo, branch, commit string)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return false, fmt.Errorf("GitHub branch comparison returned %s", res.Status)
+		return false, &githubAPIError{Operation: "GitHub branch comparison", StatusCode: res.StatusCode, Status: res.Status}
 	}
 	var comparison githubComparison
 	if err := json.NewDecoder(res.Body).Decode(&comparison); err != nil {
@@ -334,9 +382,14 @@ func Resolve(ctx context.Context, current Current, repo, branch string, client C
 		client.HTTP = http.DefaultClient
 	}
 	s := Snapshot{Current: current, Repository: repo, Branch: branch, Provider: "GitHub", Status: "unavailable"}
+	if err := ValidateReleaseAllowlist(client.ApprovedTags); err != nil {
+		s.Status = "unverified"
+		s.Reason = releasePolicyReason(err)
+		return s
+	}
 	r, err := client.latest(ctx, repo)
 	if err != nil {
-		s.Reason = "GitHub-Release konnte nicht sicher geprüft werden."
+		s.Reason = githubErrorReason(err, client.Token)
 		return s
 	}
 	if r.Draft || r.Prerelease || strings.TrimSpace(branch) == "" || r.TargetCommitish != branch {
@@ -349,12 +402,17 @@ func Resolve(ctx context.Context, current Current, repo, branch string, client C
 	}
 	commit, err := client.tagCommit(ctx, repo, r.TagName)
 	if err != nil {
-		s.Status, s.Reason = "unverified", "Release-Tag konnte nicht auf einen Commit aufgelöst werden."
+		s.Status, s.Reason = "unverified", githubErrorReason(err, client.Token)
 		return s
 	}
 	contained, err := client.branchContains(ctx, repo, branch, commit.SHA)
 	if err != nil || !contained {
-		s.Status, s.Reason = "unverified", "Release-Commit gehört nicht nachweislich zum freigegebenen Zielbranch."
+		s.Status = "unverified"
+		if err != nil {
+			s.Reason = githubErrorReason(err, client.Token)
+		} else {
+			s.Reason = "Release-Commit gehört nicht nachweislich zum freigegebenen Zielbranch."
+		}
 		return s
 	}
 	s.Release = Release{Version: r.TagName, Commit: commit.SHA, PublishedAt: r.PublishedAt, Changelog: r.Body, URL: r.HTMLURL}
@@ -389,4 +447,35 @@ func Resolve(ctx context.Context, current Current, repo, branch string, client C
 		s.Reason = "Release-Verifikation ist unvollständig."
 	}
 	return s
+}
+
+func releasePolicyReason(err error) string {
+	switch {
+	case errors.Is(err, ErrReleaseAllowlistMissing):
+		return "Release-Allowlist ist nicht konfiguriert. Setze TASKBOARD_GITHUB_RELEASE_ALLOWLIST."
+	case errors.Is(err, ErrReleaseAllowlistMalformed):
+		return "Release-Allowlist enthält einen ungültigen Eintrag; erlaubt sind vollständige Tags oder Patch-Präfixe wie v0.1.*."
+	default:
+		return "Release-Freigabe-Policy konnte nicht sicher geprüft werden."
+	}
+}
+
+func githubErrorReason(err error, token string) string {
+	var apiErr *githubAPIError
+	if !errors.As(err, &apiErr) {
+		return "GitHub-Release konnte nicht sicher geprüft werden. Prüfe Netzwerk und GitHub-Konfiguration."
+	}
+	switch apiErr.StatusCode {
+	case http.StatusUnauthorized:
+		return "GitHub-Zugriffstoken ist ungültig oder abgelaufen. Prüfe TASKBOARD_GITHUB_TOKEN."
+	case http.StatusForbidden:
+		if strings.TrimSpace(token) == "" {
+			return "GitHub-Zugriffstoken fehlt. Setze TASKBOARD_GITHUB_TOKEN in der externen Service-Konfiguration."
+		}
+		return "GitHub-API-Zugriff verweigert oder Rate-Limit erreicht. Prüfe Token-Berechtigungen und versuche es später erneut."
+	case http.StatusNotFound:
+		return "GitHub-Repository oder Release wurde nicht gefunden. Prüfe Repository- und Branch-Konfiguration."
+	default:
+		return "GitHub-Release konnte nicht sicher geprüft werden. Prüfe Netzwerk und GitHub-Konfiguration."
+	}
 }

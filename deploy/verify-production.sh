@@ -8,6 +8,7 @@ set -euo pipefail
 database_url="${DATABASE_URL:-postgres://taskboard:taskboard@localhost:5432/taskboard?sslmode=disable}"
 base_url="${TASKBOARD_VERIFY_URL:-https://codex.local}"
 backup_dir="${TASKBOARD_BACKUP_DIR:-/home/agent/taskboard-backups}"
+update_env_file="${TASKBOARD_ENV_FILE:-/etc/taskboard/taskboard.env}"
 
 require() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -44,6 +45,18 @@ fi
 systemctl is-active --quiet taskboard
 systemctl is-active --quiet nginx
 curl --fail --silent --show-error --insecure "${base_url%/}/healthz" >/dev/null
+
+if [[ "${TASKBOARD_VERIFY_UPDATE_CONFIG:-1}" == "1" ]]; then
+  TASKBOARD_ENV_FILE="$update_env_file" "$(dirname "$0")/validate-update-config.sh"
+  update_payload="$(curl --fail --silent --show-error --insecure "${base_url%/}/api/v1/settings/updates")"
+  case "$update_payload" in
+    *'"status":"update_available"'*|*'"status":"up_to_date"'*) ;;
+    *)
+      printf 'update check did not return a verified release status\n' >&2
+      exit 1
+      ;;
+  esac
+fi
 
 # OpenAI tool calls are intentionally fail-closed unless bubblewrap supplies
 # their filesystem and network boundary. Do not let a later settings change
