@@ -1919,6 +1919,11 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	if nativeCostMicrousd != nil {
 		partial.CostSource = "reported"
 		partial.CalculatedCostMicrousd = nativeCostMicrousd
+		// Native provider billing has no local catalog version. Persist an
+		// explicit source marker and ingestion time for auditability.
+		partial.PriceVersion = "provider-reported"
+		now := time.Now()
+		partial.CostCalculatedAt = &now
 	}
 	if err != nil {
 		partial.Status = "incomplete"

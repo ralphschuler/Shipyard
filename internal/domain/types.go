@@ -104,7 +104,15 @@ type Dashboard struct {
 	UsageByDimension               []UsageMetric
 	CostByAgent                    []CostMetric
 	TelemetrySeries                []TelemetryPoint
+	UsageTokenBreakdown            TokenBreakdown
 	Notifications                  []Notification
+}
+
+// TokenBreakdown keeps aggregate classes nullable: NULL means no selected run
+// reported that class and must not be rendered as an artificial zero.
+type TokenBreakdown struct {
+	InputTokens, OutputTokens, CachedInputTokens   *int64
+	CacheWriteTokens, ReasoningTokens, TotalTokens *int64
 }
 
 // DashboardAttention keeps actionable work separate from historic metrics so

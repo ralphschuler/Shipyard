@@ -23,6 +23,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 
 type Metric = { Name: string; Count: number };
+type TokenBreakdown = { InputTokens: number | null; OutputTokens: number | null; CachedInputTokens: number | null; CacheWriteTokens: number | null; ReasoningTokens: number | null; TotalTokens: number | null };
 type DashboardData = {
   Total: number;
   Active: number;
@@ -38,6 +39,7 @@ type DashboardData = {
   IncludedOrUnknownTokens: number;
   UsageByDimension: { Dimension: string; Name: string; Tokens: number; ActualMicrousd: number; EstimatedMicrousd: number }[];
   TelemetrySeries: { Day: string; ActualMicrousd: number; EstimatedMicrousd: number; Tokens: number }[];
+  UsageTokenBreakdown: TokenBreakdown;
   Notifications: { ID: string; Kind: string; Message: string }[];
 };
 type Attention = {
@@ -157,6 +159,7 @@ export default function Dashboard() {
     ["Fällig in 24 Stunden", attention.DueNext24h, "#/boards"],
   ] : [];
   const dimensions = data.UsageByDimension ?? [];
+  const tokenValue = (value: number | null | undefined) => value == null ? "unbekannt" : value.toLocaleString("de-DE");
   return <>
     <div className="mb-6 flex flex-wrap items-center gap-2" aria-label="Zeitraum für Kosten und Usage">
       <span className="mr-2 text-sm text-muted-foreground">Zeitraum</span>
@@ -169,5 +172,6 @@ export default function Dashboard() {
     <section className="mt-6 grid gap-6 lg:grid-cols-5"><Card className="lg:col-span-3"><CardHeader><CardTitle>Kostenverlauf</CardTitle><CardDescription>Istkosten und Schätzungen pro Tag im gewählten Zeitraum.</CardDescription></CardHeader><CardContent className="h-72"><MeasuredChart><LineChart data={data.TelemetrySeries ?? []}><CartesianGrid vertical={false} strokeDasharray="3 3" /><XAxis dataKey="Day" tickLine={false} axisLine={false} /><YAxis tickLine={false} axisLine={false} tickFormatter={(value) => money(value)} /><Tooltip formatter={(value, name) => [money(Number(value)), name === "ActualMicrousd" ? "Istkosten" : "Schätzung"]} /><Line type="monotone" dataKey="ActualMicrousd" stroke="var(--chart-2)" strokeWidth={2} dot={false} /><Line type="monotone" dataKey="EstimatedMicrousd" stroke="var(--chart-1)" strokeWidth={2} dot={false} /></LineChart></MeasuredChart></CardContent></Card><Card><CardHeader><CardTitle>Tokenverlauf</CardTitle><CardDescription>Gesamter gemeldeter oder historischer Umfang.</CardDescription></CardHeader><CardContent className="h-72"><MeasuredChart><LineChart data={data.TelemetrySeries ?? []}><CartesianGrid vertical={false} strokeDasharray="3 3" /><XAxis dataKey="Day" hide /><YAxis allowDecimals={false} tickLine={false} axisLine={false} /><Tooltip /><Line type="monotone" dataKey="Tokens" stroke="var(--chart-3)" strokeWidth={2} dot={false} /></LineChart></MeasuredChart></CardContent></Card></section>
     <section className="mt-6 grid gap-6 lg:grid-cols-5"><Card className="lg:col-span-3"><CardHeader><CardTitle>Arbeit im Workflow</CardTitle><CardDescription>Aktive Aufgaben nach Board und Spalte.</CardDescription></CardHeader><CardContent className="h-64"><MeasuredChart><BarChart data={data.ByColumn}><CartesianGrid vertical={false} strokeDasharray="3 3" /><XAxis dataKey="Name" hide /><YAxis allowDecimals={false} tickLine={false} axisLine={false} /><Tooltip /><Bar dataKey="Count" fill="var(--chart-1)" radius={[5, 5, 0, 0]} /></BarChart></MeasuredChart></CardContent></Card><Notifications items={data.Notifications} /></section>
     <Card className="mt-6"><CardHeader><CardTitle>Usage nach Dimension</CardTitle><CardDescription>Tokenumfang sowie Istkosten und Schätzungen im gewählten Zeitraum.</CardDescription></CardHeader><CardContent><div className="overflow-x-auto"><table className="w-full text-left text-sm"><thead><tr className="border-b"><th className="py-2 pr-4">Dimension</th><th className="py-2 pr-4">Name</th><th className="py-2 pr-4">Tokens</th><th className="py-2 pr-4">Istkosten</th><th className="py-2">Schätzung</th></tr></thead><tbody>{dimensions.map((item) => <tr key={`${item.Dimension}-${item.Name}`} className="border-b last:border-0"><td className="py-2 pr-4 text-muted-foreground">{item.Dimension}</td><td className="py-2 pr-4">{item.Name}</td><td className="py-2 pr-4">{item.Tokens.toLocaleString("de-DE")}</td><td className="py-2 pr-4">{money(item.ActualMicrousd)}</td><td className="py-2">{money(item.EstimatedMicrousd)}</td></tr>)}</tbody></table></div></CardContent></Card>
+    <Card className="mt-6"><CardHeader><CardTitle>Token-Breakdown</CardTitle><CardDescription>Gesamtumfang und getrennte Klassen; unbekannte Werte bleiben sichtbar.</CardDescription></CardHeader><CardContent><div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-6">{[["Gesamt", data.UsageTokenBreakdown?.TotalTokens], ["Input", data.UsageTokenBreakdown?.InputTokens], ["Output", data.UsageTokenBreakdown?.OutputTokens], ["Cache-Input", data.UsageTokenBreakdown?.CachedInputTokens], ["Cache-Schreiben", data.UsageTokenBreakdown?.CacheWriteTokens], ["Reasoning", data.UsageTokenBreakdown?.ReasoningTokens]].map(([label, value]) => <div key={label as string} className="rounded-lg border p-3"><strong className="block text-lg">{tokenValue(value as number | null | undefined)}</strong><span className="text-xs text-muted-foreground">{label}</span></div>)}</div></CardContent></Card>
   </>;
 }

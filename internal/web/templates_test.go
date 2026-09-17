@@ -14,6 +14,29 @@ func TestEmbeddedTemplatesParse(t *testing.T) {
 	}
 }
 
+func TestTelemetryBreakdownIsVisibleInClassicViews(t *testing.T) {
+	run, err := files.ReadFile("templates/run.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runHTML := string(run)
+	for _, required := range []string{"Token-Breakdown", ".Usage.TotalTokens", ".Usage.CachedInputTokens", ".Usage.ReasoningTokens"} {
+		if !strings.Contains(runHTML, required) {
+			t.Fatalf("classic run detail is missing %q", required)
+		}
+	}
+	dashboard, err := files.ReadFile("templates/dashboard.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dashboardHTML := string(dashboard)
+	for _, required := range []string{"Tokenumfang", ".Dashboard.UsageTokenBreakdown.TotalTokens", ".Dashboard.UsageTokenBreakdown.CachedInputTokens"} {
+		if !strings.Contains(dashboardHTML, required) {
+			t.Fatalf("classic dashboard is missing %q", required)
+		}
+	}
+}
+
 // Navigation is progressively enhanced by app.js so every legacy, server
 // rendered view receives the same complete route set. This contract prevents
 // a new page from silently dropping Runs, Audit or Settings again when an old
