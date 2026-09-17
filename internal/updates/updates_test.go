@@ -108,6 +108,10 @@ func TestOrchestratorBacksUpBeforeInstallAndRollsBackAfterFailure(t *testing.T) 
 	}
 	o := Orchestrator{
 		Backup: func(context.Context, Snapshot) error { calls = append(calls, "backup"); return nil },
+		DownloadAndVerify: func(context.Context, string, string) ([]byte, error) {
+			calls = append(calls, "download")
+			return []byte("artifact"), nil
+		},
 		Verify: func(context.Context, Snapshot) error { calls = append(calls, "verify"); return nil },
 		Migrate: func(context.Context, Snapshot) error {
 			calls = append(calls, "migrate")
@@ -120,7 +124,7 @@ func TestOrchestratorBacksUpBeforeInstallAndRollsBackAfterFailure(t *testing.T) 
 	}
 	s := Snapshot{Status: "update_available", Installable: true, Release: Release{Version: "v1.3.0"}}
 	err := o.Install(context.Background(), s, func(Progress) {})
-	if err == nil || !reflect.DeepEqual(calls, []string{"backup", "verify", "migrate", "rollback"}) {
+	if err == nil || !reflect.DeepEqual(calls, []string{"backup", "download", "verify", "migrate", "rollback"}) {
 		t.Fatalf("error = %v, calls = %v", err, calls)
 	}
 }
@@ -131,6 +135,26 @@ func TestOrchestratorRequiresRecoveryBeforeMutation(t *testing.T) {
 	err := o.Install(context.Background(), Snapshot{Status: "update_available", Installable: true}, nil)
 	if err == nil || called {
 		t.Fatalf("error = %v, backup called = %v", err, called)
+	}
+}
+
+func TestOrchestratorRequiresArtifactVerificationBeforeMutation(t *testing.T) {
+	backupCalled := false
+	o := Orchestrator{
+		Backup:   func(context.Context, Snapshot) error { backupCalled = true; return nil },
+		Verify:   func(context.Context, Snapshot) error { return nil },
+		Migrate:  func(context.Context, Snapshot) error { return nil },
+		Switch:   func(context.Context, Snapshot) error { return nil },
+		Restart:  func(context.Context, Snapshot) error { return nil },
+		Health:   func(context.Context, Snapshot) error { return nil },
+		Rollback: func(context.Context, Snapshot) error { return nil },
+	}
+	err := o.Install(context.Background(), Snapshot{Status: "update_available", Installable: true, Release: Release{
+		ArtifactURL: "https://github.com/ralphschuler/Shipyard/releases/download/v1.3.0/shipyard-linux-amd64",
+		Checksum:    strings.Repeat("a", 64),
+	}}, nil)
+	if err == nil || backupCalled {
+		t.Fatalf("error = %v, backup called = %v; missing artifact verification must fail before mutation", err, backupCalled)
 	}
 }
 

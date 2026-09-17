@@ -21,14 +21,17 @@ type Progress struct {
 // No shell command or binary path is inferred: an application must wire every
 // mutating operation before an update can run.
 type Orchestrator struct {
-	Busy     func(context.Context) bool
-	Backup   func(context.Context, Snapshot) error
-	Verify   func(context.Context, Snapshot) error
-	Migrate  func(context.Context, Snapshot) error
-	Switch   func(context.Context, Snapshot) error
-	Restart  func(context.Context, Snapshot) error
-	Health   func(context.Context, Snapshot) error
-	Rollback func(context.Context, Snapshot) error
+	Busy   func(context.Context) bool
+	Backup func(context.Context, Snapshot) error
+	// DownloadAndVerify must fetch the exact GitHub artifact selected by the
+	// trusted snapshot and compare its bytes with Release.Checksum.
+	DownloadAndVerify func(context.Context, string, string) ([]byte, error)
+	Verify            func(context.Context, Snapshot) error
+	Migrate           func(context.Context, Snapshot) error
+	Switch            func(context.Context, Snapshot) error
+	Restart           func(context.Context, Snapshot) error
+	Health            func(context.Context, Snapshot) error
+	Rollback          func(context.Context, Snapshot) error
 }
 
 func (o Orchestrator) Install(ctx context.Context, snapshot Snapshot, report func(Progress)) error {
@@ -40,7 +43,7 @@ func (o Orchestrator) Install(ctx context.Context, snapshot Snapshot, report fun
 	}
 	// Rollback is part of the safety contract, not an optional enhancement. A
 	// missing recovery path must be detected before backup or any mutation.
-	if o.Backup == nil || o.Verify == nil || o.Migrate == nil || o.Switch == nil || o.Restart == nil || o.Health == nil || o.Rollback == nil {
+	if o.Backup == nil || o.DownloadAndVerify == nil || o.Verify == nil || o.Migrate == nil || o.Switch == nil || o.Restart == nil || o.Health == nil || o.Rollback == nil {
 		return errors.New("update installation is not fully configured for recovery")
 	}
 	steps := []struct {
@@ -52,6 +55,17 @@ func (o Orchestrator) Install(ctx context.Context, snapshot Snapshot, report fun
 	}
 	for _, step := range steps {
 		reportProgress(report, Progress{Phase: step.phase, Status: "running", Message: "Update-Schritt läuft."})
+		if step.phase == "verify" {
+			if _, err := o.DownloadAndVerify(ctx, snapshot.Release.ArtifactURL, snapshot.Release.Checksum); err != nil {
+				reportProgress(report, Progress{Phase: step.phase, Status: "failed", Message: "Update-Schritt fehlgeschlagen."})
+				reportProgress(report, Progress{Phase: "rollback", Status: "running", Message: "Wiederherstellung läuft."})
+				if rollbackErr := o.Rollback(ctx, snapshot); rollbackErr != nil {
+					return fmt.Errorf("verify: %w; rollback: %v", err, rollbackErr)
+				}
+				reportProgress(report, Progress{Phase: "rollback", Status: "succeeded", Message: "Wiederherstellung abgeschlossen."})
+				return fmt.Errorf("verify: %w", err)
+			}
+		}
 		if err := step.fn(ctx, snapshot); err != nil {
 			reportProgress(report, Progress{Phase: step.phase, Status: "failed", Message: "Update-Schritt fehlgeschlagen."})
 			if step.phase != "backup" {
