@@ -161,6 +161,18 @@ func TestIntegrationPRMergedRequiresMergedState(t *testing.T) {
 	}
 }
 
+func TestIntegrationPRClosedWithoutMergeRequiresReplacement(t *testing.T) {
+	if integrationPRNeedsReplacement([]byte(`{"state":"OPEN","mergedAt":null}`)) {
+		t.Fatal("open pull request should remain pending")
+	}
+	if integrationPRNeedsReplacement([]byte(`{"state":"MERGED","mergedAt":"2026-09-17T16:00:00Z"}`)) {
+		t.Fatal("merged pull request should be synchronized, not replaced")
+	}
+	if !integrationPRNeedsReplacement([]byte(`{"state":"CLOSED","mergedAt":null}`)) {
+		t.Fatal("closed unmerged pull request should be replaced")
+	}
+}
+
 func TestReusablePRRequiresOpenOrMergedState(t *testing.T) {
 	closed := []byte(`{"number":7,"url":"https://example.test/pr/7","state":"CLOSED","mergedAt":null}`)
 	if pr := reusablePR(closed); pr.Number != 0 {

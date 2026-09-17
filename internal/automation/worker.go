@@ -912,6 +912,17 @@ func integrationPRMerged(output []byte) bool {
 	return json.Unmarshal(output, &state) == nil && strings.EqualFold(state.State, "MERGED") && state.MergedAt != nil && strings.TrimSpace(*state.MergedAt) != ""
 }
 
+func integrationPRNeedsReplacement(output []byte) bool {
+	var state struct {
+		State    string  `json:"state"`
+		MergedAt *string `json:"mergedAt"`
+	}
+	if json.Unmarshal(output, &state) != nil {
+		return false
+	}
+	return strings.EqualFold(state.State, "CLOSED") && (state.MergedAt == nil || strings.TrimSpace(*state.MergedAt) == "")
+}
+
 type integrationPR struct {
 	Number     int     `json:"number"`
 	URL        string  `json:"url"`
@@ -991,6 +1002,12 @@ func (w *Worker) processIntegrationJob(ctx context.Context, job domain.Integrati
 		out, viewErr := exec.CommandContext(ctx, "gh", "-R", remote, "pr", "view", job.Branch, "--json", "state,mergedAt").CombinedOutput()
 		if viewErr != nil {
 			return fmt.Errorf("PR-Status konnte nicht gelesen werden: %s", strings.TrimSpace(string(out)))
+		}
+		if integrationPRNeedsReplacement(out) {
+			// A closed, unmerged PR cannot receive new commits. Clear its
+			// metadata and revisit the PR step so the next attempt creates a
+			// replacement for the current task-branch head.
+			return w.Store.UpdateIntegration(ctx, job.ID, "pushed", "pr", job.BaseSHA, job.HeadSHA, "", "", 0, job.Attempts)
 		}
 		if !integrationPRMerged(out) {
 			return w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts)
