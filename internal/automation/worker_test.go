@@ -867,10 +867,22 @@ func TestRequestedTaskUpdateRejectsPlaceholderOnlyAndMalformedJSON(t *testing.T)
 	for _, message := range []string{
 		"```taskboard-update\n{\"title\":\"...\",\"description\":\"   \"}\n```",
 		"```taskboard-update\n{\"title\":\"valid\"\n```",
+		"```taskboard-update\n{\"title\":\"valid\"",
 	} {
 		if _, ok := requestedTaskUpdate([]domain.RunLog{{Message: message}}); ok {
 			t.Fatalf("invalid triage update was accepted: %q", message)
 		}
+	}
+}
+
+func TestRequestedTaskUpdateLogsMalformedUnterminatedJSON(t *testing.T) {
+	message := "```taskboard-update\n{\"title\":\"valid\""
+	_, ok, reason := requestedTaskUpdateWithReason([]domain.RunLog{{Message: message}})
+	if ok {
+		t.Fatal("unterminated malformed triage update was accepted")
+	}
+	if !strings.Contains(reason, "malformed JSON") {
+		t.Fatalf("malformed update reason = %q, want audit reason", reason)
 	}
 }
 

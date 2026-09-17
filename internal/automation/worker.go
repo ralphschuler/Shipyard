@@ -48,7 +48,11 @@ const repositoryApplyLockName = "taskboard-apply.lock"
 var interactionFence = regexp.MustCompile("(?s)```taskboard-interaction\\s*(\\{.*?\\})\\s*```")
 var taskCommentFence = regexp.MustCompile("(?s)```taskboard-comment\\s*(.*?)\\s*```")
 var transitionFence = regexp.MustCompile("(?s)```taskboard-transition\\s*(\\{.*?\\})\\s*```")
-var taskUpdateFence = regexp.MustCompile("(?s)```taskboard-update\\s*(\\{.*?\\})\\s*```")
+
+// Keep malformed update blocks visible to the validation path. In particular,
+// a missing closing JSON brace or code fence must still produce an audit entry
+// instead of silently disappearing before requestedTaskUpdateWithReason runs.
+var taskUpdateFence = regexp.MustCompile("(?s)```taskboard-update\\s*(.*?)(?:```|$)")
 var taskTargetsFence = regexp.MustCompile("(?s)```taskboard-targets\\s*(\\{.*?\\})\\s*```")
 var selfReviewFence = regexp.MustCompile("(?s)```taskboard-self-review\\s*(\\{.*?\\})\\s*```")
 var cliTokenUsage = regexp.MustCompile(`(?i)\btokens\s+used\s*[:\s]+([0-9][0-9,._ ]*)`)
