@@ -265,8 +265,12 @@ func TestApplyConcurrentRetriesObservePersistedAppliedState(t *testing.T) {
 	if success != 1 || alreadyApplied != 1 {
 		t.Fatalf("concurrent apply outcomes: success=%d already-applied=%d", success, alreadyApplied)
 	}
-	if _, err := os.Stat(filepath.Join(source, "delivery.txt")); err != nil {
-		t.Fatalf("delivery was not committed: %v", err)
+	content, err := gitOutput(ctx, source, "show", taskIntegrationBranch(task.ID)+":delivery.txt")
+	if err != nil || content != "delivery" {
+		t.Fatalf("delivery was not committed to the task branch: %q (%v)", content, err)
+	}
+	if _, err := os.Stat(filepath.Join(source, "delivery.txt")); !os.IsNotExist(err) {
+		t.Fatalf("managed source checkout was modified: %v", err)
 	}
 }
 

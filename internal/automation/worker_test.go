@@ -276,6 +276,125 @@ func TestSyncManagedCheckoutBlocksUnacceptedLocalCommit(t *testing.T) {
 	}
 }
 
+func TestSyncManagedCheckoutMergesTrustedDivergence(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, t.TempDir(), "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+	if err := os.WriteFile(filepath.Join(source, "accepted.txt"), []byte("accepted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "accepted.txt")
+	runGit(t, source, "commit", "-m", "taskboard: accept run trusted")
+	acceptedSHA, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(t.TempDir(), "other")
+	runGit(t, t.TempDir(), "clone", remote, other)
+	runGit(t, other, "config", "user.name", "Other")
+	runGit(t, other, "config", "user.email", "other@example.invalid")
+	if err := os.WriteFile(filepath.Join(other, "remote.txt"), []byte("remote\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, other, "add", "remote.txt")
+	runGit(t, other, "commit", "-m", "remote progress")
+	runGit(t, other, "push", "origin", "master")
+	if err := syncManagedCheckout(context.Background(), source, "master", acceptedSHA); err != nil {
+		t.Fatalf("trusted divergence should be merged: %v", err)
+	}
+	if err := syncManagedCheckout(context.Background(), source, "master", acceptedSHA); err != nil {
+		t.Fatalf("synchronized checkout should remain usable: %v", err)
+	}
+	for _, name := range []string{"accepted.txt", "remote.txt"} {
+		if _, err := gitOutput(context.Background(), source, "show", "HEAD:"+name); err != nil {
+			t.Fatalf("merged checkout missing %s: %v", name, err)
+		}
+	}
+}
+
+func TestApplyRunPatchToTaskBranchKeepsSourceCleanAndRebasesRemote(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, t.TempDir(), "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+
+	taskID := "task-branch-test"
+	taskBranch, err := ensureTaskBranch(context.Background(), source, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstWorktree := filepath.Join(t.TempDir(), "first")
+	runGit(t, source, "worktree", "add", "-b", "agent/run-first", firstWorktree, taskBranch)
+	if err := os.WriteFile(filepath.Join(firstWorktree, "first.txt"), []byte("first\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, firstWorktree, "add", "first.txt")
+	firstSHA, err := applyRunPatchToTaskBranch(context.Background(), source, firstWorktree, "run-first", taskID)
+	if err != nil {
+		t.Fatalf("first task integration: %v", err)
+	}
+	if firstSHA == "" {
+		t.Fatal("first integration did not return a commit")
+	}
+	runGit(t, source, "worktree", "remove", "--force", firstWorktree)
+	runGit(t, source, "branch", "-D", "agent/run-first")
+
+	other := filepath.Join(t.TempDir(), "other")
+	runGit(t, t.TempDir(), "clone", remote, other)
+	runGit(t, other, "config", "user.name", "Other")
+	runGit(t, other, "config", "user.email", "other@example.invalid")
+	if err := os.WriteFile(filepath.Join(other, "remote.txt"), []byte("remote\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, other, "add", "remote.txt")
+	runGit(t, other, "commit", "-m", "remote progress")
+	runGit(t, other, "push", "origin", "master")
+
+	secondWorktree := filepath.Join(t.TempDir(), "second")
+	runGit(t, source, "worktree", "add", "-b", "agent/run-second", secondWorktree, taskBranch)
+	if err := os.WriteFile(filepath.Join(secondWorktree, "second.txt"), []byte("second\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, secondWorktree, "add", "second.txt")
+	if _, err := applyRunPatchToTaskBranch(context.Background(), source, secondWorktree, "run-second", taskID); err != nil {
+		t.Fatalf("second task integration after remote progress: %v", err)
+	}
+	runGit(t, source, "worktree", "remove", "--force", secondWorktree)
+	runGit(t, source, "branch", "-D", "agent/run-second")
+
+	if _, err := gitOutput(context.Background(), source, "show", taskBranch+":first.txt"); err != nil {
+		t.Fatalf("first task change missing from durable branch: %v", err)
+	}
+	if _, err := gitOutput(context.Background(), source, "show", taskBranch+":second.txt"); err != nil {
+		t.Fatalf("second task change missing from durable branch: %v", err)
+	}
+	if _, err := gitOutput(context.Background(), source, "show", taskBranch+":remote.txt"); err != nil {
+		t.Fatalf("remote progress missing after rebase: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(source, "first.txt")); !os.IsNotExist(err) {
+		t.Fatalf("managed source checkout was modified: %v", err)
+	}
+}
+
 func TestApplyRunPatchAcceptsTwoSequentialRunWorktrees(t *testing.T) {
 	source := t.TempDir()
 	runGit(t, source, "init", "-b", "master")

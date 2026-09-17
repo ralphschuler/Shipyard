@@ -758,6 +758,36 @@ func findUnpersistedRunCommit(ctx context.Context, source, worktree, runID strin
 	return "", nil
 }
 
+// findUnpersistedTaskBranchCommit is the equivalent crash-recovery marker for
+// the task-branch integration path. It closes the boundary between creating
+// the branch commit and recording AppliedAt in the database without touching
+// the shared source checkout.
+func findUnpersistedTaskBranchCommit(ctx context.Context, source, branch, worktree, runID string) (string, error) {
+	expected, err := exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--binary", "HEAD").Output()
+	if err != nil {
+		return "", err
+	}
+	if len(expected) == 0 {
+		return "", nil
+	}
+	logOutput, err := gitOutput(ctx, source, "log", "--format=%H%x00%s", branch)
+	if err != nil {
+		return "", err
+	}
+	marker := "taskboard: accept run " + runID
+	for _, entry := range strings.Split(logOutput, "\n") {
+		parts := strings.SplitN(entry, "\x00", 2)
+		if len(parts) != 2 || parts[1] != marker {
+			continue
+		}
+		candidateDiff, diffErr := exec.CommandContext(ctx, "git", "-C", source, "diff", "--binary", parts[0]+"^", parts[0]).Output()
+		if diffErr == nil && string(candidateDiff) == string(expected) {
+			return parts[0], nil
+		}
+	}
+	return "", nil
+}
+
 func gitOutput(ctx context.Context, directory string, args ...string) (string, error) {
 	command := exec.CommandContext(ctx, "git", append([]string{"-C", directory}, args...)...)
 	out, err := command.CombinedOutput()
@@ -774,6 +804,152 @@ func managedCheckoutProblem(kind, files, detail string) error {
 	}
 	message += "\nSichere nächste Schritte: Änderungen prüfen und manuell sichern oder bereinigen; danach den Run erneut starten. Es wurde nichts zurückgesetzt, überschrieben oder gelöscht."
 	return errors.New(message)
+}
+
+func taskIntegrationBranch(taskID string) string {
+	return "task/" + strings.TrimSpace(taskID)
+}
+
+func taskIntegrationDirectory(source string) string {
+	if configured := strings.TrimSpace(os.Getenv("TASKBOARD_INTEGRATION_ROOT")); configured != "" {
+		return filepath.Clean(configured)
+	}
+	// Keep integration worktrees next to the managed clone by default. This is
+	// writable in production and also keeps tests independent from a specific
+	// service account home directory.
+	return filepath.Join(filepath.Dir(filepath.Clean(source)), ".taskboard-integrations")
+}
+
+// repositoryBranch returns the branch checked out by the managed source. The
+// project default branch is used as a fallback for older clones which do not
+// have a symbolic HEAD (for example a freshly initialized test repository).
+func repositoryBranch(ctx context.Context, source string) string {
+	branch, err := gitOutput(ctx, source, "branch", "--show-current")
+	if err == nil && strings.TrimSpace(branch) != "" {
+		return strings.TrimSpace(branch)
+	}
+	return "master"
+}
+
+func trustedManagedCommit(ctx context.Context, path, sha string, accepted map[string]bool) bool {
+	sha = strings.TrimSpace(sha)
+	if sha == "" || accepted[sha] {
+		return true
+	}
+	subject, err := gitOutput(ctx, path, "show", "-s", "--format=%s", sha)
+	return err == nil && strings.HasPrefix(subject, "taskboard: synchronize ")
+}
+
+// ensureTaskBranch creates the durable branch used to integrate all attempts
+// of one task. It deliberately starts from the fetched remote default branch
+// when available, so a local managed checkout can never seed a stale task
+// branch after another task has been merged remotely.
+func ensureTaskBranch(ctx context.Context, source, taskID string) (string, error) {
+	branch := taskIntegrationBranch(taskID)
+	if _, err := gitOutput(ctx, source, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+		return branch, nil
+	}
+	base := "HEAD"
+	defaultBranch := repositoryBranch(ctx, source)
+	if _, err := gitOutput(ctx, source, "rev-parse", "--verify", "origin/"+defaultBranch); err == nil {
+		base = "origin/" + defaultBranch
+	}
+	if _, err := gitOutput(ctx, source, "branch", branch, base); err != nil {
+		return "", fmt.Errorf("Task-Branch %s konnte nicht angelegt werden: %w", branch, err)
+	}
+	return branch, nil
+}
+
+func removeIntegrationWorktree(ctx context.Context, source, path string) error {
+	if path == "" {
+		return nil
+	}
+	if out, err := exec.CommandContext(ctx, "git", "-C", source, "worktree", "remove", "--force", path).CombinedOutput(); err != nil {
+		if _, statErr := os.Stat(path); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
+			message := strings.TrimSpace(string(out))
+			if message == "" {
+				message = err.Error()
+			}
+			return errors.New(message)
+		}
+	}
+	return nil
+}
+
+// applyRunPatchToTaskBranch integrates one isolated run into the durable task
+// branch. The managed source checkout is never modified, which means two
+// tasks can be accepted independently even while the remote default branch
+// advances between their runs.
+func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, taskID string) (string, error) {
+	if dirty, checkErr := exec.CommandContext(ctx, "git", "-C", source, "status", "--porcelain").Output(); checkErr != nil {
+		return "", checkErr
+	} else if strings.TrimSpace(string(dirty)) != "" {
+		return "", managedCheckoutProblem("nicht sauber", strings.TrimSpace(string(dirty)), "der verwaltete Synchronisationsanker enthält fremde Änderungen")
+	}
+	diff, diffErr := exec.CommandContext(ctx, "git", "-C", runWorktree, "diff", "--binary", "HEAD").Output()
+	if diffErr != nil {
+		return "", diffErr
+	}
+	if strings.TrimSpace(string(diff)) == "" {
+		return "", errors.New("dieser Run enthält keine übernehmbaren Änderungen")
+	}
+	defaultBranch := repositoryBranch(ctx, source)
+	remoteRef := "origin/" + defaultBranch
+	if _, err := gitOutput(ctx, source, "fetch", "--no-tags", "origin", defaultBranch); err != nil {
+		// Local-only repositories are supported for tests and development. A
+		// configured remote remains mandatory when it exists, however.
+		if _, remoteErr := gitOutput(ctx, source, "remote"); remoteErr == nil {
+			return "", fmt.Errorf("Remote-Stand konnte vor der Task-Integration nicht gelesen werden: %w", err)
+		}
+	}
+	branch, err := ensureTaskBranch(ctx, source, taskID)
+	if err != nil {
+		return "", err
+	}
+	integrationRoot := taskIntegrationDirectory(source)
+	if err := os.MkdirAll(integrationRoot, 0700); err != nil {
+		return "", err
+	}
+	integrationPath := filepath.Join(integrationRoot, runID)
+	if err := removeIntegrationWorktree(ctx, source, integrationPath); err != nil {
+		return "", fmt.Errorf("verwaister Integrations-Worktree konnte nicht entfernt werden: %w", err)
+	}
+	if out, err := exec.CommandContext(ctx, "git", "-C", source, "worktree", "add", integrationPath, branch).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("Integrations-Worktree konnte nicht angelegt werden: %s", strings.TrimSpace(string(out)))
+	}
+	defer func() { _ = removeIntegrationWorktree(context.Background(), source, integrationPath) }()
+	if _, err := gitOutput(ctx, integrationPath, "rev-parse", "--verify", remoteRef); err == nil {
+		if out, rebaseErr := exec.CommandContext(ctx, "git", "-C", integrationPath, "rebase", remoteRef).CombinedOutput(); rebaseErr != nil {
+			files, _ := gitOutput(ctx, integrationPath, "diff", "--name-only", "--diff-filter=U")
+			_ = exec.CommandContext(context.Background(), "git", "-C", integrationPath, "rebase", "--abort").Run()
+			return "", managedCheckoutProblem("mit dem aktuellen Remote-Stand nicht konfliktfrei rebasierbar", files, strings.TrimSpace(string(out)))
+		}
+	}
+	check := exec.CommandContext(ctx, "git", "-C", integrationPath, "apply", "--check", "-")
+	check.Stdin = strings.NewReader(string(diff))
+	if out, checkErr := check.CombinedOutput(); checkErr != nil {
+		files, _ := gitOutput(ctx, integrationPath, "diff", "--name-only", "HEAD")
+		return "", managedCheckoutProblem("in der Task-Branch nicht konfliktfrei übernehmbar", files, strings.TrimSpace(string(out)))
+	}
+	apply := exec.CommandContext(ctx, "git", "-C", integrationPath, "apply", "--3way", "-")
+	apply.Stdin = strings.NewReader(string(diff))
+	if out, applyErr := apply.CombinedOutput(); applyErr != nil {
+		files, _ := gitOutput(ctx, integrationPath, "diff", "--name-only", "HEAD")
+		_ = exec.CommandContext(context.Background(), "git", "-C", integrationPath, "reset", "--hard", "HEAD").Run()
+		return "", managedCheckoutProblem("in einem Drei-Wege-Konflikt", files, strings.TrimSpace(string(out)))
+	}
+	if out, addErr := exec.CommandContext(ctx, "git", "-C", integrationPath, "add", "-A").CombinedOutput(); addErr != nil {
+		return "", errors.New(strings.TrimSpace(string(out)))
+	}
+	commit := exec.CommandContext(ctx, "git", "-C", integrationPath, "-c", "user.name=Taskboard", "-c", "user.email=taskboard@local", "commit", "-m", "taskboard: accept run "+runID)
+	if out, commitErr := commit.CombinedOutput(); commitErr != nil {
+		return "", errors.New(strings.TrimSpace(string(out)))
+	}
+	commitSHA, err := gitOutput(ctx, integrationPath, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("Task-Integrationscommit konnte nicht verifiziert werden: %w", err)
+	}
+	return commitSHA, nil
 }
 
 func syncManagedCheckout(ctx context.Context, path, branch string, acceptedCommitSHAs ...string) error {
@@ -813,21 +989,51 @@ func syncManagedCheckout(ctx context.Context, path, branch string, acceptedCommi
 			return fmt.Errorf("lokale Checkout-Commits konnten nicht geprüft werden: %w", logErr)
 		}
 		for _, sha := range strings.Split(localSHAs, "\n") {
-			if strings.TrimSpace(sha) != "" && !accepted[strings.TrimSpace(sha)] {
+			if strings.TrimSpace(sha) != "" && !trustedManagedCommit(ctx, path, sha, accepted) {
 				files, _ := gitOutput(ctx, path, "diff", "--name-only", remoteRef+"..HEAD")
 				return managedCheckoutProblem("nicht als akzeptierte Delivery verifiziert", files, "lokaler Commit ist in keinem akzeptierten Run verzeichnet")
 			}
 		}
 		return nil
 	}
+	// A managed checkout may still contain accepted legacy commits from before
+	// task branches were introduced. If every local-only commit is trusted,
+	// merge the freshly fetched remote branch instead of failing with the old
+	// generic divergence error. New deliveries never write this checkout, so
+	// this path is only a migration/recovery fallback.
+	localSHAs, logErr := gitOutput(ctx, path, "log", "--format=%H", remoteRef+"..HEAD")
+	if logErr == nil {
+		accepted := make(map[string]bool, len(acceptedCommitSHAs))
+		for _, sha := range acceptedCommitSHAs {
+			if resolved, resolveErr := gitOutput(ctx, path, "rev-parse", sha+"^{commit}"); resolveErr == nil {
+				accepted[resolved] = true
+			}
+		}
+		trusted := true
+		for _, sha := range strings.Split(localSHAs, "\n") {
+			if strings.TrimSpace(sha) != "" && !trustedManagedCommit(ctx, path, sha, accepted) {
+				trusted = false
+				break
+			}
+		}
+		if trusted {
+			merge := exec.CommandContext(ctx, "git", "-C", path, "merge", "--no-ff", "-m", "taskboard: synchronize "+remoteRef, remoteRef)
+			if out, mergeErr := merge.CombinedOutput(); mergeErr == nil {
+				return nil
+			} else {
+				files, _ := gitOutput(ctx, path, "diff", "--name-only", "--diff-filter=U")
+				_ = exec.CommandContext(context.Background(), "git", "-C", path, "merge", "--abort").Run()
+				return managedCheckoutProblem("mit dem aktuellen Remote-Stand nicht konfliktfrei zusammenführbar", files, strings.TrimSpace(string(out)))
+			}
+		}
+	}
 	files, _ := gitOutput(ctx, path, "diff", "--name-only", "HEAD..."+remoteRef)
-	return managedCheckoutProblem("divergent", files, "lokaler HEAD und origin/"+branch+" haben keinen gemeinsamen geradlinigen Stand")
+	return managedCheckoutProblem("divergent", files, "lokaler HEAD und origin/"+branch+" enthalten nicht verifizierte Änderungen")
 }
 
-// applyRunPatch applies exactly one isolated run to the managed checkout. The
-// caller must hold the repository apply lock. Keeping this boundary separate
-// makes the destructive-safety and conflict behavior testable with real Git
-// repositories without requiring a database-backed Worker.
+// applyRunPatch is retained for legacy callers and focused unit tests. New
+// deliveries use applyRunPatchToTaskBranch so the managed checkout remains a
+// clean synchronization anchor.
 func applyRunPatch(ctx context.Context, source, worktree, runID string) (string, error) {
 	if dirty, checkErr := exec.CommandContext(ctx, "git", "-C", source, "status", "--porcelain").Output(); checkErr != nil {
 		return "", checkErr
@@ -1569,44 +1775,41 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	if err != nil || worktree == "" {
 		return errors.New("Worktree für diesen Run nicht verfügbar")
 	}
-	alreadyCommitted, err := runCommitExists(ctx, source, delivery.AcceptedCommitSHA)
-	if err != nil {
-		return err
+	taskBranch, branchErr := ensureTaskBranch(ctx, source, run.TaskID)
+	if branchErr != nil {
+		return branchErr
 	}
-	if !alreadyCommitted && delivery.AcceptedCommitSHA == "" {
-		// This is a narrow crash-recovery path, not normal idempotency: the
-		// candidate must match the exact isolated diff as well as the run ID.
-		recoveredSHA, recoveryErr := findUnpersistedRunCommit(ctx, source, worktree, runID)
+	alreadyCommitted := false
+	if delivery.AcceptedCommitSHA == "" {
+		recoveredSHA, recoveryErr := findUnpersistedTaskBranchCommit(ctx, source, taskBranch, worktree, runID)
 		if recoveryErr != nil {
-			return fmt.Errorf("verwaister Übernahme-Commit konnte nicht geprüft werden: %w", recoveryErr)
+			return fmt.Errorf("verwaister Task-Branch-Commit konnte nicht geprüft werden: %w", recoveryErr)
 		}
 		if recoveredSHA != "" {
 			delivery.AcceptedCommitSHA = recoveredSHA
 			alreadyCommitted = true
-			_ = w.Store.AddRunLog(ctx, runID, "warning", "Vorhandener Übernahme-Commit anhand von Run-ID und vollständigem Diff wiederhergestellt.")
+			_ = w.Store.AddRunLog(ctx, runID, "warning", "Vorhandener Task-Branch-Commit anhand von Run-ID und vollständigem Diff wiederhergestellt.")
 		}
 	}
-	if !alreadyCommitted {
-		if dirty, checkErr := exec.Command("git", "-C", source, "status", "--porcelain").Output(); checkErr != nil {
-			return checkErr
-		} else if strings.TrimSpace(string(dirty)) != "" {
-			return managedCheckoutProblem("nicht sauber", strings.TrimSpace(string(dirty)), "fremde oder manuelle Änderungen würden von dieser Übernahme berührt")
+	if delivery.AcceptedCommitSHA != "" {
+		if _, branchErr := gitOutput(ctx, source, "show-ref", "--verify", "--quiet", "refs/heads/"+taskBranch); branchErr == nil {
+			if _, commitErr := gitOutput(ctx, source, "merge-base", "--is-ancestor", delivery.AcceptedCommitSHA, taskBranch); commitErr == nil {
+				alreadyCommitted = true
+			}
 		}
-	}
-	if !alreadyCommitted {
-		if _, err := applyRunPatch(ctx, source, worktree, runID); err != nil {
-			return err
-		}
-	} else {
-		_ = w.Store.AddRunLog(ctx, runID, "warning", "Vorhandener Übernahme-Commit erkannt; Delivery wird ohne erneutes Anwenden wiederhergestellt.")
 	}
 	commitSHA := delivery.AcceptedCommitSHA
-	if commitSHA == "" {
-		var commitErr error
-		commitSHA, commitErr = gitOutput(ctx, source, "rev-parse", "HEAD")
-		if commitErr != nil {
-			return fmt.Errorf("Übernahme-Commit konnte nicht verifiziert werden: %w", commitErr)
+	if !alreadyCommitted {
+		var applyErr error
+		commitSHA, applyErr = applyRunPatchToTaskBranch(ctx, source, worktree, runID, run.TaskID)
+		if applyErr != nil {
+			return applyErr
 		}
+	} else {
+		_ = w.Store.AddRunLog(ctx, runID, "warning", "Vorhandener Task-Branch-Commit erkannt; Delivery wird ohne erneutes Anwenden wiederhergestellt.")
+	}
+	if commitSHA == "" {
+		return errors.New("Task-Branch-Commit konnte nicht verifiziert werden")
 	}
 	applied, err := w.Store.MarkRunApplied(ctx, runID, commitSHA)
 	if err != nil {
@@ -1889,14 +2092,35 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		_ = w.finish(ctx, run, "failed")
 		return
 	}
+	// Keep a durable branch per task while retaining a disposable branch and
+	// worktree per run attempt. Branch creation is protected by the same
+	// repository lock used by delivery so concurrent tasks cannot race Git's
+	// refs, but the expensive agent execution remains fully parallel.
+	branchLock, branchLockErr := lockRepository(ctx, run.WorkspaceSnapshot)
+	if branchLockErr != nil {
+		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", branchLockErr.Error())
+		_ = w.finish(ctx, run, "failed")
+		return
+	}
+	taskBranch, taskBranchErr := ensureTaskBranch(ctx, run.WorkspaceSnapshot, run.TaskID)
+	if taskBranchErr != nil {
+		branchLock()
+		_ = w.Store.AddRunLog(ctx, run.ID, "error", taskBranchErr.Error())
+		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", taskBranchErr.Error())
+		_ = w.finish(ctx, run, "failed")
+		return
+	}
 	branch := "agent/run-" + run.ID
-	if out, err := exec.Command("git", "-C", run.WorkspaceSnapshot, "worktree", "add", "-b", branch, worktree, "HEAD").CombinedOutput(); err != nil {
+	if out, err := exec.Command("git", "-C", run.WorkspaceSnapshot, "worktree", "add", "-b", branch, worktree, taskBranch).CombinedOutput(); err != nil {
+		branchLock()
 		_ = w.Store.AddRunLog(ctx, run.ID, "error", string(out))
 		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", err.Error())
 		_ = w.finish(ctx, run, "failed")
 		return
 	}
+	branchLock()
 	_ = w.Store.SetRunWorktree(ctx, run.ID, worktree)
+	_ = w.Store.AddRunLog(ctx, run.ID, "info", "Task-Branch: "+taskBranch)
 	_ = w.Store.AddRunLog(ctx, run.ID, "info", "Isolierter Git-Worktree: "+worktree)
 	run.WorkspaceSnapshot = worktree
 	_ = w.Store.AddRunLog(ctx, run.ID, "info", "Codex-Agent gestartet")
