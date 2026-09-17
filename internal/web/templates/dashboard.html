@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="de">
+<html lang="dynamic">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -50,7 +50,8 @@
         <article class="priority-panel run-status-panel">
           <header><div><p class="section-kicker">Agents</p><h2>Run-Status</h2><p class="panel-summary">Ausführungen im gesamten System</p></div></header>
           <div class="priority-chart">
-            <div><span>Wartend</span><strong>{{.Dashboard.Runs.Queued}}</strong></div>
+            <div><span>In Queue</span><strong>{{.Dashboard.Runs.Queued}}</strong></div>
+            <div><span>Wartet auf Workspace</span><strong>{{.Dashboard.Runs.ResourceWaiting}}</strong></div>
             <div><span>Läuft</span><strong>{{.Dashboard.Runs.Running}}</strong></div>
             <div><span>Erfolgreich</span><strong>{{.Dashboard.Runs.Succeeded}}</strong></div>
             <div{{if gt .Dashboard.Runs.Failed 0}} class="run-status-failed"{{end}}><span>Fehlgeschlagen</span><strong>{{.Dashboard.Runs.Failed}}</strong></div>
@@ -68,9 +69,12 @@
       {{end}}
 
       <section class="workflow-panel dashboard-section cost-panel">
-        <header><div><p class="section-kicker">Budget</p><h2>Geschätzte Agent-Kosten</h2></div><p>{{usd .Dashboard.EstimatedCostMicrousd}} gesamt</p></header>
+        <header><div><p class="section-kicker">Budget</p><h2>Agent-Kosten</h2></div><p>Ist {{usd .Dashboard.KnownActualCostMicrousd}} · Schätzung {{usd .Dashboard.EstimatedCostMicrousdV2}}</p></header>
+        <p class="panel-summary">{{.Dashboard.IncludedOrUnknownRuns}} Runs ohne verlässlichen Grenzpreis; diese werden nicht als $0 gewertet.</p>
         <div class="bar-chart">{{range .Dashboard.CostByAgent}}<div class="bar-row"><span>{{.Name}}</span><div><i style="width:{{costPct .AmountMicrousd $.Dashboard.EstimatedCostMicrousd}}%"></i></div><strong>{{usd .AmountMicrousd}}</strong></div>{{else}}<p class="empty-state">Noch keine Kostenraten oder API-Runs erfasst.</p>{{end}}</div>
       </section>
+
+      <section class="workflow-panel dashboard-section telemetry-summary"><header><div><p class="section-kicker">Usage</p><h2>Tokenumfang</h2></div><p>Bekannte Werte im ausgewählten Zeitraum</p></header><div class="bar-chart"><div class="bar-row"><span>Gesamt</span><div></div><strong>{{int64ptr .Dashboard.UsageTokenBreakdown.TotalTokens}}</strong></div><div class="bar-row"><span>Input</span><div></div><strong>{{int64ptr .Dashboard.UsageTokenBreakdown.InputTokens}}</strong></div><div class="bar-row"><span>Output</span><div></div><strong>{{int64ptr .Dashboard.UsageTokenBreakdown.OutputTokens}}</strong></div><div class="bar-row"><span>Cache-Input</span><div></div><strong>{{int64ptr .Dashboard.UsageTokenBreakdown.CachedInputTokens}}</strong></div><div class="bar-row"><span>Cache-Schreiben</span><div></div><strong>{{int64ptr .Dashboard.UsageTokenBreakdown.CacheWriteTokens}}</strong></div><div class="bar-row"><span>Reasoning</span><div></div><strong>{{int64ptr .Dashboard.UsageTokenBreakdown.ReasoningTokens}}</strong></div></div></section>
 
       {{if .Dashboard.Notifications}}
       <details class="notifications"><summary>Agent-Meldungen ({{len .Dashboard.Notifications}})</summary>{{range .Dashboard.Notifications}}<article><p>{{.Message}}</p><small>{{datetime .CreatedAt}}</small><form method="post" action="/notifications/{{.ID}}/read"><button class="secondary">Gelesen</button></form></article>{{end}}</details>

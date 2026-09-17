@@ -20,6 +20,44 @@ import (
 
 const maxOpenAIToolRounds = 24
 
+// bubblewrapPreflight starts the same namespace shape used for tool commands
+// without touching the worktree or contacting a provider. Keeping this check
+// before the API request makes host/systemd regressions fail cheaply.
+func bubblewrapPreflight(ctx context.Context) error {
+	bwrap, err := exec.LookPath("bwrap")
+	if err != nil {
+		return errors.New("OpenAI-Agenten benötigen bubblewrap (bwrap); installiere das Paket bubblewrap auf dem Server und starte taskboard.service neu")
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	args := []string{"--die-with-parent", "--unshare-all", "--new-session"}
+	for _, directory := range []string{"/usr", "/bin", "/lib", "/lib64"} {
+		if _, statErr := os.Stat(directory); statErr == nil {
+			args = append(args, "--ro-bind", directory, directory)
+		}
+	}
+	args = append(args, "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--setenv", "PATH", "/usr/bin:/bin", "/bin/sh", "-c", "test ! -s /proc/net/route && printf sandbox-ok")
+	out, err := exec.CommandContext(checkCtx, bwrap, args...).CombinedOutput()
+	if err == nil && strings.TrimSpace(string(out)) == "sandbox-ok" {
+		return nil
+	}
+	detail := strings.TrimSpace(string(out))
+	if strings.Contains(detail, "NETLINK_ROUTE") || strings.Contains(detail, "loopback") {
+		return errors.New("Bubblewrap-Sandbox konnte keinen NETLINK_ROUTE-Socket anlegen; erlaube AF_NETLINK ausschließlich in taskboard.service (RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK), führe daemon-reload aus und starte den Dienst neu")
+	}
+	if checkCtx.Err() != nil {
+		return fmt.Errorf("Bubblewrap-Sandbox-Preflight ist abgelaufen; prüfe bwrap und die Systemd-Sandbox: %w", checkCtx.Err())
+	}
+	if detail == "" {
+		if err != nil {
+			detail = err.Error()
+		} else {
+			detail = "unbekannter Fehler"
+		}
+	}
+	return fmt.Errorf("Bubblewrap-Sandbox-Preflight fehlgeschlagen: %s; prüfe installierte bwrap-Version, User-/Mount-Namespaces und taskboard.service", detail)
+}
+
 type responseRequest struct {
 	Model              string   `json:"model"`
 	Instructions       string   `json:"instructions,omitempty"`
@@ -34,13 +72,20 @@ type responseRequest struct {
 	Store              bool     `json:"store"`
 }
 type responseUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	InputTokens       int    `json:"input_tokens"`
+	OutputTokens      int    `json:"output_tokens"`
+	TotalTokens       int    `json:"total_tokens"`
+	CachedInputTokens int    `json:"cached_input_tokens"`
+	CacheWriteTokens  int    `json:"cache_write_tokens"`
+	ReasoningTokens   int    `json:"reasoning_tokens"`
+	CostMicrousd      *int64 `json:"cost_microusd"`
 }
 type openAIUsage struct {
-	InputTokens, OutputTokens, TotalTokens int
-	EstimatedCostMicrousd                  int64
+	InputTokens, OutputTokens, CachedInputTokens, CacheWriteTokens, ReasoningTokens, TotalTokens int
+	EstimatedCostMicrousd                                                                        int64
+	NativeCostMicrousd                                                                           *int64
+	APICalls                                                                                     int
+	ServiceTier                                                                                  string
 }
 type responseOutput struct {
 	Type      string `json:"type"`
@@ -61,6 +106,22 @@ type responseResult struct {
 	Error      *struct {
 		Message string `json:"message"`
 	} `json:"error"`
+}
+
+func accumulateOpenAIUsage(total *openAIUsage, response responseUsage) {
+	total.APICalls++
+	total.InputTokens += response.InputTokens
+	total.OutputTokens += response.OutputTokens
+	total.CachedInputTokens += response.CachedInputTokens
+	total.CacheWriteTokens += response.CacheWriteTokens
+	total.ReasoningTokens += response.ReasoningTokens
+	total.TotalTokens += response.TotalTokens
+	if response.CostMicrousd != nil {
+		if total.NativeCostMicrousd == nil {
+			total.NativeCostMicrousd = new(int64)
+		}
+		*total.NativeCostMicrousd += *response.CostMicrousd
+	}
 }
 
 func responsesURL(base string) (string, error) {
@@ -146,15 +207,18 @@ func openAISandboxArgs(worktree, command string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []string{
-		"--die-with-parent", "--unshare-all", "--new-session",
-		"--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin",
-		"--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64",
+	args := []string{"--die-with-parent", "--unshare-all", "--new-session"}
+	for _, directory := range []string{"/usr", "/bin", "/lib", "/lib64"} {
+		if _, statErr := os.Stat(directory); statErr == nil {
+			args = append(args, "--ro-bind", directory, directory)
+		}
+	}
+	return append(args,
 		"--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
 		"--bind", abs, "/workspace", "--chdir", "/workspace",
 		"--setenv", "HOME", "/workspace", "--setenv", "PATH", "/usr/bin:/bin",
 		"--setenv", "LANG", "C", "/bin/sh", "-lc", command,
-	}, nil
+	), nil
 }
 
 func runToolCommand(ctx context.Context, worktree, command string) string {
@@ -174,7 +238,7 @@ func runToolCommand(ctx context.Context, worktree, command string) string {
 	// outside this sandbox; only model-issued shell commands are contained.
 	bwrap, err := exec.LookPath("bwrap")
 	if err != nil {
-		return "error: command sandbox unavailable (bubblewrap is required)"
+		return "error: command sandbox unavailable: OpenAI-Agenten benötigen bubblewrap (bwrap); installiere das Paket bubblewrap auf dem Server und starte taskboard.service neu"
 	}
 	cmd := exec.CommandContext(ctx, bwrap, args...)
 	cmd.Env = agentEnvironment("")
@@ -189,18 +253,21 @@ func runToolCommand(ctx context.Context, worktree, command string) string {
 	return text
 }
 
-func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, prompt, worktree string) (string, openAIUsage, error) {
+func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree string) (string, openAIUsage, error) {
 	if strings.TrimSpace(provider.Model) == "" {
 		return "", openAIUsage{}, errors.New("OpenAI-Modell fehlt in den Provider-Einstellungen")
 	}
 	if strings.TrimSpace(provider.SecretEnv) == "" {
 		return "", openAIUsage{}, errors.New("OpenAI Secret-Umgebungsvariable fehlt")
 	}
-	if _, err := exec.LookPath("bwrap"); err != nil {
-		return "", openAIUsage{}, errors.New("OpenAI-Agenten benötigen bubblewrap für den isolierten Worktree; installiere bubblewrap auf dem Server und starte den Dienst neu")
+	if os.Getenv("TASKBOARD_BWRAP_PREFLIGHT") != "0" {
+		if err := bubblewrapPreflight(ctx); err != nil {
+			return "", openAIUsage{}, err
+		}
+	} else if _, err := exec.LookPath("bwrap"); err != nil {
+		return "", openAIUsage{}, errors.New("OpenAI-Agenten benötigen bubblewrap (bwrap); installiere das Paket bubblewrap auf dem Server und starte taskboard.service neu")
 	}
-	apiKey := os.Getenv(provider.SecretEnv)
-	if apiKey == "" {
+	if strings.TrimSpace(apiKey) == "" {
 		return "", openAIUsage{}, errors.New("OpenAI Secret-Umgebungsvariable ist nicht gesetzt")
 	}
 	endpoint, err := responsesURL(provider.BaseURL)
@@ -225,6 +292,7 @@ func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, pr
 		return "", openAIUsage{}, errors.New("OpenAI-Optionen enthalten ungültige Werte")
 	}
 	client := &http.Client{Timeout: 19 * time.Minute}
+	usageServiceTier := options.ServiceTier
 	request := responseRequest{
 		Model:           provider.Model,
 		Instructions:    "Du bist ein Coding-Agent. Arbeite ausschließlich im zugewiesenen Git-Worktree über run_command. Keine Netzwerkanfragen, keine Pushes, Merges, Releases, Deployments oder dauerhaften Prozesse. Prüfe die Änderung und antworte mit einer kurzen Zusammenfassung.",
@@ -243,14 +311,13 @@ func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, pr
 	}
 	var transcript []string
 	usage := openAIUsage{}
+	usage.ServiceTier = usageServiceTier
 	for round := 0; round < maxOpenAIToolRounds; round++ {
 		result, err := callResponses(ctx, client, endpoint, apiKey, request)
 		if err != nil {
 			return strings.Join(transcript, "\n"), usage, err
 		}
-		usage.InputTokens += result.Usage.InputTokens
-		usage.OutputTokens += result.Usage.OutputTokens
-		usage.TotalTokens += result.Usage.TotalTokens
+		accumulateOpenAIUsage(&usage, result.Usage)
 		var outputs []map[string]string
 		for _, item := range result.Output {
 			if item.Type != "function_call" || item.Name != "run_command" {

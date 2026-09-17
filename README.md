@@ -53,6 +53,7 @@ Die Vorlage liegt unter `deploy/taskboard-sso.conf.example`. `TASKBOARD_PROXY_SS
   werden als Blockierung am Task kommentiert.
 - Der gestartete Agent-Prozess erhält keine vollständige Service-Umgebung: Datenbank- und andere Infrastrukturvariablen werden nicht geerbt. Nur `HOME`, `PATH`, Locale-Werte und das explizit konfigurierte Provider-Secret werden weitergereicht.
 - Tool-Befehle des OpenAI-Responses-Adapters benötigen `bubblewrap` (`bwrap`). Sie laufen in einem eigenen Dateisystem-, Prozess- und Netzwerk-Namespace: Nur der zugewiesene Git-Worktree ist schreibbar, Systembibliotheken sind read-only und es gibt keine Netzwerkschnittstelle. Fehlt `bwrap`, lehnt Shipyard OpenAI-Runs vor dem API-Aufruf ab, statt eine schwächere Isolation zu verwenden.
+- Der Host-Preflight `./deploy/bubblewrap-healthcheck.sh` startet diese Sandbox ohne Worktree- oder Datenbankänderung. Er läuft vor OpenAI-Runs (mit `TASKBOARD_BWRAP_PREFLIGHT=0` abschaltbar) und im Produktionscheck. Die systemd-Unit muss `AF_NETLINK` zusätzlich zu `AF_UNIX AF_INET AF_INET6` erlauben; diese Freigabe gilt nur für `taskboard.service`, weil Bubblewrap beim Aufbau des privaten Netzwerks `NETLINK_ROUTE` benötigt. Nach einer Unit-Änderung: `systemctl daemon-reload && systemctl restart taskboard.service`.
 - Der OpenAI-Responses-Adapter nutzt die offizielle Responses-API mit `store:false`. Er kann im zugewiesenen Git-Worktree über ein dokumentiertes Kommando-Werkzeug arbeiten; Modell, API-Key-Umgebungsvariable und optionale Base-URL werden in den Provider-Einstellungen gesetzt. Die API meldet echte Token-Nutzung zurück, die bei einem Run gespeichert wird.
 
 ## Integrationen
@@ -68,6 +69,40 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 ./deploy/deploy-local.sh
 ```
 
+### Releases
+
+Jeder Push auf `master` (einschließlich eines gemergten Pull Requests) startet
+`.github/workflows/release.yml`. Die Action baut reproduzierbare Linux-
+Artefakte für `amd64` und `arm64`, versieht sie mit der Build-Version und
+veröffentlicht ein idempotentes GitHub-Release samt `SHA256SUMS`. Ein manueller
+`workflow_dispatch` ist für einen erneuten Lauf verfügbar; das Release wird bei
+einem Retry aktualisiert statt doppelt angelegt.
+
+### Produktionsnahe Automation-Integrationstests
+
+Die PostgreSQL-Integrationstests sind absichtlich opt-in. Für einen
+reproduzierbaren Host- oder CI-Lauf mit echten Listenern und einer getrennten,
+temporären Datenbank steht der Podman-Runner bereit:
+
+```sh
+timeout 120s ./scripts/run-integration-tests.sh
+```
+
+Der Runner startet `docker.io/library/postgres:16-alpine` mit einem zufälligen Loopback-Port und
+der ausschließlich für Tests vorgesehenen Datenbank
+`taskboard_agent_tests`. Er überschreibt nur `SHIPYARD_TEST_DATABASE_URL`;
+`DATABASE_URL` wird nicht verwendet. Die Migrationen werden von den Tests
+ausgeführt, und das automatische Cleanup entfernt Container und temporäre
+Go-Artefakte auch bei einem Abbruch. Das ist der Rollback: Es bleiben weder
+Testdaten noch ein laufender Dienst zurück. Produktionsdaten werden nicht
+berührt.
+
+Der Runner muss außerhalb einer restriktiven Delivery-Sandbox bzw. in einem
+CI-Runner mit erlaubten Loopback-Listenern und Podman-Netzwerk laufen. Ein
+direktes `go test ./...` in der Delivery-Sandbox bleibt deshalb eine explizite
+Umgebungsausnahme, wenn Socket-Listener oder localhost-Verbindungen dort
+verboten sind.
+
 Das Deploy-Skript kompiliert vor dem Stoppen des Dienstes, behält die vorherige
 Binärdatei und stellt sie bei einem fehlgeschlagenen Start oder Health-Check
 automatisch wieder her. Ein direktes Überschreiben von `./taskboard` während
@@ -78,7 +113,7 @@ ablehnen kann.
 
 ## Backups und Restore-Drill
 
-`deploy/backup-postgres.sh` erzeugt atomare PostgreSQL-Archive mit SHA-256-Manifest. `deploy/verify-production.sh` prüft Alter, Prüfsumme und Lesbarkeit des jüngsten Archivs bei jedem lokalen Deployment.
+`deploy/backup-postgres.sh` erzeugt atomare PostgreSQL-Archive mit SHA-256-Manifest. `deploy/verify-production.sh` prüft Alter, Prüfsumme und Lesbarkeit des jüngsten Archivs bei jedem lokalen Deployment und führt standardmäßig den Bubblewrap-Preflight aus. Für eine Installation ohne OpenAI kann er mit `TASKBOARD_VERIFY_BWRAP=0` übersprungen werden. Ein manueller Regressionstest ist `./deploy/bubblewrap-healthcheck.sh`; ein Fehler mit `NETLINK_ROUTE` verweist direkt auf die begrenzte `AF_NETLINK`-Freigabe in `deploy/taskboard.service`.
 
 Ein echter Restore wird bewusst nur gegen eine vorher angelegte, **leere** Testdatenbank ausgeführt. Das Drill-Skript lehnt die Live-Datenbank und jedes Ziel mit vorhandenen Tabellen ab:
 

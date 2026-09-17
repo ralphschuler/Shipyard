@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type User struct {
 	ID, Email, DisplayName, PasswordHash, Role string
@@ -11,6 +14,7 @@ type User struct {
 type UserPreferences struct {
 	Theme         string
 	ShortcutHints bool
+	Language      string
 }
 type Session struct {
 	ID, UserID, CSRFToken string
@@ -93,8 +97,22 @@ type Dashboard struct {
 	CreatedSeries, CompletedSeries []Metric
 	Runs                           RunMetrics
 	EstimatedCostMicrousd          int64
+	KnownActualCostMicrousd        int64
+	EstimatedCostMicrousdV2        int64
+	IncludedOrUnknownRuns          int
+	IncludedOrUnknownTokens        int64
+	UsageByDimension               []UsageMetric
 	CostByAgent                    []CostMetric
+	TelemetrySeries                []TelemetryPoint
+	UsageTokenBreakdown            TokenBreakdown
 	Notifications                  []Notification
+}
+
+// TokenBreakdown keeps aggregate classes nullable: NULL means no selected run
+// reported that class and must not be rendered as an artificial zero.
+type TokenBreakdown struct {
+	InputTokens, OutputTokens, CachedInputTokens   *int64
+	CacheWriteTokens, ReasoningTokens, TotalTokens *int64
 }
 
 // DashboardAttention keeps actionable work separate from historic metrics so
@@ -102,10 +120,20 @@ type Dashboard struct {
 type DashboardAttention struct {
 	BlockedTasks, FailedRuns7d, OpenInteractions, DueNext24h int
 }
-type RunMetrics struct{ Queued, Running, Succeeded, Failed int }
+type RunMetrics struct{ Queued, ResourceWaiting, Running, Succeeded, Failed int }
 type CostMetric struct {
 	Name           string
 	AmountMicrousd int64
+}
+type UsageMetric struct {
+	Dimension, Name   string
+	Tokens            int64
+	ActualMicrousd    int64
+	EstimatedMicrousd int64
+}
+type TelemetryPoint struct {
+	Day                                       string
+	ActualMicrousd, EstimatedMicrousd, Tokens int64
 }
 type Notification struct {
 	ID, TaskID, AgentRunID, Kind, Message string
@@ -148,6 +176,15 @@ type AgentRun struct {
 	StartedAt, FinishedAt                                                                                                 *time.Time
 	CreatedAt                                                                                                             time.Time
 }
+type RunQueueStatus struct {
+	Position      int
+	WaitingReason string
+	BlockingRunID string
+	BlockingAgent string
+	Workspace     string
+	WaitingSince  time.Time
+	NextAttemptAt time.Time
+}
 
 // WorktreeCleanupCandidate identifies an isolated checkout that no longer
 // carries a deliverable patch. The source repository itself is never a
@@ -157,6 +194,9 @@ type WorktreeCleanupCandidate struct {
 }
 type RunOverview struct {
 	ID, TaskID, TaskTitle, AgentID, AgentName, Status, Summary, ErrorMessage string
+	QueuePosition                                                            int
+	QueueReason, BlockingRunID, QueueBlockingAgent, QueueWorkspace           string
+	QueueWaitingSince, QueueNextAttemptAt                                    *time.Time
 	StartedAt, FinishedAt                                                    *time.Time
 	CreatedAt                                                                time.Time
 	DurationSeconds                                                          int
@@ -178,9 +218,25 @@ type AgentRunBatch struct {
 }
 type RunDelivery struct {
 	DiffSummary, GateStatus, GateOutput                    string
+	AcceptedCommitSHA                                      string
 	InputTokens, OutputTokens, TokenUsage, DurationSeconds int
 	EstimatedCostMicrousd                                  int64
 	AppliedAt                                              *time.Time
+}
+type UsageReport struct {
+	Provider, Model, ServiceTier, Status, CostSource, PriceVersion string
+	APICalls, InputTokens, OutputTokens, CachedInputTokens         *int64
+	CacheWriteTokens, ReasoningTokens, TotalTokens                 *int64
+	NativeCostMicrousd, CalculatedCostMicrousd                     *int64
+	RawUsage                                                       []byte
+	CostCalculatedAt                                               *time.Time
+}
+type UsagePrice struct {
+	ID, Provider, Model, ServiceTier, Version         string
+	ValidFrom                                         time.Time
+	ValidUntil                                        *time.Time
+	Input, Output, CachedInput, CacheWrite, Reasoning *int64
+	CreatedAt                                         time.Time
 }
 type Webhook struct {
 	ID, Name, URL, Events             string
@@ -203,6 +259,13 @@ type ProviderSetting struct {
 	Model, Command, SecretEnv, BaseURL, Options string
 	UpdatedAt                                   time.Time
 }
+type Secret struct {
+	ID, Name, Description, EnvName string
+	Revoked                        bool
+	AgentIDs                       []string
+	CreatedAt, UpdatedAt           time.Time
+}
+type SecretValue struct{ ID, EnvName, Value string }
 type RunLog struct {
 	ID, RunID      string
 	Sequence       int
@@ -220,6 +283,7 @@ type RunTrace struct {
 }
 type AutomationEvent struct {
 	ID, Type, TaskID, BoardID string
+	Payload                   json.RawMessage
 	OccurredAt                time.Time
 }
 type AutomationPreviewTask struct {

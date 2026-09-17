@@ -5,12 +5,14 @@ import {
   Boxes,
   FolderGit2,
   Gauge,
+  GitCompareArrows,
   LayoutDashboard,
   LoaderCircle,
   Menu,
   Moon,
   Play,
   ShieldCheck,
+  ShieldAlert,
   Sun,
   Wrench,
 } from "lucide-react";
@@ -35,6 +37,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ChatBubble } from "@/components/ui/chat-bubble";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { normalizeLanguage, translate, type Language } from "@/i18n";
 
 const Dashboard = lazy(() => import("@/features/dashboard"));
 type NavItem = {
@@ -44,48 +48,48 @@ type NavItem = {
   icon: typeof LayoutDashboard;
 };
 const nav: NavItem[] = [
-  { name: "Übersicht", path: "/", icon: LayoutDashboard },
+  { name: "overview", path: "/", icon: LayoutDashboard },
   {
-    name: "Projekte",
+    name: "projects",
     path: "/projects",
     endpoint: "/api/v1/projects",
     icon: FolderGit2,
   },
-  { name: "Boards", path: "/boards", endpoint: "/api/v1/boards", icon: Boxes },
-  { name: "Agents", path: "/agents", endpoint: "/api/v1/agents", icon: Bot },
+  { name: "boards", path: "/boards", endpoint: "/api/v1/boards", icon: Boxes },
+  { name: "agents", path: "/agents", endpoint: "/api/v1/agents", icon: Bot },
   {
-    name: "Automationen",
+    name: "automations",
     path: "/automations",
     endpoint: "/api/v1/automations",
     icon: Activity,
   },
-  { name: "Skills", path: "/skills", endpoint: "/api/v1/skills", icon: Wrench },
-  { name: "Runs", path: "/runs", endpoint: "/api/v1/runs", icon: Play },
+  { name: "skills", path: "/skills", endpoint: "/api/v1/skills", icon: Wrench },
+  { name: "runs", path: "/runs", endpoint: "/api/v1/runs", icon: Play },
   {
-    name: "Audit",
+    name: "audit",
     path: "/audit",
     endpoint: "/api/v1/audit",
     icon: ShieldCheck,
   },
-  { name: "Einstellungen", path: "/settings/providers", icon: Gauge },
+  { name: "settings", path: "/settings/providers", icon: Gauge },
 ];
 function routeFromHash() {
   return location.hash.slice(1) || "/";
 }
-function titleFor(route: string) {
+function titleFor(route: string, t: (key: string) => string) {
   const known = nav.find((item) => item.path === route)?.name;
-  if (known) return known;
-  if (route === "/settings") return "Einstellungen";
-  if (route === "/account") return "Konto & Zugriff";
+  if (known) return t(known);
+  if (route === "/settings") return t("settings");
+  if (route === "/account") return t("account");
   // Detail views intentionally keep their parent section in the persistent
   // header; the local page then supplies the concrete board, task or run name.
-  if (route === "/boards") return "Boards";
-  if (route === "/projects") return "Projekte";
-  if (route === "/agents") return "Agents";
-  if (route === "/automations") return "Automationen";
-  if (route === "/skills") return "Skills";
-  if (route === "/runs") return "Runs";
-  if (route === "/audit") return "Audit";
+  if (route === "/boards") return t("boards");
+  if (route === "/projects") return t("projects");
+  if (route === "/agents") return t("agents");
+  if (route === "/automations") return t("automations");
+  if (route === "/skills") return t("skills");
+  if (route === "/runs") return t("runs");
+  if (route === "/audit") return t("audit");
   return "Shipyard";
 }
 type LiveChange = {
@@ -146,6 +150,8 @@ function endpointUsesChange(endpoint: string, change: LiveChange) {
 export default function App() {
   const [route, setRoute] = useState(routeFromHash);
   const { data: appearance } = useAPI<any>("/api/v1/settings/appearance");
+  const [language, setLanguage] = useState<Language>(() => normalizeLanguage(localStorage.getItem("shipyard-language")));
+  const t = (key: string) => translate(language, key);
   const [dark, setDark] = useState(
     localStorage.getItem("shipyard-theme") === "dark",
   );
@@ -155,6 +161,18 @@ export default function App() {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const mobileNavRef = useRef<HTMLElement>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  useEffect(() => {
+    if (appearance?.Language) setLanguage(normalizeLanguage(appearance.Language));
+  }, [appearance?.Language]);
+  useEffect(() => {
+    const changed = (event: Event) => setLanguage(normalizeLanguage((event as CustomEvent<string>).detail));
+    window.addEventListener("shipyard:language-change", changed);
+    return () => window.removeEventListener("shipyard:language-change", changed);
+  }, []);
+  useEffect(() => {
+    localStorage.setItem("shipyard-language", language);
+    document.documentElement.lang = language;
+  }, [language]);
   useEffect(() => {
     const update = () => setRoute(routeFromHash());
     addEventListener("hashchange", update);
@@ -271,7 +289,7 @@ export default function App() {
           type="button"
           variant="outline"
           size="icon"
-          aria-label="Navigation öffnen oder schließen"
+          aria-label={t("navigationToggle")}
           aria-controls="main-navigation"
           className="fixed left-3 top-3 z-30 md:left-4 md:top-4"
           onClick={toggleNavigation}
@@ -304,8 +322,8 @@ export default function App() {
                   onKeyDown={(event) => navigateNav(index, event)}
                   data-nav-index={index}
                   aria-current={selected ? "page" : undefined}
-                  aria-label={item.name}
-                  title={item.name}
+                  aria-label={t(item.name)}
+                  title={t(item.name)}
                   className={
                     selected
                       ? "flex h-9 items-center gap-3 rounded-md bg-accent px-3 text-sm font-medium text-accent-foreground"
@@ -313,7 +331,7 @@ export default function App() {
                   }
                 >
                   <Icon className="size-4" />
-                  {showNavLabels && item.name}
+                  {showNavLabels && t(item.name)}
                 </a>
               );
             })}
@@ -325,14 +343,14 @@ export default function App() {
               onClick={() => setDark(!dark)}
             >
               {dark ? <Sun className="size-4" /> : <Moon className="size-4" />}
-              {showNavLabels && (dark ? "Helles Design" : "Dunkles Design")}
+              {showNavLabels && (dark ? t("light") : t("dark"))}
             </Button>
           </div>
         </aside>
         {mobileNavOpen && (
           <button
             type="button"
-            aria-label="Navigation schließen"
+            aria-label={t("navigationClose")}
             className="fixed inset-0 z-10 bg-foreground/20 md:hidden"
             onClick={() => setMobileNavOpen(false)}
           />
@@ -340,7 +358,7 @@ export default function App() {
         <Dialog open={shortcutsOpen} onOpenChange={setShortcutsOpen}>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Tastatursteuerung</DialogTitle>
+              <DialogTitle>{t("keyboardControl")}</DialogTitle>
               <DialogDescription>Die gesamte Oberfläche bleibt mit Standard-Fokussteuerung bedienbar.</DialogDescription>
             </DialogHeader>
             <dl className="grid gap-3 text-sm">
@@ -357,17 +375,15 @@ export default function App() {
             <div>
               <p className="text-sm font-medium text-primary">Operations</p>
               <h1 className="mt-1 text-3xl font-semibold tracking-tight">
-                {titleFor(route.split("/").slice(0, 2).join("/") || "/")}
+                {titleFor(route.split("/").slice(0, 2).join("/") || "/", t)}
               </h1>
               <p className="mt-2 text-sm text-muted-foreground">
-                {route === "/"
-                  ? "Arbeitsfluss, Agentenläufe und Entscheidungen an einem Ort."
-                  : "Verwalte die Ressourcen und Vorgänge deines Agenten-Systems."}
+                {route === "/" ? t("overviewDescription") : t("resourcesDescription")}
               </p>
             </div>
             <Badge variant="outline" className="h-fit gap-2 px-3 py-1.5">
               <span className="size-2 rounded-full bg-emerald-500" />
-              System verbunden
+              {t("connected")}
             </Badge>
           </header>
           {route.match(/^\/boards\/[^/]+\/workflow$/) ? (
@@ -391,7 +407,7 @@ export default function App() {
           ) : route === "/" ? (
             <Suspense fallback={<Loading />}><Dashboard /></Suspense>
           ) : active?.endpoint ? (
-            <ResourceList endpoint={active.endpoint} title={active.name} />
+            <ResourceList endpoint={active.endpoint} title={t(active.name)} />
           ) : route === "/settings" || route.startsWith("/settings/") || route === "/account" ? (
             <Settings route={route} />
           ) : (
@@ -1370,6 +1386,7 @@ function Settings({ route }: { route: string }) {
         : route.split("/").pop() || "providers";
   const tabs = [
     ["providers", "Provider"],
+    ["updates", "Updates"],
     ["agent-policy", "Agentenrichtlinien"],
     ["appearance", "Darstellung"],
     ["integrations", "Integrationen"],
@@ -1389,7 +1406,9 @@ function Settings({ route }: { route: string }) {
           </Button>
         ))}
       </div>
-      {tab === "agent-policy" ? (
+      {tab === "updates" ? (
+        <Updates />
+      ) : tab === "agent-policy" ? (
         <AgentPolicy />
       ) : tab === "appearance" ? (
         <Appearance />
@@ -1401,6 +1420,56 @@ function Settings({ route }: { route: string }) {
         <Providers />
       )}
     </>
+  );
+}
+function Updates() {
+  const { data, error } = useAPI<any>("/api/v1/settings/updates");
+  const [message, setMessage] = useState("");
+  const [progress, setProgress] = useState<any[]>([]);
+  const [installing, setInstalling] = useState(false);
+  if (error) return <Failure />;
+  if (!data) return <Loading />;
+  const release = data.release || {};
+  const available = data.status === "update_available" && data.installable;
+  const verifyLabel = release.verified && release.compatible ? "Verifiziert und kompatibel" : "Nicht zur Installation freigegeben";
+  const install = async () => {
+    if (!available || !confirm("Dieses verifizierte Release installieren? Aktive Runs müssen vorher beendet sein.")) return;
+    setInstalling(true); setMessage("Update wird geprüft und für die Wartung vorbereitet …");
+    try {
+      const response = await mutation("/api/v1/settings/updates/install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }) });
+      const result = await response.json();
+      setProgress(result.progress || []);
+      setMessage(result.status === "succeeded" ? "Update erfolgreich abgeschlossen." : "Update abgeschlossen.");
+    } catch (err) {
+      setMessage(String(err));
+    } finally { setInstalling(false); }
+  };
+  return (
+    <div className="grid gap-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><GitCompareArrows className="size-5" /> Update-Prüfung</CardTitle>
+          <CardDescription>Nur freigegebene GitHub-Releases auf dem Branch master werden berücksichtigt. Unvollständige oder unklare Artefakte bleiben gesperrt.</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 sm:grid-cols-2">
+          <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">Laufende Version</p><p className="mt-1 text-xl font-semibold">{data.current.version}</p><p className="font-mono text-xs text-muted-foreground">{data.current.commit}</p><p className="mt-3 text-sm">Build: {data.current.builtAt || "nicht angegeben"}</p></div>
+          <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">Vergleichsstatus</p><p className="mt-1 text-xl font-semibold">{data.status === "up_to_date" ? "Aktuell" : data.status === "update_available" ? "Update verfügbar" : data.status === "unavailable" ? "Keine Release-Daten" : "Prüfung unvollständig"}</p><p className="mt-3 text-sm text-muted-foreground">Quelle: {data.source.provider} · {data.source.repository}</p></div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle className="flex items-center gap-2"><ShieldAlert className="size-5" /> Nächstes Release</CardTitle><CardDescription>{verifyLabel}</CardDescription></CardHeader>
+        <CardContent className="grid gap-3">
+          {release.version ? <>
+            <div className="grid gap-3 text-sm sm:grid-cols-2"><p><span className="text-muted-foreground">Version</span><br /><strong>{release.version}</strong></p><p><span className="text-muted-foreground">Commit</span><br /><code>{release.commit || "nicht angegeben"}</code></p><p><span className="text-muted-foreground">Veröffentlicht</span><br />{release.publishedAt || "nicht angegeben"}</p><p><span className="text-muted-foreground">Migration</span><br />{release.migrationRequired ? "Erforderlich" : "Nicht erforderlich"}</p></div>
+            <div className="rounded-md bg-muted p-3 text-sm whitespace-pre-wrap">{release.changelog || "Kein Changelog angegeben."}</div>
+            <div className="flex flex-wrap items-center gap-2"><Button disabled={!available || installing} onClick={install}>{installing ? "Update wird vorbereitet …" : "Update installieren"}</Button>{release.url && <a className="text-sm underline" href={release.url} target="_blank" rel="noreferrer">Auf GitHub ansehen</a>}</div>
+            {progress.length > 0 && <ol className="grid gap-2 rounded-md border p-3 text-sm" aria-label="Update-Fortschritt">{progress.map((step, index) => <li key={`${step.phase}-${index}`} className="flex items-center justify-between gap-3"><span>{step.phase}</span><span className="text-muted-foreground">{step.status === "succeeded" ? "Abgeschlossen" : step.status === "failed" ? "Fehlgeschlagen" : "Läuft"}</span></li>)}</ol>}
+            {data.reason && <p className="text-sm text-muted-foreground">{data.reason}</p>}
+          </> : <p className="text-sm text-muted-foreground">Es wurde kein kompatibles Release gemeldet. Ein Installationsbutton ist deshalb nicht verfügbar.</p>}
+          {message && <p className="text-sm text-destructive">{message}</p>}
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 function Providers() {
@@ -1595,8 +1664,11 @@ function AgentPolicy() {
 function Appearance() {
   const { data, error } = useAPI<any>("/api/v1/settings/appearance");
   const [message, setMessage] = useState("");
+  const [selectedLanguage, setSelectedLanguage] = useState<Language>("de");
   if (error) return <Failure />;
   if (!data) return <Loading />;
+  const currentLanguage = selectedLanguage === "de" && data.Language === "en" ? "en" : selectedLanguage;
+  const appearanceText = (key: string) => translate(currentLanguage, key);
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -1604,8 +1676,11 @@ function Appearance() {
         method: "POST",
         body: new FormData(e.target as HTMLFormElement),
       });
+      const nextLanguage = normalizeLanguage(new FormData(e.target as HTMLFormElement).get("language"));
+      setSelectedLanguage(nextLanguage);
+      window.dispatchEvent(new CustomEvent("shipyard:language-change", { detail: nextLanguage }));
       refreshData();
-      setMessage("Darstellung gespeichert.");
+      setMessage(translate(nextLanguage, "saved"));
     } catch (err) {
       setMessage(String(err));
     }
@@ -1613,15 +1688,32 @@ function Appearance() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Darstellung & Bedienung</CardTitle>
+        <CardTitle>{appearanceText("appearance")}</CardTitle>
         <CardDescription>
-          Lege Theme und sichtbare Tastaturhinweise fest.
+          {appearanceText("appearanceDescription")}
         </CardDescription>
       </CardHeader>
       <CardContent>
         <form className="grid gap-5" onSubmit={save}>
           <fieldset className="grid gap-2">
-            <legend className="font-medium">Darstellung</legend>
+            <legend className="font-medium">{appearanceText("language")}</legend>
+            <label className="grid gap-1 text-sm">
+              {appearanceText("languageDescription")}
+              <select name="language" value={currentLanguage} onChange={(event) => {
+                const next = normalizeLanguage(event.target.value);
+                setSelectedLanguage(next);
+                // Keep the entire React shell in sync before the preference
+                // request completes. The server remains authoritative after
+                // reload/login, while this event makes the switch immediate.
+                window.dispatchEvent(new CustomEvent("shipyard:language-change", { detail: next }));
+              }}>
+                <option value="de">{appearanceText("german")}</option>
+                <option value="en">{appearanceText("english")}</option>
+              </select>
+            </label>
+          </fieldset>
+          <fieldset className="grid gap-2">
+            <legend className="font-medium">{appearanceText("display")}</legend>
             {["system", "light", "dark"].map((value) => (
               <label key={value} className="flex items-center gap-2 text-sm">
                 <input
@@ -1631,15 +1723,15 @@ function Appearance() {
                   defaultChecked={data.Theme === value}
                 />
                 {value === "system"
-                  ? "Systemdarstellung verwenden"
+                  ? appearanceText("systemTheme")
                   : value === "light"
-                    ? "Hell"
-                    : "Dunkel"}
+                    ? appearanceText("light")
+                    : appearanceText("dark")}
               </label>
             ))}
           </fieldset>
           <fieldset className="grid gap-2">
-            <legend className="font-medium">Tastatur</legend>
+            <legend className="font-medium">{appearanceText("keyboard")}</legend>
             <label className="flex items-center gap-2 text-sm">
               <input
                 name="shortcut_hints"
@@ -1647,11 +1739,11 @@ function Appearance() {
                 value="true"
                 defaultChecked={data.ShortcutHints}
               />{" "}
-              Hinweise zu Shortcuts anzeigen
+              {appearanceText("shortcutHints")}
             </label>
           </fieldset>
           <Button className="w-fit" type="submit">
-            Einstellungen speichern
+            {appearanceText("save")}
           </Button>
           {message && (
             <p className="text-sm text-muted-foreground">{message}</p>
@@ -2909,6 +3001,105 @@ function BoardDetail({ id }: { id: string }) {
   );
 }
 
+
+type DiffFile = { path: string; additions: number; deletions: number; lines: string[] };
+
+function parseDiff(raw: string): DiffFile[] {
+  const files: DiffFile[] = [];
+  let current: DiffFile | undefined;
+  for (const line of raw.split("\n")) {
+    const header = line.match(/^diff --git a\/(.+) b\/(.+)$/);
+    if (header) {
+      current = { path: header[2], additions: 0, deletions: 0, lines: [] };
+      files.push(current);
+      continue;
+    }
+    if (!current || line.startsWith("--- ") || line.startsWith("+++ ") || line.startsWith("@@ ") || line.startsWith("index ") || line.startsWith("new file") || line.startsWith("old mode") || line.startsWith("new mode")) continue;
+    if (line.startsWith("+") && !line.startsWith("+++")) current.additions += 1;
+    if (line.startsWith("-") && !line.startsWith("---")) current.deletions += 1;
+    current.lines.push(line);
+  }
+  return files;
+}
+
+function changeState(change: any) {
+  if (!change) return "Kein Delivery-Run vorhanden.";
+  if (["queued", "running"].includes(change.Status)) return "Der Delivery-Run läuft noch. Änderungen können erst nach Abschluss geprüft werden.";
+  if (change.Status !== "succeeded") return "Der Delivery-Run ist fehlgeschlagen; seine Änderungen sind nicht übernehmbar.";
+  if (change.GateStatus !== "passed") return "Das Qualitäts-Gate ist nicht bestanden; die Änderungen bleiben geschützt.";
+  if (!change.DiffSummary) return "Dieser Run enthält keine übernehmbaren Änderungen.";
+  if (change.AppliedAt) return "Diese Änderungen wurden bereits übernommen.";
+  return "";
+}
+
+function DiffReview({ loading, files }: { loading: boolean; files: DiffFile[] }) {
+  if (loading) return <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">Diff wird geladen …</CardContent></Card>;
+  if (!files.length) return <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">Der Diff ist leer oder nicht mehr verfügbar.</CardContent></Card>;
+  return <div className="grid gap-4 lg:grid-cols-[15rem_minmax(0,1fr)]">
+    <Card className="h-fit"><CardHeader><CardTitle className="text-base">Dateien</CardTitle></CardHeader><CardContent className="p-2"><nav aria-label="Geänderte Dateien" className="grid gap-1">{files.map((file) => <a key={file.path} href={`#change-${file.path}`} className="rounded-md px-3 py-2 text-left text-sm hover:bg-muted"><span className="block truncate font-medium">{file.path}</span><span className="text-xs text-muted-foreground"><span className="text-emerald-700 dark:text-emerald-400">+{file.additions}</span> <span className="text-red-700 dark:text-red-400">−{file.deletions}</span></span></a>)}</nav></CardContent></Card>
+    <div className="min-w-0 space-y-3">{files.map((file, index) => <details key={file.path} id={`change-${file.path}`} open={index === 0} className="overflow-hidden rounded-lg border"><summary className="cursor-pointer list-inside bg-muted px-4 py-3 text-sm font-medium"><span>{file.path}</span><span className="ml-3 text-xs font-normal text-muted-foreground">{file.additions + file.deletions} Änderungen</span></summary><div className="overflow-auto bg-muted/40 font-mono text-xs leading-6">{file.lines.map((line, lineIndex) => <div key={lineIndex} className={`min-w-max px-4 ${line.startsWith("+") ? "bg-emerald-500/15 text-emerald-900 dark:text-emerald-200" : line.startsWith("-") ? "bg-red-500/15 text-red-900 dark:text-red-200" : "text-muted-foreground"}`}><span aria-hidden="true" className="mr-3 inline-block w-3 select-none text-center">{line[0] || " "}</span>{line.slice(1)}</div>)}</div></details>)}</div>
+  </div>;
+}
+
+function ChangesTab({ changes, onMessage }: { changes: any[]; onMessage: (message: string) => void }) {
+  const [rawDiff, setRawDiff] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [applyError, setApplyError] = useState("");
+  const candidate = changes.find((change) => change.Status === "succeeded" && change.GateStatus === "passed" && change.DiffSummary && !change.AppliedAt);
+  const latest = changes[0];
+  const selected = candidate || latest;
+  const candidateID = candidate?.ID;
+  const files = parseDiff(rawDiff);
+  const additions = files.reduce((sum, file) => sum + file.additions, 0);
+  const deletions = files.reduce((sum, file) => sum + file.deletions, 0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setRawDiff("");
+    if (!candidateID) return;
+    setLoading(true);
+    fetch(`/runs/${candidateID}/diff`, { credentials: "same-origin" })
+      .then((response) => response.ok ? response.text() : Promise.reject(new Error("Diff konnte nicht geladen werden.")))
+      .then((value) => { if (!cancelled) setRawDiff(value); })
+      .catch((error) => { if (!cancelled) onMessage(error.message); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [candidateID, onMessage]);
+
+  const apply = async () => {
+    if (!candidate) return;
+    setBusy(true);
+    setApplyError("");
+    try {
+      await mutation(`/runs/${candidate.ID}/apply`, { method: "POST" });
+      setConfirmOpen(false);
+      refreshData();
+    } catch (error) {
+      setApplyError(String(error));
+      setBusy(false);
+    }
+  };
+
+  if (!changes.length) return <Card><CardContent className="py-12 text-center"><p className="font-medium">Noch kein Delivery-Run vorhanden.</p><p className="mt-2 text-sm text-muted-foreground">Sobald ein Agent Änderungen erstellt, erscheinen sie hier.</p></CardContent></Card>;
+  return <div className="grid gap-4">
+    <Card>
+      <CardHeader className="flex flex-row items-start justify-between gap-4">
+        <div><CardTitle>Änderungen</CardTitle><CardDescription>{selected ? `Run ${selected.ID.slice(0, 8)} · ${selected.GateStatus === "passed" ? "Gate bestanden" : selected.Status}` : "Kein übernehmbarer Run"}</CardDescription></div>
+        <Button disabled={!candidate || loading || !rawDiff} onClick={() => setConfirmOpen(true)}>Änderungen übernehmen</Button>
+      </CardHeader>
+      <CardContent>
+        <p className={`text-sm ${candidate ? "text-muted-foreground" : "text-amber-700 dark:text-amber-300"}`} role="status">{candidate ? "Dieser Diff ist geprüft und kann in das zugewiesene Repository übernommen werden." : changeState(latest)}</p>
+        {applyError && <p className="mt-3 text-sm text-destructive" role="alert">Übernahme fehlgeschlagen: {applyError}</p>}
+        {candidate && <div className="mt-5 flex flex-wrap gap-3 border-t pt-4 text-sm"><span><strong>{files.length || "–"}</strong> Dateien</span><span className="text-emerald-700 dark:text-emerald-400">+{additions} hinzugefügt</span><span className="text-red-700 dark:text-red-400">−{deletions} gelöscht</span></div>}
+      </CardContent>
+    </Card>
+    {candidate && <DiffReview loading={loading} files={files} />}
+    <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}><DialogContent><DialogHeader><DialogTitle>Änderungen übernehmen?</DialogTitle><DialogDescription>Die geprüften Änderungen werden in das zugewiesene Repository integriert. Danach wechselt der Task nach Review.</DialogDescription></DialogHeader><div className="rounded-md bg-muted p-3 text-sm"><p><strong>{files.length}</strong> Dateien · <span className="text-emerald-700 dark:text-emerald-400">+{additions}</span> / <span className="text-red-700 dark:text-red-400">−{deletions}</span></p><ul className="mt-2 max-h-32 list-disc overflow-auto pl-5">{files.map((file) => <li key={file.path}>{file.path}</li>)}</ul></div><DialogFooter><Button variant="outline" onClick={() => setConfirmOpen(false)}>Abbrechen</Button><Button disabled={busy} onClick={apply}>Bestätigen und übernehmen</Button></DialogFooter></DialogContent></Dialog>
+  </div>;
+}
+
 function TaskDetail({ id }: { id: string }) {
   const { data, error } = useAPI<any>("/api/v1/tasks/" + id);
   const [comment, setComment] = useState("");
@@ -2985,7 +3176,13 @@ function TaskDetail({ id }: { id: string }) {
           {message && (
             <p className="mt-3 text-sm text-destructive">{message}</p>
           )}
-          <Card className="mt-6">
+          <Tabs defaultValue="conversation" className="mt-6">
+            <TabsList variant="line" aria-label="Task-Ansichten">
+              <TabsTrigger value="conversation">Conversation</TabsTrigger>
+              <TabsTrigger value="changes">Changes</TabsTrigger>
+            </TabsList>
+            <TabsContent value="conversation">
+          <Card>
             <CardHeader>
               <CardTitle>Kommentare & Entscheidungen</CardTitle>
             </CardHeader>
@@ -3110,6 +3307,11 @@ function TaskDetail({ id }: { id: string }) {
               </form>
             </CardContent>
           </Card>
+            </TabsContent>
+            <TabsContent value="changes">
+              <ChangesTab changes={data.Changes || []} onMessage={setMessage} />
+            </TabsContent>
+          </Tabs>
           <Card className="mt-4">
             <CardHeader>
               <CardTitle>Verlauf</CardTitle>
@@ -4341,7 +4543,11 @@ function RunConsole({ runID }: { runID: string }) {
   const [olderLogs, setOlderLogs] = useState<any[]>([]);
   const [olderAvailable, setOlderAvailable] = useState<boolean | undefined>();
   const [message, setMessage] = useState("");
-  const latestSequence = useRef(0);
+  const [newLogsAvailable, setNewLogsAvailable] = useState(false);
+  const logRef = useRef<HTMLPreElement>(null);
+  const followLogs = useRef(true);
+  const latestSequence = useRef<number | undefined>(undefined);
+  const olderScrollHeight = useRef<number | undefined>(undefined);
   const logs = data?.entries || [];
   const visibleLogs = [...olderLogs, ...logs];
   const canLoadOlder = olderAvailable ?? Boolean(data?.truncated);
@@ -4396,7 +4602,7 @@ function RunConsole({ runID }: { runID: string }) {
     };
     setData(undefined);
     setError(false);
-    latestSequence.current = 0;
+    latestSequence.current = undefined;
     void load(false);
     const refresh = (event: Event) => {
       const change = (event as CustomEvent<LiveChange>).detail ?? {};
@@ -4415,9 +4621,54 @@ function RunConsole({ runID }: { runID: string }) {
       window.removeEventListener("taskboard:data-change", refresh);
     };
   }, [runID]);
+
+  const isNearEnd = () => {
+    const log = logRef.current;
+    return !!log && log.scrollHeight - log.scrollTop - log.clientHeight <= 48;
+  };
+  const scrollToLatest = () => {
+    const log = logRef.current;
+    if (!log) return;
+    followLogs.current = true;
+    setNewLogsAvailable(false);
+    log.scrollTo({ top: log.scrollHeight, behavior: "auto" });
+  };
+
+  useEffect(() => {
+    if (!data) return;
+    const latest = Number(data.entries?.at(-1)?.Sequence ?? 0);
+    const log = logRef.current;
+    const shouldFollow = followLogs.current || !log || latestSequence.current === undefined;
+    const receivedNewLogs = latestSequence.current !== undefined && latest > latestSequence.current;
+
+    latestSequence.current = latest;
+    if (receivedNewLogs && !shouldFollow) setNewLogsAvailable(true);
+    if (shouldFollow) {
+      requestAnimationFrame(() => {
+        const current = logRef.current;
+        if (current) current.scrollTop = current.scrollHeight;
+      });
+    }
+  }, [data]);
+
+  useEffect(() => {
+    const log = logRef.current;
+    const previousHeight = olderScrollHeight.current;
+    if (!log || previousHeight === undefined) return;
+    log.scrollTop += log.scrollHeight - previousHeight;
+    olderScrollHeight.current = undefined;
+  }, [olderLogs]);
+
+  const handleLogScroll = () => {
+    const nearEnd = isNearEnd();
+    followLogs.current = nearEnd;
+    if (nearEnd) setNewLogsAvailable(false);
+  };
   const loadOlderLogs = async () => {
     const before = visibleLogs[0]?.Sequence;
     if (!before) return;
+    const log = logRef.current;
+    olderScrollHeight.current = log?.scrollHeight ?? 0;
     try {
       const response = await fetch(`/api/v1/runs/${runID}/logs?before=${encodeURIComponent(before)}`, { credentials: "same-origin" });
       if (!response.ok) throw new Error(await response.text());
@@ -4425,6 +4676,7 @@ function RunConsole({ runID }: { runID: string }) {
       setOlderLogs((entries) => [...(page.entries || []), ...entries]);
       setOlderAvailable(Boolean(page.truncated));
     } catch (err) {
+      olderScrollHeight.current = undefined;
       setMessage(String(err));
     }
   };
@@ -4438,9 +4690,25 @@ function RunConsole({ runID }: { runID: string }) {
         {error ? (
           <p className="text-sm text-destructive">Protokoll konnte nicht geladen werden.</p>
         ) : (
-          <pre className="max-h-[34rem] overflow-auto whitespace-pre-wrap rounded-lg bg-muted p-3 text-xs">
+          <div className="relative">
+            <pre
+              ref={logRef}
+              onScroll={handleLogScroll}
+              aria-label="Run-Protokoll"
+              className="max-h-[34rem] overflow-auto whitespace-pre-wrap rounded-lg bg-muted p-3 text-xs"
+            >
             {visibleLogs.map((log: any) => `[${log.Sequence}] ${log.Level}: ${log.Message}`).join("\n") || "Noch keine Protokolleinträge."}
-          </pre>
+            </pre>
+            {newLogsAvailable && (
+              <Button
+                className="absolute bottom-3 left-1/2 -translate-x-1/2 shadow-md"
+                size="sm"
+                onClick={scrollToLatest}
+              >
+                Neue Einträge anzeigen
+              </Button>
+            )}
+          </div>
         )}
         {message && <p className="mt-3 text-sm text-destructive">{message}</p>}
         {canLoadOlder && visibleLogs.length > 0 && (
@@ -4460,9 +4728,11 @@ function RunDetail({ id }: { id: string }) {
   const [trace, setTrace] = useState<any>();
   const [feedback, setFeedback] = useState("");
   const [message, setMessage] = useState("");
+  const [confirmApply, setConfirmApply] = useState(false);
   if (error) return <Failure />;
   if (!data) return <Loading />;
   const terminal = !["running", "queued"].includes(data.run.Status);
+  const money = (microusd: number) => new Intl.NumberFormat("de-DE", { style: "currency", currency: "USD" }).format(microusd / 1e6);
   const action = async (path: string, body?: FormData) => {
     setBusy(true);
     try {
@@ -4549,6 +4819,18 @@ function RunDetail({ id }: { id: string }) {
             </CardContent>
           </Card>
         </section>
+        <Card className="mt-6">
+          <CardHeader>
+            <CardTitle>Usage & Kosten</CardTitle>
+            <CardDescription>{data.usage?.Provider || "unbekannter Provider"} · {data.usage?.Model || "unbekanntes Modell"}</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-2 text-sm sm:grid-cols-2">
+            {([['Input', data.usage?.InputTokens], ['Output', data.usage?.OutputTokens], ['Cache-Input', data.usage?.CachedInputTokens], ['Cache-Schreiben', data.usage?.CacheWriteTokens], ['Reasoning', data.usage?.ReasoningTokens], ['Gesamt', data.usage?.TotalTokens]] as [string, number | null | undefined][]).map(([label, value]) => <p key={label}><span className="text-muted-foreground">{label}: </span>{value == null ? 'unbekannt' : value.toLocaleString('de-DE')}</p>)}
+            <p><span className="text-muted-foreground">Kostenquelle: </span>{data.usage?.CostSource === 'reported' ? 'Provider gemeldet' : data.usage?.CostSource === 'estimated' ? 'Geschätzt' : data.usage?.CostSource === 'included' ? 'Inklusive' : 'Unbekannt'}</p>
+            <p><span className="text-muted-foreground">Kosten: </span>{data.usage?.CalculatedCostMicrousd == null ? 'nicht bestimmbar' : money(data.usage.CalculatedCostMicrousd)}</p>
+            <p className="sm:col-span-2 text-xs text-muted-foreground">Status: {data.usage?.Status || 'unknown'} · Preisversion: {data.usage?.PriceVersion || 'keine'}{data.usage?.CostCalculatedAt ? ` · ${new Date(data.usage.CostCalculatedAt).toLocaleString('de-DE')}` : ''}</p>
+          </CardContent>
+        </Card>
         {diff && (
           <Card className="mt-6">
             <CardHeader>
@@ -4607,7 +4889,7 @@ function RunDetail({ id }: { id: string }) {
               data.delivery.DiffSummary &&
               data.delivery.GateStatus === "passed" && (
                 <>
-                  <Button disabled={busy} onClick={() => action("/apply")}>
+                  <Button disabled={busy} onClick={() => setConfirmApply(true)}>
                     Änderungen übernehmen
                   </Button>
                   <Button
@@ -4638,6 +4920,12 @@ function RunDetail({ id }: { id: string }) {
               )}
           </CardContent>
         </Card>
+        <Dialog open={confirmApply} onOpenChange={setConfirmApply}>
+          <DialogContent>
+            <DialogHeader><DialogTitle>Änderungen übernehmen?</DialogTitle><DialogDescription>Die geprüften Änderungen werden in das zugewiesene Repository integriert und der Task anschließend zur Review weitergegeben.</DialogDescription></DialogHeader>
+            <DialogFooter><Button variant="outline" onClick={() => setConfirmApply(false)}>Abbrechen</Button><Button disabled={busy} onClick={() => { setConfirmApply(false); void action("/apply"); }}>Bestätigen und übernehmen</Button></DialogFooter>
+          </DialogContent>
+        </Dialog>
         {terminal && !data.delivery.AppliedAt && (
           <Card>
             <CardHeader>

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="de">
+<html lang="{{.Preferences.Language}}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -17,8 +17,8 @@
     <main class="dashboard cockpit management-page">
       <header class="cockpit-header">
         <div>
-          <p class="section-kicker">Einstellungen</p>
-          <h1>Erscheinungsbild &amp; Bedienung</h1>
+          <p class="section-kicker">{{tr .Preferences.Language "settings.title" "Einstellungen"}}</p>
+          <h1>{{tr .Preferences.Language "settings.appearance" "Erscheinungsbild & Bedienung"}}</h1>
           <p>Lege fest, wie Shipyard dargestellt wird und ob Tastaturhinweise sichtbar sind.</p>
         </div>
       </header>
@@ -32,6 +32,15 @@
       <article>
         <form method="post" action="/settings/appearance">
           <fieldset>
+            <legend>{{tr .Preferences.Language "settings.language" "Sprache"}}</legend>
+            <label for="language">{{tr .Preferences.Language "settings.uiLanguage" "Oberflächensprache"}}</label>
+            <select id="language" name="language">
+              <option value="de"{{if eq .Preferences.Language "de"}} selected{{end}}>Deutsch</option>
+              <option value="en"{{if eq .Preferences.Language "en"}} selected{{end}}>English</option>
+            </select>
+            <small>{{tr .Preferences.Language "settings.accountSaved" "Die Auswahl wird für dein Benutzerkonto gespeichert."}}</small>
+          </fieldset>
+          <fieldset>
             <legend>Darstellung</legend>
             <label><input type="radio" name="theme" value="system"{{if eq .Preferences.Theme "system"}} checked{{end}}> Systemdarstellung verwenden</label>
             <label><input type="radio" name="theme" value="light"{{if eq .Preferences.Theme "light"}} checked{{end}}> Hell</label>
@@ -42,7 +51,7 @@
             <label><input type="checkbox" name="shortcut_hints" value="true"{{if .Preferences.ShortcutHints}} checked{{end}}> Hinweise zu Shortcuts anzeigen</label>
             <small>Tab, Enter, Leertaste und die Sidebar-Pfeiltasten bleiben immer verfügbar.</small>
           </fieldset>
-          <footer><button>Einstellungen speichern</button></footer>
+          <footer><button>{{tr .Preferences.Language "settings.save" "Einstellungen speichern"}}</button></footer>
         </form>
       </article>
     </main>

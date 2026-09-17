@@ -20,16 +20,22 @@ import (
 	"syscall"
 	"taskboard/internal/domain"
 	"taskboard/internal/store"
+	"taskboard/internal/usage"
 	"time"
 )
 
 type Worker struct {
 	Store   *store.Store
 	cancels sync.Map
+	starts  sync.Map
+
+	// executeRun is injectable only for orchestration tests. Production workers
+	// leave it nil and use the real provider execution path below.
+	executeRun func(context.Context, domain.AgentRun)
 }
 
 const agentRunTimeout = 20 * time.Minute
-const maxAutomationEventAttempts = 5
+const defaultMaxAutomationEventAttempts = 3
 const maxWebhookDeliveryAttempts = 5
 const worktreeRetention = 7 * 24 * time.Hour
 const worktreeCleanupInterval = 15 * time.Minute
@@ -43,7 +49,143 @@ var taskCommentFence = regexp.MustCompile("(?s)```taskboard-comment\\s*(.*?)\\s*
 var transitionFence = regexp.MustCompile("(?s)```taskboard-transition\\s*(\\{.*?\\})\\s*```")
 var taskUpdateFence = regexp.MustCompile("(?s)```taskboard-update\\s*(\\{.*?\\})\\s*```")
 var taskTargetsFence = regexp.MustCompile("(?s)```taskboard-targets\\s*(\\{.*?\\})\\s*```")
+var selfReviewFence = regexp.MustCompile("(?s)```taskboard-self-review\\s*(\\{.*?\\})\\s*```")
 var cliTokenUsage = regexp.MustCompile(`(?i)\btokens\s+used\s*[:\s]+([0-9][0-9,._ ]*)`)
+
+type taskboardSelfReview struct {
+	Status    string           `json:"status"`
+	Checklist []selfReviewItem `json:"checklist"`
+	Tests     json.RawMessage  `json:"tests"`
+	OpenRisks json.RawMessage  `json:"open_risks"`
+}
+
+type selfReviewItem struct {
+	Check  string `json:"check"`
+	Result string `json:"result"`
+}
+
+func requestedSelfReview(logs []domain.RunLog) (taskboardSelfReview, error) {
+	matches := selfReviewFence.FindAllStringSubmatch(joinRunLogs(logs), -1)
+	if len(matches) != 1 {
+		return taskboardSelfReview{}, errors.New("genau ein taskboard-self-review-Block ist erforderlich")
+	}
+	var review taskboardSelfReview
+	if err := json.Unmarshal([]byte(matches[0][1]), &review); err != nil {
+		return taskboardSelfReview{}, errors.New("taskboard-self-review ist kein gültiges JSON")
+	}
+	if strings.ToLower(strings.TrimSpace(review.Status)) != "passed" {
+		return review, errors.New("taskboard-self-review muss status=passed enthalten")
+	}
+	requiredChecks := map[string]bool{
+		"scope/akzeptanz":              false,
+		"diff/secrets":                 false,
+		"tests/fehler":                 false,
+		"sicherheits-/betriebsrisiken": false,
+		"rückwärtskompatibilität":      false,
+	}
+	if len(review.Checklist) != len(requiredChecks) {
+		return review, errors.New("taskboard-self-review benötigt genau die fünf Pflicht-Checklistenpunkte")
+	}
+	for _, item := range review.Checklist {
+		check := strings.ToLower(strings.TrimSpace(item.Check))
+		if strings.TrimSpace(item.Check) == "" || strings.TrimSpace(item.Result) == "" {
+			return review, errors.New("taskboard-self-review enthält einen unvollständigen Checklistenpunkt")
+		}
+		result := strings.ToLower(strings.TrimSpace(item.Result))
+		if !validSelfReviewResult(result) {
+			return review, fmt.Errorf("taskboard-self-review enthält keinen bestandenen Checklistenpunkt %q", item.Check)
+		}
+		if _, required := requiredChecks[check]; !required {
+			return review, fmt.Errorf("taskboard-self-review enthält keine gültige Pflichtkategorie %q", item.Check)
+		}
+		if requiredChecks[check] {
+			return review, fmt.Errorf("taskboard-self-review enthält die Pflichtkategorie %q doppelt", item.Check)
+		}
+		requiredChecks[check] = true
+	}
+	for check, present := range requiredChecks {
+		if !present {
+			return review, fmt.Errorf("taskboard-self-review fehlt die Pflichtkategorie %q", check)
+		}
+	}
+	if len(review.Tests) == 0 || string(review.Tests) == "null" || len(review.OpenRisks) == 0 || string(review.OpenRisks) == "null" {
+		return review, errors.New("taskboard-self-review benötigt Testnachweise und offene Risiken")
+	}
+	return review, nil
+}
+
+func validSelfReviewResult(result string) bool {
+	switch result {
+	case "ok", "passed", "pass", "bestanden", "erfüllt", "erfuellt", "geprüft", "geprueft":
+		return true
+	default:
+		return false
+	}
+}
+
+func structuredControlLogs(provider string, logs []domain.RunLog, structuredOutput string) []domain.RunLog {
+	if provider != "codex" {
+		return logs
+	}
+	if strings.TrimSpace(structuredOutput) == "" {
+		return nil
+	}
+	return []domain.RunLog{{Message: structuredOutput}}
+}
+
+func controlLogsForAgent(agentName string, logs []domain.RunLog, structuredOutput string) []domain.RunLog {
+	if requiresSelfReview(agentName) {
+		// The provider name is intentionally forced to the structured path here:
+		// every delivery provider must use its isolated completion output, while
+		// triage agents retain terminal-driven transition compatibility.
+		return structuredControlLogs("codex", logs, structuredOutput)
+	}
+	return logs
+}
+
+func validateSelfReview(agentName string, logs []domain.RunLog, logErr error) error {
+	if !requiresSelfReview(agentName) {
+		return nil
+	}
+	if logErr != nil {
+		return fmt.Errorf("Abschlussprotokoll konnte nicht gelesen werden: %w", logErr)
+	}
+	_, err := requestedSelfReview(logs)
+	return err
+}
+
+func maxAutomationEventAttempts() int {
+	value, err := strconv.Atoi(strings.TrimSpace(os.Getenv("SHIPYARD_MAX_AUTOMATION_EVENT_ATTEMPTS")))
+	if err != nil || value < 1 {
+		return defaultMaxAutomationEventAttempts
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
+func requiresSelfReview(agentName string) bool {
+	return !strings.EqualFold(strings.TrimSpace(agentName), "triage agent") && !strings.HasPrefix(strings.ToLower(strings.TrimSpace(agentName)), "triage agent ")
+}
+
+func int64Ptr(value int64) *int64 { return &value }
+
+func measuredInt64Ptr(value int) *int64 {
+	if value <= 0 {
+		return nil
+	}
+	v := int64(value)
+	return &v
+}
+
+func measuredUsagePointer(value int, known bool) *int64 {
+	if !known {
+		return nil
+	}
+	v := int64(value)
+	return &v
+}
 
 // projectSyncLocks serializes a managed source checkout. Individual agent runs
 // never share a worktree, but they intentionally share this clean, read-only
@@ -76,8 +218,9 @@ type interactionRequest struct {
 // access: the store still verifies that the requested transition exists on the
 // task's board before moving anything.
 type transitionRequest struct {
-	Target  string `json:"target"`
-	Comment string `json:"comment"`
+	TargetColumnID string `json:"target_column_id"`
+	Target         string `json:"target,omitempty"`
+	Comment        string `json:"comment"`
 }
 
 // Triage owns task wording and repository routing. These narrow controls keep
@@ -122,11 +265,23 @@ func isQAColumn(task domain.Task) bool {
 
 func targetColumnHasType(columns []domain.Column, name, typeName string) bool {
 	for _, column := range columns {
-		if strings.EqualFold(strings.TrimSpace(column.Name), strings.TrimSpace(name)) && column.Type == typeName {
+		if (column.ID == strings.TrimSpace(name) || strings.EqualFold(strings.TrimSpace(column.Name), strings.TrimSpace(name))) && column.Type == typeName {
 			return true
 		}
 	}
 	return false
+}
+
+func requestedRouteTargetsColumnType(columns []domain.Column, route transitionRequest, typeName string) bool {
+	if route.TargetColumnID != "" {
+		for _, column := range columns {
+			if column.ID == route.TargetColumnID && column.Type == typeName {
+				return true
+			}
+		}
+		return false
+	}
+	return targetColumnHasType(columns, route.Target, typeName)
 }
 
 func withoutReleaseInteraction(interactions []interactionRequest) []interactionRequest {
@@ -147,14 +302,26 @@ func requestedTransition(logs []domain.RunLog) (transitionRequest, bool) {
 		if json.Unmarshal([]byte(match[1]), &request) != nil {
 			continue
 		}
+		request.TargetColumnID = strings.TrimSpace(request.TargetColumnID)
 		request.Target = strings.TrimSpace(request.Target)
 		request.Comment = strings.TrimSpace(request.Comment)
-		if request.Target == "" || found { // one unambiguous routing decision per run
+		if (request.TargetColumnID == "" && request.Target == "") || found { // one unambiguous routing decision per run
 			continue
 		}
 		result, found = request, true
 	}
 	return result, found
+}
+
+// suppressAutomationOutcome prevents a rule's configured success transition
+// from becoming an implicit fallback for an explicit agent transition. This
+// is important for rejected and self-transitions: both must leave the task in
+// its current column instead of silently applying a different workflow move.
+func suppressAutomationOutcome(run domain.AgentRun, requested, awaitingDecision bool) domain.AgentRun {
+	if requested && !awaitingDecision {
+		run.RuleID = ""
+	}
+	return run
 }
 
 func requestedTaskUpdate(logs []domain.RunLog) (taskUpdateRequest, bool) {
@@ -291,6 +458,64 @@ func reportedCLITokenUsage(logs []domain.RunLog) (int, bool) {
 	return usage, found
 }
 
+type cliUsageReport struct {
+	APICalls           *int64
+	InputTokens        *int64
+	OutputTokens       *int64
+	CachedInputTokens  *int64
+	CacheWriteTokens   *int64
+	ReasoningTokens    *int64
+	TotalTokens        *int64
+	NativeCostMicrousd *int64
+	ServiceTier        string
+}
+
+// reportedCLIUsage accepts the small, machine-readable usage shape emitted by
+// CLI adapters. It deliberately does not inspect arbitrary terminal text;
+// only JSON objects with usage fields are telemetry candidates.
+func reportedCLIUsage(logs []domain.RunLog) (cliUsageReport, bool) {
+	var result cliUsageReport
+	found := false
+	for _, entry := range logs {
+		for _, line := range strings.Split(entry.Message, "\n") {
+			var envelope struct {
+				Type  string          `json:"type"`
+				Usage json.RawMessage `json:"usage"`
+			}
+			if json.Unmarshal([]byte(strings.TrimSpace(line)), &envelope) != nil || len(envelope.Usage) == 0 {
+				continue
+			}
+			var usage struct {
+				APICalls           *int64 `json:"api_calls"`
+				InputTokens        *int64 `json:"input_tokens"`
+				OutputTokens       *int64 `json:"output_tokens"`
+				CachedInputTokens  *int64 `json:"cached_input_tokens"`
+				CacheWriteTokens   *int64 `json:"cache_write_tokens"`
+				ReasoningTokens    *int64 `json:"reasoning_tokens"`
+				TotalTokens        *int64 `json:"total_tokens"`
+				NativeCostMicrousd *int64 `json:"native_cost_microusd"`
+				CostMicrousd       *int64 `json:"cost_microusd"`
+				ServiceTier        string `json:"service_tier"`
+			}
+			if json.Unmarshal(envelope.Usage, &usage) != nil {
+				continue
+			}
+			if usage.NativeCostMicrousd == nil {
+				usage.NativeCostMicrousd = usage.CostMicrousd
+			}
+			result = cliUsageReport{usage.APICalls, usage.InputTokens, usage.OutputTokens, usage.CachedInputTokens, usage.CacheWriteTokens, usage.ReasoningTokens, usage.TotalTokens, usage.NativeCostMicrousd, usage.ServiceTier}
+			found = true
+		}
+	}
+	if !found {
+		if total, ok := reportedCLITokenUsage(logs); ok {
+			result.TotalTokens = int64Ptr(int64(total))
+			found = true
+		}
+	}
+	return result, found
+}
+
 func interactionFingerprint(key string, fields []interactionField) string {
 	raw, _ := json.Marshal(struct {
 		Key    string             `json:"key"`
@@ -330,7 +555,7 @@ func formatTaskContext(task domain.Task, board domain.Board, projects []domain.P
 	if len(projects) > 0 {
 		b.WriteString("\nProjektziele:\n")
 		for _, project := range projects {
-			fmt.Fprintf(&b, "- %s | %s | Branch: %s\n", project.Name, project.RepositoryURL, project.DefaultBranch)
+			fmt.Fprintf(&b, "- %s | %s | Branch: %s | Projekt-ID: %s\n", project.Name, project.RepositoryURL, project.DefaultBranch, project.ID)
 		}
 	}
 	if len(groups) > 0 {
@@ -362,6 +587,67 @@ func formatTaskContext(task domain.Task, board domain.Board, projects []domain.P
 		}
 	}
 	b.WriteString("--- ENDE AUFGABENKONTEXT ---")
+	return b.String()
+}
+
+// formatRegisteredProjects gives Triage a lossless catalogue. Repository URLs
+// are descriptive metadata; project_id is the only value valid in
+// taskboard-targets.project_ids.
+func formatRegisteredProjects(projects []domain.Project) string {
+	if len(projects) == 0 {
+		return ""
+	}
+	type boardRef struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	type projectRef struct {
+		ProjectID     string     `json:"project_id"`
+		Name          string     `json:"name"`
+		RepositoryURL string     `json:"repository_url"`
+		DefaultBranch string     `json:"default_branch"`
+		Boards        []boardRef `json:"boards"`
+	}
+	refs := make([]projectRef, 0, len(projects))
+	for _, project := range projects {
+		ref := projectRef{ProjectID: project.ID, Name: project.Name, RepositoryURL: project.RepositoryURL, DefaultBranch: project.DefaultBranch}
+		for _, board := range project.Boards {
+			ref.Boards = append(ref.Boards, boardRef{ID: board.ID, Name: board.Name})
+		}
+		refs = append(refs, ref)
+	}
+	encoded, err := json.Marshal(refs)
+	if err != nil {
+		return ""
+	}
+	return "\n\nRegistrierte Projekte (maschinenlesbarer Kontext):\n" + string(encoded) +
+		"\nVerwende für taskboard-targets.project_ids ausschließlich project_id-Werte im kanonischen UUID-Format. Beispiel: {\"project_ids\":[\"123e4567-e89b-12d3-a456-426614174000\"],\"group_ids\":[]}\n"
+}
+
+func requestedRouteIsCurrent(task domain.Task, route transitionRequest) bool {
+	if route.TargetColumnID != "" {
+		return route.TargetColumnID == task.ColumnID
+	}
+	return strings.EqualFold(strings.TrimSpace(route.Target), strings.TrimSpace(task.ColumnName))
+}
+
+func requestedRouteIsCurrentAfterLiveReload(task domain.Task, route transitionRequest, liveStatusVerified bool) bool {
+	return liveStatusVerified && requestedRouteIsCurrent(task, route)
+}
+
+func formatAllowedTransitions(transitions []domain.Transition, columns []domain.Column) string {
+	if len(transitions) == 0 {
+		return ""
+	}
+	labels := make(map[string]string, len(columns))
+	for _, column := range columns {
+		labels[column.ID] = column.Name
+	}
+	var b strings.Builder
+	b.WriteString("\n\nErlaubte Workflow-Transitionen (nur strukturierte ID-/Label-Paare anfordern):\n")
+	for _, transition := range transitions {
+		fmt.Fprintf(&b, "- {\"target_column_id\":\"%s\",\"label\":%q}\n", transition.ToColumnID, labels[transition.ToColumnID])
+	}
 	return b.String()
 }
 
@@ -405,19 +691,165 @@ func lockRepository(ctx context.Context, source string) (func(), error) {
 // a Git commit and the following database write. If a database connection
 // fails after the commit, retrying a delivery records that existing commit
 // instead of trying to apply the same worktree diff a second time.
-func runCommitExists(ctx context.Context, source, runID string) (bool, error) {
-	message := "taskboard: accept run " + runID
-	out, err := exec.CommandContext(ctx, "git", "-C", source, "log", "--all", "--format=%B", "--fixed-strings", "--grep="+message, "-n", "1").Output()
-	if err != nil {
-		return false, err
+func runCommitExists(ctx context.Context, source, commitSHA string) (bool, error) {
+	if strings.TrimSpace(commitSHA) == "" {
+		return false, nil
 	}
-	return strings.TrimSpace(string(out)) == message, nil
+	if _, err := gitOutput(ctx, source, "merge-base", "--is-ancestor", commitSHA, "HEAD"); err != nil {
+		return false, nil
+	}
+	actual, err := gitOutput(ctx, source, "rev-parse", commitSHA+"^{commit}")
+	return err == nil && actual == commitSHA, nil
+}
+
+// findUnpersistedRunCommit recovers the only unavoidable failure window in
+// Apply: Git may have created the acceptance commit while the following DB
+// write failed. A subject marker alone is deliberately insufficient here.
+// The candidate must be an ancestor of the managed HEAD and its complete
+// binary diff must equal the still-present isolated run diff.
+func findUnpersistedRunCommit(ctx context.Context, source, worktree, runID string) (string, error) {
+	expected, err := exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--binary", "HEAD").Output()
+	if err != nil {
+		return "", err
+	}
+	if len(expected) == 0 {
+		return "", nil
+	}
+	logOutput, err := gitOutput(ctx, source, "log", "--format=%H%x00%s", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	marker := "taskboard: accept run " + runID
+	for _, entry := range strings.Split(logOutput, "\n") {
+		parts := strings.SplitN(entry, "\x00", 2)
+		if len(parts) != 2 || parts[1] != marker {
+			continue
+		}
+		candidateDiff, diffErr := exec.CommandContext(ctx, "git", "-C", source, "diff", "--binary", parts[0]+"^", parts[0]).Output()
+		if diffErr == nil && string(candidateDiff) == string(expected) {
+			return parts[0], nil
+		}
+	}
+	return "", nil
+}
+
+func gitOutput(ctx context.Context, directory string, args ...string) (string, error) {
+	command := exec.CommandContext(ctx, "git", append([]string{"-C", directory}, args...)...)
+	out, err := command.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+func managedCheckoutProblem(kind, files, detail string) error {
+	message := "Projekt-Checkout ist " + kind + "."
+	if files != "" {
+		message += " Betroffene Dateien:\n" + files
+	}
+	if detail != "" {
+		message += "\nUrsache: " + detail
+	}
+	message += "\nSichere nächste Schritte: Änderungen prüfen und manuell sichern oder bereinigen; danach den Run erneut starten. Es wurde nichts zurückgesetzt, überschrieben oder gelöscht."
+	return errors.New(message)
+}
+
+func syncManagedCheckout(ctx context.Context, path, branch string, acceptedCommitSHAs ...string) error {
+	status, err := gitOutput(ctx, path, "status", "--porcelain")
+	if err != nil {
+		return fmt.Errorf("Git-Status konnte nicht gelesen werden: %w", err)
+	}
+	if status != "" {
+		return managedCheckoutProblem("nicht sauber", status, "lokale oder manuelle Änderungen sind vorhanden")
+	}
+	if _, err := gitOutput(ctx, path, "fetch", "--no-tags", "origin", branch); err != nil {
+		return fmt.Errorf("Remote-Stand konnte nicht sicher gelesen werden: %w", err)
+	}
+	remoteRef := "origin/" + branch
+	if _, err := gitOutput(ctx, path, "rev-parse", "--verify", remoteRef); err != nil {
+		return fmt.Errorf("Remote-Branch %s ist nach dem Fetch nicht verfügbar: %w", remoteRef, err)
+	}
+	if _, err := gitOutput(ctx, path, "merge-base", "--is-ancestor", "HEAD", remoteRef); err == nil {
+		// The managed checkout is equal to or behind origin. A fast-forward is
+		// the only update permitted here; it cannot overwrite local commits.
+		if _, err := gitOutput(ctx, path, "merge", "--ff-only", remoteRef); err != nil {
+			return fmt.Errorf("Checkout konnte nicht per Fast-Forward synchronisiert werden: %w", err)
+		}
+		return nil
+	}
+	if _, err := gitOutput(ctx, path, "merge-base", "--is-ancestor", remoteRef, "HEAD"); err == nil {
+		// The local branch contains accepted commits not present remotely. Keep
+		// that exact accepted HEAD for follow-up runs; never pull/rebase it.
+		accepted := make(map[string]bool, len(acceptedCommitSHAs))
+		for _, sha := range acceptedCommitSHAs {
+			if resolved, resolveErr := gitOutput(ctx, path, "rev-parse", sha+"^{commit}"); resolveErr == nil {
+				accepted[resolved] = true
+			}
+		}
+		localSHAs, logErr := gitOutput(ctx, path, "log", "--format=%H", remoteRef+"..HEAD")
+		if logErr != nil {
+			return fmt.Errorf("lokale Checkout-Commits konnten nicht geprüft werden: %w", logErr)
+		}
+		for _, sha := range strings.Split(localSHAs, "\n") {
+			if strings.TrimSpace(sha) != "" && !accepted[strings.TrimSpace(sha)] {
+				files, _ := gitOutput(ctx, path, "diff", "--name-only", remoteRef+"..HEAD")
+				return managedCheckoutProblem("nicht als akzeptierte Delivery verifiziert", files, "lokaler Commit ist in keinem akzeptierten Run verzeichnet")
+			}
+		}
+		return nil
+	}
+	files, _ := gitOutput(ctx, path, "diff", "--name-only", "HEAD..."+remoteRef)
+	return managedCheckoutProblem("divergent", files, "lokaler HEAD und origin/"+branch+" haben keinen gemeinsamen geradlinigen Stand")
+}
+
+// applyRunPatch applies exactly one isolated run to the managed checkout. The
+// caller must hold the repository apply lock. Keeping this boundary separate
+// makes the destructive-safety and conflict behavior testable with real Git
+// repositories without requiring a database-backed Worker.
+func applyRunPatch(ctx context.Context, source, worktree, runID string) (string, error) {
+	if dirty, checkErr := exec.CommandContext(ctx, "git", "-C", source, "status", "--porcelain").Output(); checkErr != nil {
+		return "", checkErr
+	} else if strings.TrimSpace(string(dirty)) != "" {
+		return "", managedCheckoutProblem("nicht sauber", strings.TrimSpace(string(dirty)), "fremde oder manuelle Änderungen würden von dieser Übernahme berührt")
+	}
+	// --binary makes newly created binary files representable in the patch.
+	diff, diffErr := exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--binary", "HEAD").Output()
+	if diffErr != nil {
+		return "", diffErr
+	}
+	if strings.TrimSpace(string(diff)) == "" {
+		return "", errors.New("dieser Run enthält keine übernehmbaren Änderungen")
+	}
+	// Do not combine --check and --3way: Git may write conflict markers even
+	// while checking a patch. A plain check is intentionally non-mutating; the
+	// subsequent 3-way apply is allowed only after this preflight succeeds.
+	check := exec.CommandContext(ctx, "git", "-C", source, "apply", "--check", "-")
+	check.Stdin = strings.NewReader(string(diff))
+	if out, checkErr := check.CombinedOutput(); checkErr != nil {
+		files, _ := gitOutput(ctx, source, "diff", "--name-only", "HEAD")
+		return "", managedCheckoutProblem("in einem Drei-Wege-Konflikt nicht konfliktfrei übernehmbar", files, strings.TrimSpace(string(out)))
+	}
+	apply := exec.CommandContext(ctx, "git", "-C", source, "apply", "--3way", "-")
+	apply.Stdin = strings.NewReader(string(diff))
+	if out, applyErr := apply.CombinedOutput(); applyErr != nil {
+		files, _ := gitOutput(ctx, source, "diff", "--name-only", "HEAD")
+		return "", managedCheckoutProblem("in einem Drei-Wege-Konflikt", files, strings.TrimSpace(string(out)))
+	}
+	if out, addErr := exec.CommandContext(ctx, "git", "-C", source, "add", "-A").CombinedOutput(); addErr != nil {
+		return "", errors.New(strings.TrimSpace(string(out)))
+	}
+	commit := exec.CommandContext(ctx, "git", "-C", source, "-c", "user.name=Taskboard", "-c", "user.email=taskboard@local", "commit", "-m", "taskboard: accept run "+runID)
+	if out, commitErr := commit.CombinedOutput(); commitErr != nil {
+		return "", errors.New(strings.TrimSpace(string(out)))
+	}
+	commitSHA, err := gitOutput(ctx, source, "rev-parse", "HEAD")
+	if err != nil {
+		return "", fmt.Errorf("Übernahme-Commit konnte nicht verifiziert werden: %w", err)
+	}
+	return commitSHA, nil
 }
 
 // runInTmux keeps a real interactive terminal for each CLI provider while
 // mirroring every pane byte into the durable run log. The separate logfile
 // avoids tmux's finite scrollback being the source of truth.
-func (w *Worker) runInTmux(ctx context.Context, runID, directory, command string, args []string, stdin string, env []string) (int, error) {
+func (w *Worker) runInTmux(ctx context.Context, runID, directory, command string, args []string, stdin, trustedOutputPath string, env []string) (int, error) {
 	root := "/home/agent/.taskboard-run-logs"
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return 0, err
@@ -445,7 +877,7 @@ func (w *Worker) runInTmux(ctx context.Context, runID, directory, command string
 			return 0, err
 		}
 	}
-	const runner = "#!/usr/bin/env bash\nset +e\nsleep 0.1\nmapfile -d '' -t argv < \"$1\"\nif [[ -n \"$3\" ]]; then\n  \"${argv[@]}\" < \"$3\"\nelse\n  \"${argv[@]}\"\nfi\ncode=$?\nprintf '%s' \"$code\" > \"$2\"\nexit \"$code\"\n"
+	const runner = "#!/usr/bin/env bash\nset +e\nsleep 0.1\nmapfile -d '' -t argv < \"$1\"\nif [[ -n \"$3\" && -n \"$4\" ]]; then\n  \"${argv[@]}\" < \"$3\" > \"$4\"\nelif [[ -n \"$3\" ]]; then\n  \"${argv[@]}\" < \"$3\"\nelse\n  \"${argv[@]}\"\nfi\ncode=$?\nprintf '%s' \"$code\" > \"$2\"\nexit \"$code\"\n"
 	if err := os.WriteFile(runnerPath, []byte(runner), 0o700); err != nil {
 		return 0, err
 	}
@@ -457,7 +889,8 @@ func (w *Worker) runInTmux(ctx context.Context, runID, directory, command string
 	if stdin != "" {
 		stdinArgument = stdinPath
 	}
-	startCommand := "bash " + shellQuote(runnerPath) + " " + shellQuote(argsPath) + " " + shellQuote(exitPath) + " " + shellQuote(stdinArgument)
+	outputArgument := trustedOutputPath
+	startCommand := "bash " + shellQuote(runnerPath) + " " + shellQuote(argsPath) + " " + shellQuote(exitPath) + " " + shellQuote(stdinArgument) + " " + shellQuote(outputArgument)
 	start := exec.Command("tmux", "-L", tmuxSocket, "new-session", "-d", "-s", session, "-c", directory, startCommand)
 	start.Env = env
 	if out, err := start.CombinedOutput(); err != nil {
@@ -533,8 +966,35 @@ func agentEnvironment(secretEnv string) []string {
 			env = append(env, secretEnv+"="+value)
 		}
 	}
+	// This is a deliberately separate, disposable database. It is the only
+	// non-provider service value made available to sandboxed commands so the
+	// opt-in workflow integration suite can run. DATABASE_URL remains excluded.
+	if value, ok := os.LookupEnv("SHIPYARD_TEST_DATABASE_URL"); ok && value != "" {
+		env = append(env, "SHIPYARD_TEST_DATABASE_URL="+value)
+	}
 	env = append(env, "NO_COLOR=1", "TERM=dumb")
 	return env
+}
+
+func (w *Worker) agentSecretEnvironment(ctx context.Context, agentID string) ([]string, error) {
+	values, err := w.Store.SecretValuesForAgent(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+	env := make([]string, 0, len(values))
+	for _, secret := range values {
+		env = append(env, secret.EnvName+"="+secret.Value)
+	}
+	return env, nil
+}
+
+func secretValueForEnv(values []domain.SecretValue, envName string) (domain.SecretValue, bool) {
+	for _, value := range values {
+		if value.EnvName == envName {
+			return value, true
+		}
+	}
+	return domain.SecretValue{}, false
 }
 
 func providerCommand(configured string) (string, []string) {
@@ -728,8 +1188,16 @@ func withOutputLastMessage(args []string, path string) []string {
 
 // CheckProvider verifies only the configured execution path. It never sends a
 // prompt or consumes model tokens: CLI providers answer --version, while API
-// providers are checked for the explicitly configured secret environment.
+// providers are checked for the explicitly configured secret and agent.
 func (w *Worker) CheckProvider(ctx context.Context, name string) (string, error) {
+	return w.checkProviderForAgent(ctx, name, "")
+}
+
+func (w *Worker) CheckProviderForAgent(ctx context.Context, name, agentID string) (string, error) {
+	return w.checkProviderForAgent(ctx, name, agentID)
+}
+
+func (w *Worker) checkProviderForAgent(ctx context.Context, name, agentID string) (string, error) {
 	provider, err := w.Store.Provider(ctx, name)
 	if err != nil {
 		return "", err
@@ -741,8 +1209,15 @@ func (w *Worker) CheckProvider(ctx context.Context, name string) (string, error)
 		if provider.SecretEnv == "" {
 			return "", errors.New("keine Secret-Umgebungsvariable konfiguriert")
 		}
-		if _, ok := os.LookupEnv(provider.SecretEnv); !ok {
-			return "", errors.New("konfigurierte Secret-Umgebungsvariable ist auf dem Server nicht gesetzt")
+		if strings.TrimSpace(agentID) == "" {
+			return "", errors.New("Agent-Kontext ist für den Provider-Test erforderlich")
+		}
+		assigned, err := w.Store.HasActiveSecretAssignmentForAgent(ctx, agentID, provider.SecretEnv)
+		if err != nil {
+			return "", errors.New("zentrale Secret-Zuordnung konnte nicht geprüft werden")
+		}
+		if !assigned {
+			return "", errors.New("kein aktives Secret ist einem Agent zugeordnet")
 		}
 		if _, err := exec.LookPath("bwrap"); err != nil {
 			return "", errors.New("OpenAI-Agenten benötigen bubblewrap für den isolierten Worktree")
@@ -767,6 +1242,26 @@ func (w *Worker) CheckProvider(ctx context.Context, name string) (string, error)
 		result = result[:500]
 	}
 	return result, nil
+}
+
+func (w *Worker) recordSecretUse(ctx context.Context, run domain.AgentRun, secret domain.SecretValue) error {
+	return w.Store.RecordAudit(ctx, "", "secret.used", "secret", secret.ID, map[string]string{
+		"actor": "agent-runner", "agent_id": run.AgentID, "run_id": run.ID,
+	})
+}
+
+// failSecretAudit stops execution before a secret is handed to a provider.
+// Both durable terminal-state operations are attempted even when the first
+// database operation fails. Errors are logged without secret metadata so an
+// outage cannot leave the run silently non-terminal or expose a value.
+func (w *Worker) failSecretAudit(ctx context.Context, run domain.AgentRun, provider, model string) {
+	w.persistIncompleteUsage(ctx, run, provider, model, "secret_audit_failed")
+	if err := w.Store.SetRunStatus(ctx, run.ID, "failed", "", "Secret-Nutzung konnte nicht auditiert werden"); err != nil {
+		log.Printf("secret audit failure: could not mark run %s failed", run.ID)
+	}
+	if err := w.finish(ctx, run, "failed"); err != nil {
+		log.Printf("secret audit failure: could not finish run %s", run.ID)
+	}
 }
 
 func (w *Worker) Start(ctx context.Context) {
@@ -865,6 +1360,19 @@ func (w *Worker) Process(ctx context.Context) {
 		return
 	}
 	for _, event := range events {
+		if automationEventIsNoop(event) {
+			// This is a deliberate terminal no-op: the QA return did not follow
+			// any previously applied repository change, so starting a worker would
+			// create an automation loop without producing a deliverable.
+			if err := w.Store.MarkEventProcessed(ctx, event.ID); err != nil {
+				log.Printf("automation event %s could not be marked as no-op: %v", event.ID, err)
+				continue
+			}
+			if event.TaskID != "" {
+				_ = w.Store.AddComment(ctx, event.TaskID, "Taskboard", "QA-/Review-Rücklauf ohne zuvor übernommene Änderung ignoriert; kein neuer Automationszyklus gestartet.")
+			}
+			continue
+		}
 		deferEvent := false
 		deferWithReason := func(reason string) {
 			attempts, recordErr := w.Store.RecordEventFailure(ctx, event.ID, reason)
@@ -874,8 +1382,23 @@ func (w *Worker) Process(ctx context.Context) {
 				deferEvent = true
 				return
 			}
-			if attempts >= maxAutomationEventAttempts {
-				_, _ = w.Store.AbandonEvent(ctx, event, reason)
+			if attempts >= maxAutomationEventAttempts() {
+				abandoned, abandonErr := w.Store.AbandonEvent(ctx, event, reason)
+				if abandonErr != nil {
+					// Do not silently lose the terminalisation failure. The event
+					// remains pending and will be retried, but this run must not
+					// continue processing rules after the limit was reached.
+					log.Printf("automation event %s could not be abandoned after attempt limit: %v", event.ID, abandonErr)
+				} else if !abandoned {
+					// Another worker may have terminalised the event concurrently.
+					// Treat that as terminal for this snapshot as well.
+					log.Printf("automation event %s was already terminal when attempt limit was reached", event.ID)
+				}
+				// Do not continue evaluating further rules or mark the event
+				// processed as if this cycle had succeeded. If terminalisation
+				// failed, the pending event is intentionally retried with the
+				// failure recorded in the service log.
+				deferEvent = true
 				return
 			}
 			deferEvent = true
@@ -886,12 +1409,11 @@ func (w *Worker) Process(ctx context.Context) {
 			continue
 		}
 		for _, rule := range rules {
+			if deferEvent {
+				break
+			}
 			runs, err := w.Store.CreateRunsForEvent(ctx, event, rule)
 			if errors.Is(err, store.ErrNoRunCreated) || errors.Is(err, store.ErrAutomationActive) {
-				continue
-			}
-			if errors.Is(err, store.ErrWorkspaceBusy) {
-				deferWithReason(err.Error())
 				continue
 			}
 			if err != nil {
@@ -899,7 +1421,7 @@ func (w *Worker) Process(ctx context.Context) {
 				continue
 			}
 			for _, run := range runs {
-				go w.execute(ctx, run)
+				w.startRun(ctx, run)
 			}
 		}
 		if !deferEvent {
@@ -911,9 +1433,44 @@ func (w *Worker) Process(ctx context.Context) {
 		return
 	}
 	for _, run := range queued {
-		go w.execute(ctx, run)
+		w.startRun(ctx, run)
 	}
 	w.processWebhookDeliveries(ctx)
+}
+
+func automationEventIsNoop(event domain.AutomationEvent) bool {
+	if len(event.Payload) == 0 || string(event.Payload) == "null" {
+		return false
+	}
+	var payload struct {
+		QAReturn        bool `json:"qa_return"`
+		ChangeAvailable bool `json:"change_available"`
+	}
+	if json.Unmarshal(event.Payload, &payload) != nil {
+		return false
+	}
+	return payload.QAReturn && !payload.ChangeAvailable
+}
+
+func (w *Worker) startRun(ctx context.Context, run domain.AgentRun) {
+	// Process may be called concurrently by the poller and an HTTP/MCP trigger.
+	// The database claim protects production execution, but reserving the run
+	// here also keeps test/injected executors and the small interval before the
+	// claim from starting the same delivery twice.
+	if _, loaded := w.starts.LoadOrStore(run.ID, struct{}{}); loaded {
+		return
+	}
+	if w.executeRun != nil {
+		go func() {
+			defer w.starts.Delete(run.ID)
+			w.executeRun(ctx, run)
+		}()
+		return
+	}
+	go func() {
+		defer w.starts.Delete(run.ID)
+		w.execute(ctx, run)
+	}()
 }
 func (w *Worker) Cancel(ctx context.Context, runID string) error {
 	run, err := w.Store.Run(ctx, runID)
@@ -932,6 +1489,9 @@ func (w *Worker) Cancel(ctx context.Context, runID string) error {
 	}
 	if !cancelled {
 		return errors.New("dieser Run wurde bereits beendet")
+	}
+	if err := w.Store.WakeWorkspace(ctx, run.ID); err != nil {
+		log.Printf("run cancel: workspace wake-up for %s failed: %v", run.ID, err)
 	}
 	if value, ok := w.cancels.Load(runID); ok {
 		value.(context.CancelFunc)()
@@ -967,53 +1527,63 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	}
 	defer unlock()
 
-	alreadyCommitted, err := runCommitExists(ctx, source, runID)
+	// The repository lock is the serialization boundary for delivery. The
+	// delivery read above is only an early rejection for already-applied runs;
+	// a concurrent Apply may have completed while this call was waiting for
+	// the lock. Re-read the durable state after acquiring it so a retry cannot
+	// apply the same worktree diff a second time.
+	delivery, err = w.Store.RunDelivery(ctx, runID)
 	if err != nil {
 		return err
+	}
+	if delivery.AppliedAt != nil {
+		return errors.New("Änderungen dieses Runs wurden bereits übernommen")
+	}
+
+	worktree, err := w.Store.RunWorktree(ctx, runID)
+	if err != nil || worktree == "" {
+		return errors.New("Worktree für diesen Run nicht verfügbar")
+	}
+	alreadyCommitted, err := runCommitExists(ctx, source, delivery.AcceptedCommitSHA)
+	if err != nil {
+		return err
+	}
+	if !alreadyCommitted && delivery.AcceptedCommitSHA == "" {
+		// This is a narrow crash-recovery path, not normal idempotency: the
+		// candidate must match the exact isolated diff as well as the run ID.
+		recoveredSHA, recoveryErr := findUnpersistedRunCommit(ctx, source, worktree, runID)
+		if recoveryErr != nil {
+			return fmt.Errorf("verwaister Übernahme-Commit konnte nicht geprüft werden: %w", recoveryErr)
+		}
+		if recoveredSHA != "" {
+			delivery.AcceptedCommitSHA = recoveredSHA
+			alreadyCommitted = true
+			_ = w.Store.AddRunLog(ctx, runID, "warning", "Vorhandener Übernahme-Commit anhand von Run-ID und vollständigem Diff wiederhergestellt.")
+		}
 	}
 	if !alreadyCommitted {
 		if dirty, checkErr := exec.Command("git", "-C", source, "status", "--porcelain").Output(); checkErr != nil {
 			return checkErr
 		} else if strings.TrimSpace(string(dirty)) != "" {
-			return errors.New("Quell-Workspace ist nicht sauber; übernehme oder räume bestehende Änderungen zuerst auf")
+			return managedCheckoutProblem("nicht sauber", strings.TrimSpace(string(dirty)), "fremde oder manuelle Änderungen würden von dieser Übernahme berührt")
 		}
-	}
-	worktree, err := w.Store.RunWorktree(ctx, runID)
-	if err != nil || worktree == "" {
-		return errors.New("Worktree für diesen Run nicht verfügbar")
 	}
 	if !alreadyCommitted {
-		// --binary makes newly created binary files representable in the patch.
-		// Without it a successful diff gate could still fail at `git apply` later.
-		diff, diffErr := exec.Command("git", "-C", worktree, "diff", "--binary", "HEAD").Output()
-		if diffErr != nil {
-			return diffErr
-		}
-		if strings.TrimSpace(string(diff)) == "" {
-			return errors.New("dieser Run enthält keine übernehmbaren Änderungen")
-		}
-		cmd := exec.Command("git", "-C", source, "apply", "--3way", "-")
-		check := exec.Command("git", "-C", source, "apply", "--check", "--3way", "-")
-		check.Stdin = strings.NewReader(string(diff))
-		if out, checkErr := check.CombinedOutput(); checkErr != nil {
-			return errors.New(strings.TrimSpace(string(out)))
-		}
-		cmd.Stdin = strings.NewReader(string(diff))
-		if out, applyErr := cmd.CombinedOutput(); applyErr != nil {
-			return errors.New(strings.TrimSpace(string(out)))
-		}
-		commit := exec.Command("git", "-C", source, "add", "-A")
-		if out, addErr := commit.CombinedOutput(); addErr != nil {
-			return errors.New(strings.TrimSpace(string(out)))
-		}
-		commit = exec.Command("git", "-C", source, "-c", "user.name=Taskboard", "-c", "user.email=taskboard@local", "commit", "-m", "taskboard: accept run "+runID)
-		if out, commitErr := commit.CombinedOutput(); commitErr != nil {
-			return errors.New(strings.TrimSpace(string(out)))
+		if _, err := applyRunPatch(ctx, source, worktree, runID); err != nil {
+			return err
 		}
 	} else {
 		_ = w.Store.AddRunLog(ctx, runID, "warning", "Vorhandener Übernahme-Commit erkannt; Delivery wird ohne erneutes Anwenden wiederhergestellt.")
 	}
-	applied, err := w.Store.MarkRunApplied(ctx, runID)
+	commitSHA := delivery.AcceptedCommitSHA
+	if commitSHA == "" {
+		var commitErr error
+		commitSHA, commitErr = gitOutput(ctx, source, "rev-parse", "HEAD")
+		if commitErr != nil {
+			return fmt.Errorf("Übernahme-Commit konnte nicht verifiziert werden: %w", commitErr)
+		}
+	}
+	applied, err := w.Store.MarkRunApplied(ctx, runID, commitSHA)
 	if err != nil {
 		return err
 	}
@@ -1031,6 +1601,11 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 		_ = w.Store.AddRunLog(ctx, runID, "info", "Isolierter Worktree nach Übernahme bereinigt")
 	}
 	if run.RuleID == "" {
+		_, err = w.Store.MoveTaskToNamedColumn(ctx, run.TaskID, "Review", "automation")
+		if err != nil {
+			return err
+		}
+		_ = w.Store.AddComment(ctx, run.TaskID, "Taskboard", "Änderungen übernommen; Task wurde zur Review weitergegeben.")
 		return nil
 	}
 	if run.BatchID != "" {
@@ -1065,9 +1640,42 @@ func (w *Worker) Diff(ctx context.Context, runID string) (string, error) {
 	}
 	out, err := exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--binary", "HEAD").CombinedOutput()
 	if err != nil {
-		return "", errors.New(strings.TrimSpace(string(out)))
+		return "", errors.New(RedactSensitiveText(strings.TrimSpace(string(out))))
 	}
-	return string(out), nil
+	return redactSensitiveDiff(string(out)), nil
+}
+
+var sensitiveDiffPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(authorization\s*:\s*bearer\s+)[^\s]+`),
+	regexp.MustCompile(`(?i)(\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|secret|private[_-]?key)\s*[:=]\s*)[^\s#]+`),
+	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
+	regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b`),
+}
+
+func RedactSensitiveText(value string) string {
+	for _, pattern := range sensitiveDiffPatterns {
+		value = pattern.ReplaceAllString(value, `[REDACTED]`)
+	}
+	return value
+}
+
+func redactSensitiveDiff(diff string) string {
+	lines := strings.Split(RedactSensitiveText(diff), "\n")
+	privateKey := false
+	for index, line := range lines {
+		if strings.Contains(line, "-----BEGIN ") && strings.Contains(line, "PRIVATE KEY-----") {
+			privateKey = true
+			lines[index] = "[REDACTED PRIVATE KEY]"
+			continue
+		}
+		if privateKey {
+			if strings.Contains(line, "-----END ") && strings.Contains(line, "PRIVATE KEY-----") {
+				privateKey = false
+			}
+			lines[index] = "[REDACTED PRIVATE KEY]"
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 func (w *Worker) Discard(ctx context.Context, runID string) error {
 	run, err := w.Store.Run(ctx, runID)
@@ -1167,7 +1775,25 @@ func (w *Worker) syncManagedProject(ctx context.Context, project domain.Project)
 	} else if statErr != nil {
 		return statErr
 	} else {
-		command = exec.CommandContext(syncCtx, "git", "-C", path, "pull", "--ff-only", "origin", project.DefaultBranch)
+		// Existing managed checkouts are synchronized below using fetch plus
+		// explicit ancestry checks. A pull cannot distinguish an accepted local
+		// commit from an unsafe divergence and would reject valid follow-up runs.
+		unlock, lockErr := lockRepository(syncCtx, path)
+		if lockErr != nil {
+			return fmt.Errorf("Projekt-Checkout konnte nicht für die Synchronisierung gesperrt werden: %w", lockErr)
+		}
+		defer unlock()
+		acceptedCommits, acceptedErr := w.Store.AcceptedRunCommitSHAs(syncCtx, path)
+		if acceptedErr != nil {
+			return fmt.Errorf("akzeptierte Delivery-Commits konnten nicht geprüft werden: %w", acceptedErr)
+		}
+		problemErr := syncManagedCheckout(syncCtx, path, project.DefaultBranch, acceptedCommits...)
+		problem := ""
+		if problemErr != nil {
+			problem = problemErr.Error()
+		}
+		_ = w.Store.RecordProjectSync(context.Background(), project.ID, problem)
+		return problemErr
 	}
 	out, err := command.CombinedOutput()
 	problem := ""
@@ -1267,10 +1893,18 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		comments, _ := w.Store.Comments(ctx, task.ID)
 		decisions, _ := w.Store.TaskDecisions(ctx, task.ID)
 		prompt += formatTaskContext(task, board, projects, groups, history, comments, decisions, started)
+		if strings.EqualFold(strings.TrimSpace(agent.Name), "Triage Agent") {
+			registered, _ := w.Store.Projects(ctx)
+			prompt += formatRegisteredProjects(registered)
+		}
+		allowed, _ := w.Store.Allowed(ctx, task.ID)
+		columns, _ := w.Store.Columns(ctx, task.BoardID)
+		prompt += formatAllowedTransitions(allowed, columns)
 	}
 	prompt += "\n\nFühre die projektspezifischen Tests für deine Änderung aus und dokumentiere das Ergebnis im Abschluss. Begrenze jeden einzelnen Test-, Build- oder Installationsbefehl als direkten Befehl mit `timeout 120s <befehl>` (oder dem passenden Mechanismus der Plattform). Schreibe keinen verschachtelten `bash -lc`-Aufruf, setze keine zusätzlichen Shell-Anführungszeichen und werte `$?` nicht selbst aus; die Ausführungsumgebung meldet Status und Ausgabe. Hängt ein Befehl oder läuft er in das Limit, dokumentiere das als offenes Risiko und fahre mit anderen aussagekräftigen Prüfungen fort. Entferne vor dem Abschluss generierte Entwicklungsartefakte wie __pycache__, *.pyc, Coverage-Dateien und temporäre Daten. Beende alle temporären Server und Browser-Prozesse vor dem Abschluss; verwende keine interaktiven oder dauerhaft wartenden Befehle. Erstelle keinen Push, Merge, Release oder Deployment."
 	prompt += "\n\nDokumentiere am Ende Ergebnis, geänderte Bereiche, ausgeführte Tests und offene Risiken für Menschen als ```taskboard-comment\n…\n```. Wenn eine neue Entscheidung nötig ist, gib am Ende einen taskboard-interaction-Block aus: {\"key\":\"stabiler_schluessel\",\"title\":\"Kurze Frage\",\"body\":\"Kontext\",\"fields\":[...]}. Unterstützt: text, textarea, select, buttons. Frage keine verbindliche Nutzerentscheidung erneut ab. Öffne sie nur mit reopen:true und reason, wenn sich die Sachlage wesentlich geändert hat. Nach einer Antwort startet genau ein Folge-Run. Wenn du als Reviewer Nacharbeit verlangst, verwende zusätzlich genau einen ```taskboard-transition\n{\"target\":\"In Progress\",\"comment\":\"konkrete Nacharbeit\"}\n```-Block. Die Transition wird nur ausgeführt, wenn sie im Board erlaubt ist. Nur der Triage Agent darf zusätzlich genau einen ```taskboard-update\n{\"title\":\"…\",\"description\":\"…\"}\n```-Block und einen ```taskboard-targets\n{\"project_ids\":[\"uuid\"],\"group_ids\":[]}\n```-Block ausgeben."
 	prompt += "\n\nProjektanlage ist eine Ausnahme von bestehenden Zielprojekten: Wenn ein Task Projekte aus Repository-URLs neu anlegen oder importieren soll, ist das Fehlen einer project_id erwartbar und kein Blocker. Prüfe Duplikate anhand der Repository-URL und lege die Projekte an; ihre project_id entsteht dabei erst. Verlange nur dann eine project_id, wenn der Task ausdrücklich eine Änderung an einem bereits registrierten Einzelprojekt verlangt. Ein Run ohne tatsächliche Umsetzung darf nicht als erfolgreich beschrieben werden. Bei einer unvermeidbaren offenen Entscheidung liefere genau einen gültigen taskboard-interaction-Block; jedes fields-Element benötigt id, label, type und bei select/buttons mindestens eine Option."
+	prompt += "\n\nVor dem Abschlusskommentar und jeder Übergabe muss genau ein gültiger Block ```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"Scope/Akzeptanz\",\"result\":\"...\"},{\"check\":\"Diff/Secrets\",\"result\":\"...\"},{\"check\":\"Tests/Fehler\",\"result\":\"...\"},{\"check\":\"Sicherheits-/Betriebsrisiken\",\"result\":\"...\"},{\"check\":\"Rückwärtskompatibilität\",\"result\":\"...\"}],\"tests\":\"Nachweis\",\"open_risks\":\"Keine\"}\n``` ausgegeben werden. Bei fehlendem, ungültigem oder fehlgeschlagenem Self-Review wird nichts übernommen und keine Transition ausgeführt."
 	if skills, err := w.Store.AgentSkills(ctx, run.AgentID); err == nil && len(skills) > 0 {
 		paths := make([]string, 0, len(skills))
 		for _, skill := range skills {
@@ -1289,21 +1923,47 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		if providerErr != nil {
 			reason = providerErr.Error()
 		}
+		w.persistIncompleteUsage(ctx, run, providerName, "", "provider_unavailable")
 		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
+		_ = w.finish(ctx, run, "failed")
+		return
+	}
+	secretValues, secretErr := w.Store.SecretValuesForAgent(ctx, run.AgentID)
+	if secretErr != nil {
+		w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "secret_load_failed")
+		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", "Secret-Berechtigungen konnten nicht geladen werden")
 		_ = w.finish(ctx, run, "failed")
 		return
 	}
 	var out []byte
 	var structuredOutput string
 	var tokenUsage int
-	var inputTokens, outputTokens int
+	var inputTokens, outputTokens, cachedInputTokens, cacheWriteTokens, reasoningTokens, apiCalls int
 	var estimatedCostMicrousd int64
+	var nativeCostMicrousd *int64
+	var serviceTier string
+	var cliReport *cliUsageReport
 	if provider.Provider == "openai" {
-		text, usage, responseErr := runOpenAIResponses(runCtx, provider, prompt, run.WorkspaceSnapshot)
+		secret, ok := secretValueForEnv(secretValues, provider.SecretEnv)
+		if !ok {
+			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "secret_not_assigned")
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", "OpenAI-Secret ist diesem Agent nicht zugeordnet")
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		if auditErr := w.recordSecretUse(ctx, run, secret); auditErr != nil {
+			w.failSecretAudit(ctx, run, provider.Provider, provider.Model)
+			return
+		}
+		text, usage, responseErr := runOpenAIResponses(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot)
 		out, tokenUsage, inputTokens, outputTokens, estimatedCostMicrousd, err = []byte(text), usage.TotalTokens, usage.InputTokens, usage.OutputTokens, usage.EstimatedCostMicrousd, responseErr
+		cachedInputTokens, cacheWriteTokens, reasoningTokens = usage.CachedInputTokens, usage.CacheWriteTokens, usage.ReasoningTokens
+		apiCalls, nativeCostMicrousd = usage.APICalls, usage.NativeCostMicrousd
+		serviceTier = usage.ServiceTier
 	} else {
 		command, args, stdin, commandErr := cliInvocation(provider, prompt)
 		if commandErr != nil {
+			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "adapter_configuration_error")
 			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", commandErr.Error())
 			_ = w.finish(ctx, run, "failed")
 			return
@@ -1321,13 +1981,117 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			invocation += "  (Prompt über stdin)"
 		}
 		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Ausführungsbefehl: "+invocation)
-		_, streamErr := w.runInTmux(runCtx, run.ID, run.WorkspaceSnapshot, command, args, stdin, agentEnvironment(provider.SecretEnv))
-		err = streamErr
-		if provider.Provider == "codex" {
-			finalPath := filepath.Join("/home/agent/.taskboard-run-logs", run.ID+".final")
-			if raw, readErr := os.ReadFile(finalPath); readErr == nil {
-				structuredOutput = string(raw)
+		env := agentEnvironment("")
+		secretEnv := make([]string, 0, len(secretValues))
+		for _, secret := range secretValues {
+			secretEnv = append(secretEnv, secret.EnvName+"="+secret.Value)
+			if auditErr := w.recordSecretUse(ctx, run, secret); auditErr != nil {
+				w.failSecretAudit(ctx, run, provider.Provider, provider.Model)
+				return
 			}
+		}
+		env = append(env, secretEnv...)
+		finalPath := filepath.Join("/home/agent/.taskboard-run-logs", run.ID+".final")
+		_ = os.Remove(finalPath)
+		trustedOutputPath := ""
+		if provider.Provider != "codex" {
+			trustedOutputPath = finalPath
+		}
+		_, streamErr := w.runInTmux(runCtx, run.ID, run.WorkspaceSnapshot, command, args, stdin, trustedOutputPath, env)
+		err = streamErr
+		if raw, readErr := os.ReadFile(finalPath); readErr == nil {
+			structuredOutput = string(raw)
+		}
+	}
+	// CLI adapters may emit a final machine-readable usage event even when the
+	// process exits non-zero. Read it before constructing and persisting the
+	// report so partial runs retain all measured telemetry.
+	if provider.Provider != "openai" {
+		if logs, logErr := w.Store.RunLogs(ctx, run.ID); logErr == nil {
+			if reported, ok := reportedCLIUsage(logs); ok {
+				cliReport = &reported
+				if reported.APICalls != nil {
+					apiCalls = int(*reported.APICalls)
+				}
+				if reported.InputTokens != nil {
+					inputTokens = int(*reported.InputTokens)
+				}
+				if reported.OutputTokens != nil {
+					outputTokens = int(*reported.OutputTokens)
+				}
+				if reported.CachedInputTokens != nil {
+					cachedInputTokens = int(*reported.CachedInputTokens)
+				}
+				if reported.CacheWriteTokens != nil {
+					cacheWriteTokens = int(*reported.CacheWriteTokens)
+				}
+				if reported.ReasoningTokens != nil {
+					reasoningTokens = int(*reported.ReasoningTokens)
+				}
+				if reported.TotalTokens != nil {
+					tokenUsage = int(*reported.TotalTokens)
+				}
+				if reported.NativeCostMicrousd != nil {
+					nativeCostMicrousd = reported.NativeCostMicrousd
+				}
+				if reported.ServiceTier != "" {
+					serviceTier = reported.ServiceTier
+				}
+			}
+		}
+	}
+	// Persist the adapter report before lifecycle handling so a timeout or
+	// provider error still leaves the measured partial usage available.
+	partial := domain.UsageReport{Provider: provider.Provider, Model: provider.Model, ServiceTier: serviceTier, Status: "unknown", CostSource: "unknown", NativeCostMicrousd: nativeCostMicrousd}
+	if cliReport != nil {
+		partial.APICalls = cliReport.APICalls
+		partial.InputTokens = cliReport.InputTokens
+		partial.OutputTokens = cliReport.OutputTokens
+		partial.CachedInputTokens = cliReport.CachedInputTokens
+		partial.CacheWriteTokens = cliReport.CacheWriteTokens
+		partial.ReasoningTokens = cliReport.ReasoningTokens
+		partial.TotalTokens = cliReport.TotalTokens
+	} else if apiCalls > 0 {
+		// A successful provider response makes zero-valued token classes known.
+		partial.APICalls = measuredUsagePointer(apiCalls, true)
+		partial.InputTokens = measuredUsagePointer(inputTokens, true)
+		partial.OutputTokens = measuredUsagePointer(outputTokens, true)
+		partial.CachedInputTokens = measuredUsagePointer(cachedInputTokens, true)
+		partial.CacheWriteTokens = measuredUsagePointer(cacheWriteTokens, true)
+		partial.ReasoningTokens = measuredUsagePointer(reasoningTokens, true)
+		partial.TotalTokens = measuredUsagePointer(tokenUsage, true)
+	}
+	partial.RawUsage, _ = json.Marshal(map[string]any{"api_calls": apiCalls, "input_tokens": partial.InputTokens, "output_tokens": partial.OutputTokens, "cached_input_tokens": partial.CachedInputTokens, "cache_write_tokens": partial.CacheWriteTokens, "reasoning_tokens": partial.ReasoningTokens, "total_tokens": partial.TotalTokens})
+	if nativeCostMicrousd != nil {
+		partial.CostSource = "reported"
+		partial.CalculatedCostMicrousd = nativeCostMicrousd
+		// Native provider billing has no local catalog version. Persist an
+		// explicit source marker and ingestion time for auditability.
+		partial.PriceVersion = "provider-reported"
+		now := time.Now()
+		partial.CostCalculatedAt = &now
+	}
+	if err != nil {
+		partial.Status = "incomplete"
+	} else if partial.TotalTokens != nil {
+		partial.Status = "complete"
+	}
+	if err == nil && nativeCostMicrousd == nil {
+		if price, priceErr := w.Store.ResolveUsagePrice(ctx, partial.Provider, partial.Model, partial.ServiceTier, run.CreatedAt); priceErr == nil {
+			result := usage.Calculate(usage.Report{Provider: partial.Provider, Model: partial.Model, ServiceTier: partial.ServiceTier, InputTokens: partial.InputTokens, OutputTokens: partial.OutputTokens, CachedInputTokens: partial.CachedInputTokens, CacheWriteTokens: partial.CacheWriteTokens, ReasoningTokens: partial.ReasoningTokens, TotalTokens: partial.TotalTokens}, usage.Price{Version: price.Version, Input: price.Input, Output: price.Output, CachedInput: price.CachedInput, CacheWrite: price.CacheWrite, Reasoning: price.Reasoning})
+			if result.Known {
+				partial.CostSource = "estimated"
+				partial.CalculatedCostMicrousd = &result.Microusd
+				partial.PriceVersion = price.Version
+				now := time.Now()
+				partial.CostCalculatedAt = &now
+			}
+		}
+	}
+	if usageErr := w.Store.SetRunUsage(ctx, run.ID, partial); usageErr != nil {
+		_ = w.Store.AddRunLog(ctx, run.ID, "error", "Usage-Telemetrie konnte nicht gespeichert werden: "+usageErr.Error())
+		if err == nil {
+			err = fmt.Errorf("Usage-Telemetrie konnte nicht gespeichert werden: %w", usageErr)
 		}
 	}
 	// CLI output has already been copied into append-only run-log records by
@@ -1341,21 +2105,35 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	awaitingDecision := false
 	var requestedRoute transitionRequest
 	hasRequestedRoute := false
+	liveStatusVerified := false
 	if err == nil {
-		if logs, logErr := w.Store.RunLogs(ctx, run.ID); logErr == nil {
-			if provider.Provider == "codex" {
-				if reported, ok := reportedCLITokenUsage(logs); ok {
-					tokenUsage = reported
-				}
+		logs, logErr := w.Store.RunLogs(ctx, run.ID)
+		if logErr != nil {
+			// A delivery agent may only pass the self-review gate when the
+			// authoritative completion channel and its run record are readable.
+			// Failing closed here prevents a storage/read failure from being
+			// mistaken for a missing gate and then reaching apply/transition.
+			if reviewErr := validateSelfReview(agent.Name, nil, logErr); reviewErr != nil {
+				reason := "Self-Review abgelehnt: " + reviewErr.Error()
+				_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+				_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Self-Review fehlgeschlagen", reason)
+				_ = w.finish(ctx, run, "failed")
+				return
 			}
-			controlLogs := logs
-			if provider.Provider == "codex" {
-				controlLogs = nil
-				if strings.TrimSpace(structuredOutput) != "" {
-					controlLogs = []domain.RunLog{{Message: structuredOutput}}
-				} else {
-					_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Codex lieferte keine Abschlussnachricht; strukturierte Task-Aktionen wurden aus Sicherheitsgründen nicht aus dem Terminal gelesen.")
-				}
+		} else {
+			// Delivery actions and the self-review must come exclusively from the
+			// provider's isolated completion channel. Terminal logs are untrusted
+			// because prompts, tool output, or a provider echo can contain fences.
+			controlLogs := controlLogsForAgent(agent.Name, logs, structuredOutput)
+			if provider.Provider == "codex" && len(controlLogs) == 0 {
+				_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Codex lieferte keine Abschlussnachricht; strukturierte Task-Aktionen wurden aus Sicherheitsgründen nicht aus dem Terminal gelesen.")
+			}
+			if reviewErr := validateSelfReview(agent.Name, controlLogs, nil); reviewErr != nil {
+				reason := "Self-Review abgelehnt: " + reviewErr.Error()
+				_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+				_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Self-Review fehlgeschlagen", reason)
+				_ = w.finish(ctx, run, "failed")
+				return
 			}
 			for _, comment := range requestedTaskComments(controlLogs) {
 				_ = w.Store.AddComment(ctx, run.TaskID, "Agent", comment)
@@ -1377,12 +2155,29 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 				}
 			}
 			requestedRoute, hasRequestedRoute = requestedTransition(controlLogs)
+			if taskErr == nil && hasRequestedRoute {
+				// Reload after provider execution: another actor may have moved the
+				// task while the agent was working.
+				currentTask, currentErr := w.Store.GetTask(ctx, task.ID)
+				if currentErr != nil {
+					reason := "Aktueller Task-Status konnte vor der Workflow-Transition nicht verifiziert werden: " + currentErr.Error()
+					_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+					_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Live-Statusprüfung fehlgeschlagen", reason)
+					_ = w.finish(ctx, run, "failed")
+					return
+				}
+				task = currentTask
+				liveStatusVerified = true
+			}
+			// A provider can have been given stale context, so check the live task
+			// status before processing its route. A request for the current column
+			// is consumed as a silent no-op and must not produce a warning.
 			interactions := requestedInteractions(controlLogs)
 			releaseRoute := false
 			if taskErr == nil && isQAColumn(task) && hasRequestedRoute {
 				releaseRoute = true // fail closed: no metadata must never bypass QA.
 				if columns, columnsErr := w.Store.Columns(ctx, task.BoardID); columnsErr == nil {
-					releaseRoute = targetColumnHasType(columns, requestedRoute.Target, "done")
+					releaseRoute = requestedRouteTargetsColumnType(columns, requestedRoute, "done")
 				}
 				if !releaseRoute {
 					interactions = withoutReleaseInteraction(interactions)
@@ -1477,7 +2272,23 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	}
 	_ = w.Store.SetRunStatus(ctx, run.ID, "succeeded", "Codex-Agent erfolgreich beendet", "")
 	if hasRequestedRoute && !awaitingDecision {
-		moved, moveErr := w.Store.MoveTaskToNamedColumn(ctx, run.TaskID, requestedRoute.Target, "agent_review")
+		// An explicit route owns the workflow outcome, even when the resolver
+		// returns a no-op or a deterministic rejection. Never fall back to the
+		// automation rule's success column in those cases.
+		run = suppressAutomationOutcome(run, true, awaitingDecision)
+		if taskErr == nil && requestedRouteIsCurrentAfterLiveReload(task, requestedRoute, liveStatusVerified) {
+			_ = w.finish(ctx, run, "succeeded")
+			return
+		}
+		targetID := requestedRoute.TargetColumnID
+		var moved bool
+		var moveErr error
+		if targetID != "" {
+			moved, moveErr = w.Store.MoveTaskToColumnID(ctx, run.TaskID, targetID, "agent_review")
+		}
+		if targetID == "" {
+			moved, moveErr = w.Store.MoveTaskToNamedColumn(ctx, run.TaskID, requestedRoute.Target, "agent_review")
+		}
 		if moveErr != nil {
 			_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Angeforderte Workflow-Transition wurde nicht ausgeführt: "+moveErr.Error())
 		} else if moved {
@@ -1489,17 +2300,26 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			// The explicit, workflow-validated route is the run outcome. Prevent
 			// the automation rule from consuming its normal success transition a
 			// second time (for example Review → QA after Review → In Progress).
-			routedRun := run
-			routedRun.RuleID = ""
-			_ = w.finish(ctx, routedRun, "succeeded")
+			_ = w.finish(ctx, run, "succeeded")
 			return
-		} else {
-			_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Angeforderte Workflow-Transition ist für die aktuelle Spalte nicht erlaubt: "+requestedRoute.Target)
 		}
 	}
 	_ = w.finish(ctx, run, "succeeded")
 }
+
+func (w *Worker) persistIncompleteUsage(ctx context.Context, run domain.AgentRun, provider, model, status string) {
+	raw, _ := json.Marshal(map[string]string{"status": status})
+	_ = w.Store.SetRunUsage(ctx, run.ID, domain.UsageReport{
+		Provider: provider, Model: model, Status: "incomplete", CostSource: "unknown", RawUsage: raw,
+	})
+}
 func (w *Worker) finish(ctx context.Context, run domain.AgentRun, status string) error {
+	// Make queued targets eligible before handling auxiliary notifications. This
+	// is durable and idempotent, so a crash or a concurrent worker cannot lose
+	// the wake-up or start a run twice.
+	if err := w.Store.WakeWorkspace(ctx, run.ID); err != nil {
+		log.Printf("run finish: workspace wake-up for %s failed: %v", run.ID, err)
+	}
 	// Cancellation wins over every concurrently completing worker branch. The
 	// database update in CancelRun is conditional, so observing cancellation
 	// here makes this terminal handler a no-op rather than emitting a false

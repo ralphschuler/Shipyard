@@ -30,3 +30,21 @@ If you are developing a production application, we recommend enabling type-aware
 ```
 
 See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+
+## Browser-QA
+
+The modal smoke suite runs against Vite with deterministic API fixtures, so it
+does not require credentials or a database. Chromium is used when available at
+`/usr/bin/chromium`; set `CHROMIUM_PATH` to override it.
+
+```sh
+npm ci
+npm run build
+npm run lint
+npm run test:e2e
+```
+
+The suite covers responsive React dialogs, body scrolling, initial focus,
+Escape, focus restoration, and the legacy dialog enhancer with a nested
+secondary form. Playwright's HTML report and failure artifacts are written to
+`playwright-report/` and `test-results/` (both are ignored locally).

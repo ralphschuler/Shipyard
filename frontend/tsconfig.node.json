@@ -8,7 +8,6 @@
 
     /* Bundler mode */
     "module": "nodenext",
-    "baseUrl": ".",
     "ignoreDeprecations": "6.0",
     "paths": { "@/*": ["./src/*"] },
     "allowImportingTsExtensions": true,
