@@ -589,6 +589,10 @@ func requestedRouteIsCurrent(task domain.Task, route transitionRequest) bool {
 	return strings.EqualFold(strings.TrimSpace(route.Target), strings.TrimSpace(task.ColumnName))
 }
 
+func requestedRouteIsCurrentAfterLiveReload(task domain.Task, route transitionRequest, liveStatusVerified bool) bool {
+	return liveStatusVerified && requestedRouteIsCurrent(task, route)
+}
+
 func formatAllowedTransitions(transitions []domain.Transition, columns []domain.Column) string {
 	if len(transitions) == 0 {
 		return ""
@@ -1963,6 +1967,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	awaitingDecision := false
 	var requestedRoute transitionRequest
 	hasRequestedRoute := false
+	liveStatusVerified := false
 	if err == nil {
 		logs, logErr := w.Store.RunLogs(ctx, run.ID)
 		if logErr != nil {
@@ -2012,9 +2017,16 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			if taskErr == nil && hasRequestedRoute {
 				// Reload after provider execution: another actor may have moved the
 				// task while the agent was working.
-				if currentTask, currentErr := w.Store.GetTask(ctx, task.ID); currentErr == nil {
-					task = currentTask
+				currentTask, currentErr := w.Store.GetTask(ctx, task.ID)
+				if currentErr != nil {
+					reason := "Aktueller Task-Status konnte vor der Workflow-Transition nicht verifiziert werden: " + currentErr.Error()
+					_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+					_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Live-Statusprüfung fehlgeschlagen", reason)
+					_ = w.finish(ctx, run, "failed")
+					return
 				}
+				task = currentTask
+				liveStatusVerified = true
 			}
 			// A provider can have been given stale context, so check the live task
 			// status before processing its route. A request for the current column
@@ -2117,7 +2129,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		// returns a no-op or a deterministic rejection. Never fall back to the
 		// automation rule's success column in those cases.
 		run = suppressAutomationOutcome(run, true, awaitingDecision)
-		if taskErr == nil && requestedRouteIsCurrent(task, requestedRoute) {
+		if taskErr == nil && requestedRouteIsCurrentAfterLiveReload(task, requestedRoute, liveStatusVerified) {
 			_ = w.finish(ctx, run, "succeeded")
 			return
 		}

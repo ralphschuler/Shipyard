@@ -598,6 +598,12 @@ func TestRequestedRouteCurrentColumnIsSilentNoOp(t *testing.T) {
 	if !requestedRouteIsCurrent(task, transitionRequest{TargetColumnID: task.ColumnID}) || !requestedRouteIsCurrent(task, transitionRequest{Target: task.ColumnName}) {
 		t.Fatal("current column was not recognized")
 	}
+	if !requestedRouteIsCurrentAfterLiveReload(task, transitionRequest{TargetColumnID: task.ColumnID}, true) {
+		t.Fatal("verified live status was not recognized")
+	}
+	if requestedRouteIsCurrentAfterLiveReload(task, transitionRequest{TargetColumnID: task.ColumnID}, false) {
+		t.Fatal("unverified status must not suppress a transition")
+	}
 	if requestedRouteIsCurrent(task, transitionRequest{TargetColumnID: "review-id"}) {
 		t.Fatal("different target was treated as self-transition")
 	}
