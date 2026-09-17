@@ -7,8 +7,14 @@ let shipyardTranslations={de:{},en:{}};
 const cookieValue=name=>document.cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`))?.[1];
 let activeShipyardLanguage=cookieValue('shipyard_language')==='en'?'en':'de';
 const shipyardLanguage=()=>activeShipyardLanguage;
+// Dynamic controls use the same source phrases as server-rendered legacy
+// views. The English dictionary is also the intentional fallback when a new
+// phrase has not been added to the selected language yet.
+const trText=source=>shipyardTranslations[shipyardLanguage()]?.[source]||shipyardTranslations.en?.[source]||source;
 const translationOriginals=new WeakMap();
 const applyLanguage=()=>{const lang=shipyardLanguage();document.documentElement.lang=lang;const dictionary=shipyardTranslations[lang]||{};const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);const nodes=[];while(walker.nextNode())nodes.push(walker.currentNode);nodes.forEach(node=>{const original=translationOriginals.get(node)||node.nodeValue;translationOriginals.set(node,original);const value=original.trim();if(dictionary[value])node.nodeValue=original.replace(value,dictionary[value]);});document.querySelectorAll('[title],[aria-label],[placeholder]').forEach(node=>['title','aria-label','placeholder'].forEach(attribute=>{const originalKey=`${attribute}`;const original=translationOriginals.get(node)?.[originalKey]||node.getAttribute(attribute);const values=translationOriginals.get(node)||{};values[originalKey]=original;translationOriginals.set(node,values);if(original&&dictionary[original])node.setAttribute(attribute,dictionary[original]);}));document.querySelectorAll('[data-i18n-key]').forEach(node=>{const key=node.dataset.i18nKey;const visible=dictionary[key]||key;node.querySelector('span')?.replaceChildren(document.createTextNode(visible));node.title=visible;});};
+let languageApplyTimer;
+const observeLanguageChanges=()=>{new MutationObserver(()=>{clearTimeout(languageApplyTimer);languageApplyTimer=setTimeout(applyLanguage,0)}).observe(document.body,{childList:true,subtree:true})};
 // Local preferences are deliberately progressive enhancement: the server UI
 // remains fully usable when storage is unavailable.
 const shipyardPrefs=(()=>{try{const saved=JSON.parse(localStorage.getItem('shipyard.preferences')||'{"theme":"system","shortcutHints":true}');return {theme:cookieValue('shipyard_theme')||saved.theme||'system',shortcutHints:(cookieValue('shipyard_shortcut_hints')||String(saved.shortcutHints))!=='false'}}catch(_){return {theme:cookieValue('shipyard_theme')||'system',shortcutHints:cookieValue('shipyard_shortcut_hints')!=='false'}}})();
@@ -17,7 +23,7 @@ const applyTheme=()=>{const selected=shipyardPrefs.theme||'system';document.docu
 applyTheme();
 systemDark.addEventListener?.('change',()=>{if((shipyardPrefs.theme||'system')==='system')applyTheme()});
 document.title=document.title.replace(/Taskboard/g,'Shipyard');
-const loadTranslations=fetch('/api/i18n',{credentials:'same-origin'}).then(response=>response.ok?response.json():null).then(data=>{const dictionaries=data?.languages||{};if(data?.translations&&!dictionaries.en)dictionaries.en=data.translations;shipyardTranslations.de=dictionaries.de||{};shipyardTranslations.en=dictionaries.en||{};if(data?.language==='de'||data?.language==='en')activeShipyardLanguage=data.language;applyLanguage();return data}).catch(()=>{applyLanguage();return null});
+const loadTranslations=fetch('/api/i18n',{credentials:'same-origin'}).then(response=>response.ok?response.json():null).then(data=>{const dictionaries=data?.languages||{};if(data?.translations&&!dictionaries.en)dictionaries.en=data.translations;shipyardTranslations.de=dictionaries.de||{};shipyardTranslations.en=dictionaries.en||{};if(data?.language==='de'||data?.language==='en')activeShipyardLanguage=data.language;applyLanguage();observeLanguageChanges();return data}).catch(()=>{applyLanguage();observeLanguageChanges();return null});
 document.addEventListener('change',event=>{if(!(event.target instanceof HTMLSelectElement)||event.target.name!=='language')return;activeShipyardLanguage=event.target.value==='en'?'en':'de';const value=activeShipyardLanguage;document.cookie=`shipyard_language=${value}; path=/; max-age=31536000; SameSite=Lax`;try{localStorage.setItem('shipyard.language',value)}catch(_){}if(value==='de'||Object.keys(shipyardTranslations.en).length)applyLanguage();else loadTranslations.then(applyLanguage);});
 // Keep focus on the invoking control and make Escape opt-in for closable
 // dialogs. Native showModal() supplies the remaining focus containment.
@@ -42,7 +48,7 @@ const openModal=(dialog,trigger=document.activeElement)=>{if(!dialog)return;if(t
 HTMLDialogElement.prototype.showModal=function(){openModal(this)};
 document.addEventListener('cancel',event=>{const dialog=event.target.closest?.('dialog');if(dialog&&!isClosableDialog(dialog))event.preventDefault()},true);
 document.addEventListener('close',event=>{const dialog=event.target;if(!(dialog instanceof HTMLDialogElement))return;const trigger=modalReturnFocus.get(dialog);modalReturnFocus.delete(dialog);if(trigger?.isConnected)requestAnimationFrame(()=>trigger.focus())},true);
-document.querySelectorAll('.brand-mark').forEach(mark=>{mark.textContent='SY';mark.title='Shipyard'});
+document.querySelectorAll('.brand-mark').forEach(mark=>{mark.textContent='SY';mark.title=trText('Shipyard')});
 // Older server-rendered views predate the Shipyard favicon. Keep branding a
 // shell responsibility so newly added extension pages cannot accidentally
 // fall back to the browser default icon just because their template is small.
@@ -100,8 +106,8 @@ document.querySelectorAll('.app-sidebar nav').forEach(nav=>{
 // question offers a human override while old bookmarked pages keep working.
 document.querySelectorAll('.agent-interaction form[action^="/interactions/"]').forEach(form=>{
  if(form.querySelector('[name="freeform_answer"]'))return;
- const label=document.createElement('label');label.textContent='Eigene oder ergänzende Antwort';
- const input=document.createElement('textarea');input.name='freeform_answer';input.placeholder='Überschreibt oder ergänzt die Auswahl.';label.append(input);
+ const label=document.createElement('label');label.textContent=trText('Eigene oder ergänzende Antwort');
+ const input=document.createElement('textarea');input.name='freeform_answer';input.placeholder=trText('Überschreibt oder ergänzt die Auswahl.');label.append(input);
  form.insertBefore(label,form.lastElementChild);
 });
 // Choice buttons are selections, not implicit submissions. This lets a person
@@ -121,22 +127,22 @@ if(document.body.classList.contains('task-page')){
  const hero=document.querySelector('.task-hero');
  document.querySelectorAll('.agent-interaction').forEach(card=>hero?.after(card));
 }
-const shortcutHelp=()=>{let dialog=document.getElementById('shipyard-shortcuts');if(!dialog){dialog=document.createElement('dialog');dialog.id='shipyard-shortcuts';dialog.innerHTML='<article><header><button class="close" aria-label="Schließen"></button><h2>Tastatursteuerung</h2></header><dl><dt>Tab / Umschalt+Tab</dt><dd>Zum nächsten oder vorherigen Bedienelement</dd><dt>Eingabe / Leertaste</dt><dd>Link, Button oder Auswahl auslösen</dd><dt>↑ / ↓, Pos1 / Ende</dt><dd>Navigation in der Seitenleiste</dd><dt>Escape</dt><dd>Dialog oder mobile Navigation schließen</dd></dl><label><input type="checkbox" data-shortcut-hints> Hinweise zu Shortcuts anzeigen</label></article>';document.body.append(dialog);dialog.querySelector('.close').addEventListener('click',()=>dialog.close());dialog.querySelector('[data-shortcut-hints]').checked=shipyardPrefs.shortcutHints!==false;dialog.querySelector('[data-shortcut-hints]').addEventListener('change',e=>{shipyardPrefs.shortcutHints=e.target.checked;try{localStorage.setItem('shipyard.preferences',JSON.stringify(shipyardPrefs))}catch(_){}})}openModal(dialog)};
+const shortcutHelp=()=>{let dialog=document.getElementById('shipyard-shortcuts');if(!dialog){dialog=document.createElement('dialog');dialog.id='shipyard-shortcuts';dialog.innerHTML=`<article><header><button class="close" aria-label="${trText('Schließen')}"></button><h2>${trText('Tastatursteuerung')}</h2></header><dl><dt>Tab / Umschalt+Tab</dt><dd>${trText('Zum nächsten oder vorherigen Bedienelement')}</dd><dt>${trText('Eingabe / Leertaste')}</dt><dd>${trText('Link, Button oder Auswahl auslösen')}</dd><dt>↑ / ↓, Pos1 / Ende</dt><dd>${trText('Navigation in der Seitenleiste')}</dd><dt>Escape</dt><dd>${trText('Dialog oder mobile Navigation schließen')}</dd></dl><label><input type="checkbox" data-shortcut-hints> ${trText('Hinweise zu Shortcuts anzeigen')}</label></article>`;document.body.append(dialog);dialog.querySelector('.close').addEventListener('click',()=>dialog.close());dialog.querySelector('[data-shortcut-hints]').checked=shipyardPrefs.shortcutHints!==false;dialog.querySelector('[data-shortcut-hints]').addEventListener('change',e=>{shipyardPrefs.shortcutHints=e.target.checked;try{localStorage.setItem('shipyard.preferences',JSON.stringify(shipyardPrefs))}catch(_){}})}openModal(dialog)};
 document.addEventListener('keydown',event=>{if(event.key==='?'&&!/input|textarea|select/i.test(event.target.tagName)){event.preventDefault();shortcutHelp()}});
 document.querySelectorAll('.app-sidebar').forEach(sidebar=>{
  const shell=sidebar.closest('.app-shell');
  const desktop=matchMedia('(min-width:801px)');
- const toggle=document.createElement('button');toggle.type='button';toggle.className='mobile-nav-toggle';toggle.setAttribute('aria-label','Navigation öffnen');toggle.innerHTML='<span></span><span></span><span></span>';
+ const toggle=document.createElement('button');toggle.type='button';toggle.className='mobile-nav-toggle';toggle.setAttribute('aria-label',trText('Navigation öffnen'));toggle.innerHTML='<span></span><span></span><span></span>';
  sidebar.prepend(toggle);
  // Storage is a preference only. It must never make the toggle unusable in a
  // browser that blocks local storage (for example private or embedded views).
  const readOpen=()=>{try{return localStorage.getItem('taskboard.sidebar.expanded')==='true'}catch(_){return false}};
  const writeOpen=open=>{try{localStorage.setItem('taskboard.sidebar.expanded',String(open))}catch(_){}};
- const applyDesktop=open=>{const expanded=open??readOpen();shell?.classList.toggle('sidebar-expanded',expanded);toggle.setAttribute('aria-expanded',String(expanded));toggle.setAttribute('aria-label',expanded?'Navigation einklappen':'Navigation ausklappen')};
- const close=()=>{sidebar.classList.remove('mobile-open');if(!desktop.matches){toggle.setAttribute('aria-expanded','false');toggle.setAttribute('aria-label','Navigation öffnen')}};
+ const applyDesktop=open=>{const expanded=open??readOpen();shell?.classList.toggle('sidebar-expanded',expanded);toggle.setAttribute('aria-expanded',String(expanded));toggle.setAttribute('aria-label',trText(expanded?'Navigation einklappen':'Navigation ausklappen'))};
+ const close=()=>{sidebar.classList.remove('mobile-open');if(!desktop.matches){toggle.setAttribute('aria-expanded','false');toggle.setAttribute('aria-label',trText('Navigation öffnen'))}};
  const apply=()=>{if(desktop.matches)applyDesktop();else{shell?.classList.remove('sidebar-expanded');close()}};
  apply();desktop.addEventListener?.('change',apply);
- toggle.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();if(desktop.matches){const open=!shell?.classList.contains('sidebar-expanded');writeOpen(open);applyDesktop(open);return}const open=sidebar.classList.toggle('mobile-open');toggle.setAttribute('aria-expanded',String(open));toggle.setAttribute('aria-label',open?'Navigation schließen':'Navigation öffnen')});
+ toggle.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();if(desktop.matches){const open=!shell?.classList.contains('sidebar-expanded');writeOpen(open);applyDesktop(open);return}const open=sidebar.classList.toggle('mobile-open');toggle.setAttribute('aria-expanded',String(open));toggle.setAttribute('aria-label',trText(open?'Navigation schließen':'Navigation öffnen'))});
  sidebar.querySelectorAll('a').forEach(link=>link.addEventListener('click',close));
  document.addEventListener('click',event=>{if(!sidebar.contains(event.target))close()});
  document.addEventListener('keydown',event=>{if(event.key==='Escape')close()});
@@ -153,7 +159,7 @@ document.addEventListener('submit',event=>{const form=event.target;if(!(form ins
 // Surface all rejected mutations in the same view; otherwise a 4xx response
 // (invalid workflow, stale CSRF, unavailable agent) looks like a dead button.
 document.body.addEventListener('htmx:responseError',event=>{const xhr=event.detail?.xhr;let message=(xhr?.responseText||'Änderung konnte nicht gespeichert werden.').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim();if(!message)message='Änderung konnte nicht gespeichert werden.';notify(message.slice(0,420),'error')});
-document.body.addEventListener('htmx:sendError',()=>notify('Verbindung zum Server fehlgeschlagen. Bitte erneut versuchen.','error'));
+document.body.addEventListener('htmx:sendError',()=>notify(trText('Verbindung zum Server fehlgeschlagen. Bitte erneut versuchen.'),'error'));
 // The dashboard separates current action from historical charts. It is
 // populated asynchronously so live metric updates never delay first render.
 // Only the actual overview owns the attention feed. Other pages reuse the
@@ -162,8 +168,8 @@ const dashboard=document.querySelector('[data-dashboard-overview]');
 if(dashboard){fetch('/dashboard/attention').then(response=>response.ok?response.json():null).then(attention=>{
  if(!attention)return;
  const items=[['Blockierte Tasks',attention.BlockedTasks,'/boards'],['Aktuell fehlgeschlagen · 7 Tage',attention.FailedRuns7d,'/runs'],['Offene Agent-Fragen',attention.OpenInteractions,'/boards'],['Fällig in 24 Stunden',attention.DueNext24h,'/boards']];
- const section=document.createElement('section');section.className='attention-panel';section.setAttribute('aria-label','Braucht Aufmerksamkeit');
- section.innerHTML=`<header><div><p class="section-kicker">Jetzt handeln</p><h2>Braucht Aufmerksamkeit</h2></div><p>Nur offene Punkte, keine Historie.</p></header><div class="attention-grid">${items.map(([label,count,href])=>`<a href="${href}"><strong>${count}</strong><span>${label}</span></a>`).join('')}</div>`;
+ const section=document.createElement('section');section.className='attention-panel';section.setAttribute('aria-label',trText('Braucht Aufmerksamkeit'));
+ section.innerHTML=`<header><div><p class="section-kicker">${trText('Jetzt handeln')}</p><h2>${trText('Braucht Aufmerksamkeit')}</h2></div><p>${trText('Nur offene Punkte, keine Historie.')}</p></header><div class="attention-grid">${items.map(([label,count,href])=>`<a href="${href}"><strong>${count}</strong><span>${trText(label)}</span></a>`).join('')}</div>`;
  const notifications=dashboard.querySelector('.notifications');(notifications||dashboard).before(section);
 }).catch(()=>{})}
 // Provider tests are intentionally token-free checks. They verify the local
@@ -172,15 +178,15 @@ document.querySelectorAll('.provider-card form[action^="/settings/providers/"]')
 // A run log is the terminal view; the compact trace above it explains why the
 // run exists and which delivery decision remains without duplicating logs.
 const traceLog=document.querySelector('[data-run-log-src]');
-document.addEventListener('toggle',async event=>{const entry=event.target;if(!(entry instanceof HTMLDetailsElement)||!entry.open||!entry.dataset.runLogEntry||entry.dataset.loaded)return;const output=entry.querySelector('pre');if(!output)return;entry.dataset.loaded='true';output.hidden=false;output.textContent='Vollständige Ausgabe wird geladen …';try{const response=await fetch(entry.dataset.runLogEntry);if(!response.ok)throw new Error();output.textContent=await response.text()}catch(_){output.textContent='Die vollständige Ausgabe konnte nicht geladen werden.'}},true);
+document.addEventListener('toggle',async event=>{const entry=event.target;if(!(entry instanceof HTMLDetailsElement)||!entry.open||!entry.dataset.runLogEntry||entry.dataset.loaded)return;const output=entry.querySelector('pre');if(!output)return;entry.dataset.loaded='true';output.hidden=false;output.textContent=trText('Vollständige Ausgabe wird geladen …');try{const response=await fetch(entry.dataset.runLogEntry);if(!response.ok)throw new Error();output.textContent=await response.text()}catch(_){output.textContent=trText('Die vollständige Ausgabe konnte nicht geladen werden.')}},true);
 // The run console starts with a compact tail. Older output is fetched in
 // chronological pages on demand, so a noisy dependency install cannot make
 // the active page, browser history or live SSE refresh unresponsive.
 document.addEventListener('click',async event=>{const button=event.target.closest('[data-run-log-older]');if(!button||button.disabled)return;const host=button.closest('[data-run-log-src]');if(!host)return;const before=button.dataset.before;if(!/^\d+$/.test(before||''))return;button.disabled=true;button.textContent='Ältere Ausgabe wird geladen …';try{const response=await fetch(`${host.dataset.runLogSrc}?before=${encodeURIComponent(before)}`);if(!response.ok)throw new Error();const page=document.createElement('template');page.innerHTML=await response.text();button.closest('[data-run-log-page]')?.replaceWith(page.content)}catch(_){button.disabled=false;button.textContent='Ältere Ausgabe erneut laden';notify('Ältere Ausgabe konnte nicht geladen werden.','error')}});
 if(traceLog){const match=traceLog.dataset.runLogSrc.match(/^\/runs\/([^/]+)\/logs$/);if(match){fetch(`/runs/${match[1]}/trace`).then(response=>response.ok?response.json():null).then(trace=>{
  if(!trace||!trace.Items?.length)return;
- const section=document.createElement('section');section.className='run-trace';const heading=document.createElement('h2');heading.textContent='Ablauf';section.append(heading);const list=document.createElement('ol');
- trace.Items.forEach(item=>{const row=document.createElement('li'),title=document.createElement('strong'),meta=document.createElement('small'),detail=document.createElement('span');title.textContent=item.Kind;meta.textContent=new Date(item.At).toLocaleString('de-DE');detail.textContent=item.Detail;row.append(title,meta,detail);list.append(row)});section.append(list);traceLog.closest('section')?.before(section);
+ const section=document.createElement('section');section.className='run-trace';const heading=document.createElement('h2');heading.textContent=trText('Ablauf');section.append(heading);const list=document.createElement('ol');
+ trace.Items.forEach(item=>{const row=document.createElement('li'),title=document.createElement('strong'),meta=document.createElement('small'),detail=document.createElement('span');title.textContent=item.Kind;meta.textContent=new Date(item.At).toLocaleString(shipyardLanguage());detail.textContent=item.Detail;row.append(title,meta,detail);list.append(row)});section.append(list);traceLog.closest('section')?.before(section);
 }).catch(()=>{})}}
 // Delivery review stays next to the console: load the real patch on demand,
 // then allow a human to reject it with task-level feedback and an optional

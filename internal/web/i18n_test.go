@@ -134,4 +134,9 @@ func TestLegacyDictionariesProvideBothBrowserDirections(t *testing.T) {
 	if len(dictionaries[languageGerman]) != len(dictionaries[languageEnglish]) {
 		t.Fatalf("language dictionaries have different coverage: de=%d en=%d", len(dictionaries[languageGerman]), len(dictionaries[languageEnglish]))
 	}
+	for _, phrase := range []string{"Tastatursteuerung", "Navigation öffnen", "Braucht Aufmerksamkeit", "Ablauf"} {
+		if got := dictionaries[languageEnglish][phrase]; got == "" || got == phrase {
+			t.Fatalf("dynamic phrase %q has no English translation: %q", phrase, got)
+		}
+	}
 }
