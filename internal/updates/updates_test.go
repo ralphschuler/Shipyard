@@ -30,6 +30,34 @@ func TestClientDownloadsAndVerifiesReleaseArtifact(t *testing.T) {
 	}
 }
 
+func TestClientAuthenticatesGitHubArtifactDownloadWithoutLeakingToken(t *testing.T) {
+	var githubAuthorization, externalAuthorization string
+	transport := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		switch req.URL.Host {
+		case "github.com":
+			githubAuthorization = req.Header.Get("Authorization")
+		case "downloads.example":
+			externalAuthorization = req.Header.Get("Authorization")
+		}
+		body := "shipyard release binary"
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte("shipyard release binary")))
+	client := Client{Token: "read-only-token", HTTP: &http.Client{Transport: transport}}
+	if _, err := client.DownloadAndVerify(context.Background(), "https://github.com/ralphschuler/Shipyard/releases/download/v1.3.0/shipyard-linux-amd64", digest); err != nil {
+		t.Fatal(err)
+	}
+	if githubAuthorization != "Bearer read-only-token" {
+		t.Fatalf("GitHub authorization = %q", githubAuthorization)
+	}
+	if _, err := client.DownloadAndVerify(context.Background(), "https://downloads.example/shipyard", digest); err != nil {
+		t.Fatal(err)
+	}
+	if externalAuthorization != "" {
+		t.Fatalf("external authorization leaked = %q", externalAuthorization)
+	}
+}
+
 func TestValidateArtifactURLRequiresConfiguredGitHubRepository(t *testing.T) {
 	valid := "https://github.com/ralphschuler/Shipyard/releases/download/v1.3.0/shipyard-linux-arm64"
 	if err := ValidateArtifactURL(valid, "ralphschuler/Shipyard"); err != nil {
