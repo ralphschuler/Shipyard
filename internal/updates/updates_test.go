@@ -2,10 +2,53 @@ package updates
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
 	"reflect"
+	"strings"
 	"testing"
 )
+
+func TestClientDownloadsAndVerifiesReleaseArtifact(t *testing.T) {
+	body := "shipyard release binary"
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(body)))
+	client := Client{HTTP: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != "https://downloads.example/shipyard" {
+			t.Fatalf("unexpected artifact URL: %s", req.URL)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}}
+	got, err := client.DownloadAndVerify(context.Background(), "https://downloads.example/shipyard", digest)
+	if err != nil || string(got) != body {
+		t.Fatalf("artifact = %q, err = %v", got, err)
+	}
+	if _, err := client.DownloadAndVerify(context.Background(), "https://downloads.example/shipyard", strings.Repeat("0", 64)); err == nil {
+		t.Fatal("expected checksum mismatch")
+	}
+}
+
+func TestValidateArtifactURLRequiresConfiguredGitHubRepository(t *testing.T) {
+	valid := "https://github.com/ralphschuler/Shipyard/releases/download/v1.3.0/shipyard-linux-arm64"
+	if err := ValidateArtifactURL(valid, "ralphschuler/Shipyard"); err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range []string{
+		"https://evil.example/shipyard",
+		"https://github.com/other/project/releases/download/v1.3.0/shipyard",
+		"http://github.com/ralphschuler/Shipyard/releases/download/v1.3.0/shipyard",
+	} {
+		if ValidateArtifactURL(candidate, "ralphschuler/Shipyard") == nil {
+			t.Fatalf("expected artifact URL rejection: %s", candidate)
+		}
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestCompareOnlyReportsNewerSemanticRelease(t *testing.T) {
 	for _, tc := range []struct{ current, release, want string }{

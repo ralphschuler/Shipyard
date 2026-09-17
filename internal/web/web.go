@@ -39,6 +39,7 @@ type App struct {
 	templates    *template.Template
 	live         *liveHub
 	logins       *loginThrottle
+	updateMu     sync.Mutex
 	projectSyncs sync.Map // project UUID -> *sync.Mutex
 }
 type liveHub struct {
@@ -2048,6 +2049,11 @@ func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Explizite Update-Bestätigung erforderlich.", http.StatusBadRequest)
 		return
 	}
+	// Serialize the check/backup/mutation sequence inside this process. A
+	// second browser tab must not pass the busy check while the first update is
+	// already replacing the binary.
+	a.updateMu.Lock()
+	defer a.updateMu.Unlock()
 	if a.update == nil {
 		// No generic shell/binary replacement is permitted. The deployment-specific
 		// adapter must be supplied before an installation can mutate this process.
@@ -2073,7 +2079,16 @@ func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	a.auditUpdate(r, "update.install_confirmed", snapshot, "confirmed")
 	progress := make([]updates.Progress, 0, 12)
-	if err := a.update.Install(r.Context(), snapshot, func(p updates.Progress) { progress = append(progress, p) }); err != nil {
+	if err := a.update.Install(r.Context(), snapshot, func(p updates.Progress) {
+		progress = append(progress, p)
+		if p.Status == "running" {
+			a.auditUpdate(r, "update."+p.Phase, snapshot, "started")
+		} else if p.Status == "succeeded" {
+			a.auditUpdate(r, "update."+p.Phase, snapshot, "succeeded")
+		} else if p.Status == "failed" {
+			a.auditUpdate(r, "update."+p.Phase, snapshot, "failed")
+		}
+	}); err != nil {
 		a.auditUpdate(r, "update.install_failed", snapshot, "failed")
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
@@ -2085,7 +2100,7 @@ func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
 func (a *App) activeUpdateRuns(ctx context.Context) (bool, error) {
 	var busy bool
 	err := a.store.DB.QueryRow(ctx, `SELECT EXISTS(
-		SELECT 1 FROM agent_runs WHERE status IN ('queued','running')
+		SELECT 1 FROM agent_runs WHERE status IN ('queued','running') AND workspace_snapshot <> ''
 	) OR EXISTS(
 		SELECT 1 FROM agent_run_batches WHERE status IN ('queued','running')
 	)`).Scan(&busy)

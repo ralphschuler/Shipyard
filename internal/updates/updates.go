@@ -2,12 +2,16 @@ package updates
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -32,6 +36,8 @@ type Release struct {
 	Verified          bool   `json:"verified"`
 	Compatible        bool   `json:"compatible"`
 	Checksum          string `json:"checksum"`
+	ArtifactName      string `json:"artifactName"`
+	ArtifactURL       string `json:"artifactUrl"`
 }
 type Snapshot struct {
 	Current     Current `json:"current"`
@@ -110,6 +116,18 @@ func ValidateRelease(r Release, repository string) error {
 	return nil
 }
 
+func ValidateArtifactURL(artifactURL, repository string) error {
+	u, err := url.Parse(strings.TrimSpace(artifactURL))
+	if err != nil || u.Scheme != "https" || u.Host != "github.com" || u.User != nil {
+		return errors.New("artifact URL is not a GitHub HTTPS URL")
+	}
+	prefix := "/" + strings.Trim(repository, "/") + "/releases/download/"
+	if !strings.HasPrefix(u.Path, prefix) || strings.TrimPrefix(u.Path, prefix) == "" {
+		return errors.New("artifact URL is outside the configured repository")
+	}
+	return nil
+}
+
 // ValidateReleaseForBranch verifies the complete release trust chain. The
 // branch and the commit resolved from the immutable tag are inputs from the
 // GitHub API, never values supplied by the operator or the UI.
@@ -170,6 +188,45 @@ func semver(v string) ([3]int, bool) {
 type Client struct {
 	HTTP           *http.Client
 	BaseURL, Token string
+	GOOS, GOARCH   string
+}
+
+// DownloadAndVerify downloads only the URL selected from the trusted GitHub
+// release response and compares the complete byte stream with its advertised
+// SHA-256 digest. It deliberately returns no partial artifact on failure.
+func (c Client) DownloadAndVerify(ctx context.Context, artifactURL, expected string) ([]byte, error) {
+	if !strings.HasPrefix(artifactURL, "https://") || !checksumPattern.MatchString(expected) {
+		return nil, errors.New("artifact URL or checksum is not trusted")
+	}
+	httpClient := c.HTTP
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, artifactURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/octet-stream")
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("artifact download returned %s", res.Status)
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, 512<<20))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) == 512<<20 {
+		return nil, errors.New("artifact exceeds maximum size")
+	}
+	actual := sha256.Sum256(body)
+	if !strings.EqualFold(hex.EncodeToString(actual[:]), expected) {
+		return nil, errors.New("artifact checksum mismatch")
+	}
+	return body, nil
 }
 
 func (c Client) latest(ctx context.Context, repo string) (githubRelease, error) {
@@ -255,9 +312,15 @@ func Resolve(ctx context.Context, current Current, repo, branch string, client C
 	}
 	// GitHub's asset digest is the only checksum accepted here; caller must not
 	// substitute a user-provided or merely non-empty digest.
+	goos, goarch := client.GOOS, client.GOARCH
+	if goos == "" || goarch == "" {
+		goos, goarch = runtime.GOOS, runtime.GOARCH
+	}
 	for _, a := range r.Assets {
-		if strings.HasPrefix(a.Digest, "sha256:") {
+		name := strings.ToLower(a.Name)
+		if strings.HasPrefix(a.Digest, "sha256:") && strings.Contains(name, goos) && strings.Contains(name, goarch) && ValidateArtifactURL(a.BrowserDownloadURL, repo) == nil {
 			s.Release.Checksum = strings.TrimPrefix(a.Digest, "sha256:")
+			s.Release.ArtifactName, s.Release.ArtifactURL = a.Name, a.BrowserDownloadURL
 			break
 		}
 	}
