@@ -2281,17 +2281,28 @@ func (a *App) runLogsAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Ungültiger Log-Seitenzeiger.", http.StatusBadRequest)
 		return
 	}
+	after, err := strconv.Atoi(r.URL.Query().Get("after"))
+	if r.URL.Query().Get("after") != "" && (err != nil || after < 0) {
+		http.Error(w, "Ungültiger Log-Fortsetzungszeiger.", http.StatusBadRequest)
+		return
+	}
+	if before > 0 && after > 0 {
+		http.Error(w, "Es kann nur eine Log-Richtung geladen werden.", http.StatusBadRequest)
+		return
+	}
 	var entries []domain.RunLog
-	var truncated bool
+	var truncated, hasMore bool
 	if before > 0 {
 		entries, truncated, err = a.store.RunLogsBefore(r.Context(), run.ID, before, browserRunLogLimit)
+	} else if after > 0 {
+		entries, hasMore, err = a.store.RunLogsAfter(r.Context(), run.ID, after, browserRunLogLimit)
 	} else {
 		entries, truncated, err = a.store.RecentRunLogs(r.Context(), run.ID, browserRunLogLimit)
 	}
 	for index := range entries {
 		entries[index].Message = automation.RedactSensitiveText(entries[index].Message)
 	}
-	writeAPI(w, map[string]any{"entries": entries, "truncated": truncated, "status": run.Status}, err)
+	writeAPI(w, map[string]any{"entries": entries, "truncated": truncated, "hasMore": hasMore, "status": run.Status}, err)
 }
 func (a *App) createBoardAPI(w http.ResponseWriter, r *http.Request) {
 	var input struct{ Name, Template string }
@@ -2679,7 +2690,7 @@ func (a *App) requestDecision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Entscheidung gespeichert, Benachrichtigung fehlgeschlagen: "+err.Error(), http.StatusConflict)
 		return
 	}
-	if _, err := a.store.MoveTaskToColumnType(r.Context(), taskID, "needs_action", "web"); err != nil {
+	if _, err := a.store.MoveTaskToNeedsActionForHumanDecision(r.Context(), taskID); err != nil {
 		http.Error(w, "Entscheidung gespeichert, Task konnte nicht verschoben werden: "+err.Error(), http.StatusConflict)
 		return
 	}

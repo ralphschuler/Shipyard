@@ -36,6 +36,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ChatBubble } from "@/components/ui/chat-bubble";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { normalizeLanguage, translate, type Language } from "@/i18n";
 
@@ -95,6 +96,7 @@ type LiveChange = {
   table?: string;
   action?: string;
   id?: string;
+  run_id?: string;
 };
 
 function refreshData(change: LiveChange = {}) {
@@ -123,7 +125,11 @@ function endpointUsesChange(endpoint: string, change: LiveChange) {
   if (endpoint.includes("/skills")) return matches("skill_sources", "skills", "installed_skills", "agent_skills");
   if (endpoint.includes("/agents")) return matches("agents", "agent_skills", "installed_skills", "skills");
   if (endpoint.includes("/automations")) return matches("automation_rules", "automation_events", "agents", "workflow_columns", "labels", "boards");
-  if (endpoint.includes("/schedules")) return matches("schedules", "agents", "boards");
+  // Time rules are stored as automation_rules with the `task.due_soon`
+  // trigger. There is intentionally no separate `schedules` table, so
+  // listening for that imaginary table left this projection stale after an
+  // external/MCP edit.
+  if (endpoint.includes("/schedules")) return matches("automation_rules", "agents", "boards");
   if (endpoint.includes("/webhooks")) return matches("webhook_subscriptions", "webhook_deliveries");
   if (endpoint.includes("/projects") || endpoint.includes("/project-groups")) return matches("projects", "board_projects", "project_groups", "project_group_members", "project_sources", "integration_connections");
   // Run logs are high-frequency terminal output.  Only the dedicated console
@@ -402,8 +408,10 @@ export default function App() {
             <Suspense fallback={<Loading />}><Dashboard /></Suspense>
           ) : active?.endpoint ? (
             <ResourceList endpoint={active.endpoint} title={t(active.name)} />
-          ) : (
+          ) : route === "/settings" || route.startsWith("/settings/") || route === "/account" ? (
             <Settings route={route} />
+          ) : (
+            <NotFound />
           )}
         </main>
       </div>
@@ -473,10 +481,26 @@ function csrf() {
   );
 }
 async function mutation(url: string, init: RequestInit) {
+  // The established Go handlers use Request.ParseForm(), which deliberately
+  // consumes URL-encoded forms but not browser multipart bodies. The React UI
+  // has no file upload mutations, so normalize FormData once here and keep all
+  // legacy actions compatible without duplicating request plumbing per view.
+  let body = init.body;
+  const headers = new Headers(init.headers);
+  if (body instanceof FormData) {
+    const encoded = new URLSearchParams();
+    body.forEach((value, key) => {
+      if (typeof value === "string") encoded.append(key, value);
+    });
+    body = encoded;
+    headers.set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8");
+  }
+  headers.set("X-CSRF-Token", csrf());
   const response = await fetch(url, {
     ...init,
+    body,
     credentials: "same-origin",
-    headers: { ...init.headers, "X-CSRF-Token": csrf() },
+    headers,
   });
   if (!response.ok) throw new Error(await response.text());
   // The legacy form handlers use PRG for success.  A validation failure on a
@@ -719,6 +743,8 @@ function Projects() {
   const { data: groups } = useAPI<any[]>("/api/v1/project-groups");
   const [editing, setEditing] = useState<any>();
   const [open, setOpen] = useState(false);
+  const [groupsOpen, setGroupsOpen] = useState(false);
+  const [editingGroup, setEditingGroup] = useState<any>();
   const [error, setError] = useState("");
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -752,6 +778,30 @@ function Projects() {
       setError(String(err));
     }
   };
+  const saveGroup = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!editingGroup) return;
+    try {
+      await mutation(`/project-groups/${editingGroup.ID}`, {
+        method: "POST",
+        body: new FormData(event.target as HTMLFormElement),
+      });
+      setEditingGroup(undefined);
+      refreshData();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
+  const deleteGroup = async (id: string) => {
+    if (!confirm("Projektgruppe wirklich entfernen? Projekte und bereits gespeicherte Task-Ziele bleiben erhalten.")) return;
+    try {
+      await mutation(`/project-groups/${id}/delete`, { method: "POST" });
+      setEditingGroup(undefined);
+      refreshData();
+    } catch (err) {
+      setError(String(err));
+    }
+  };
   if (loadFailed) return <Failure />;
   if (!items || !boards || !groups) return <Loading />;
   const bound = (project: any, board: any) =>
@@ -767,14 +817,19 @@ function Projects() {
             Repositories, Gruppen und Board-Zuordnung.
           </CardDescription>
         </div>
-        <Button
-          onClick={() => {
-            setEditing(undefined);
-            setOpen(true);
-          }}
-        >
-          Projekt anlegen
-        </Button>
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button variant="outline" onClick={() => setGroupsOpen(true)}>
+            Gruppen verwalten
+          </Button>
+          <Button
+            onClick={() => {
+              setEditing(undefined);
+              setOpen(true);
+            }}
+          >
+            Projekt anlegen
+          </Button>
+        </div>
       </CardHeader>
       <CardContent>
         {error && <p className="mb-4 text-sm text-destructive">{error}</p>}
@@ -802,7 +857,15 @@ function Projects() {
                       </Badge>
                     ))}
                     {groups.filter((group) => grouped(project, group)).map((group) => (
-                      <Badge key={group.ID} variant="secondary">
+                      <Badge
+                        key={group.ID}
+                        variant="outline"
+                        style={{
+                          borderColor: group.Color || undefined,
+                          color: group.Color || undefined,
+                          backgroundColor: group.Color ? `${group.Color}18` : undefined,
+                        }}
+                      >
                         {group.Name}
                       </Badge>
                     ))}
@@ -912,6 +975,73 @@ function Projects() {
               <Button type="submit">Speichern</Button>
             </DialogFooter>
           </form>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={groupsOpen} onOpenChange={(value) => {
+        setGroupsOpen(value);
+        if (!value) setEditingGroup(undefined);
+      }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Projektgruppen</DialogTitle>
+            <DialogDescription>
+              Gruppen bündeln Projekte für die Auswahl. Eine Gruppe ohne Projekt wird automatisch entfernt.
+            </DialogDescription>
+          </DialogHeader>
+          {editingGroup ? (
+            <form className="grid gap-3" onSubmit={saveGroup}>
+              <label className="grid gap-1 text-sm">
+                Name
+                <Input name="name" required defaultValue={editingGroup.Name} />
+              </label>
+              <label className="grid gap-1 text-sm">
+                Beschreibung
+                <textarea name="description" className="min-h-20 rounded-md border bg-transparent p-2" defaultValue={editingGroup.Description} />
+              </label>
+              <label className="grid gap-1 text-sm">
+                Farbe
+                <Input name="color" type="color" defaultValue={editingGroup.Color || "#3158d4"} />
+              </label>
+              <fieldset className="grid gap-2">
+                <legend className="text-sm font-medium">Zugehörige Projekte</legend>
+                {items.map((project) => (
+                  <label key={project.ID} className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      name="project_ids"
+                      value={project.ID}
+                      defaultChecked={grouped(project, editingGroup)}
+                    />
+                    {project.Name}
+                  </label>
+                ))}
+              </fieldset>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={() => setEditingGroup(undefined)}>Zurück</Button>
+                <Button type="button" variant="destructive" onClick={() => deleteGroup(editingGroup.ID)}>Gruppe löschen</Button>
+                <Button type="submit">Gruppe speichern</Button>
+              </DialogFooter>
+            </form>
+          ) : groups.length ? (
+            <div className="divide-y">
+              {groups.map((group) => (
+                <article key={group.ID} className="flex items-center justify-between gap-3 py-3 first:pt-0">
+                  <div className="min-w-0">
+                    <Badge variant="outline" style={{ borderColor: group.Color || undefined, color: group.Color || undefined, backgroundColor: group.Color ? `${group.Color}18` : undefined }}>
+                      {group.Name}
+                    </Badge>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      {group.Projects?.length || 0} Projekt{group.Projects?.length === 1 ? "" : "e"}
+                      {group.Description ? ` · ${group.Description}` : ""}
+                    </p>
+                  </div>
+                  <Button size="sm" variant="outline" onClick={() => setEditingGroup(group)}>Bearbeiten</Button>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <EmptyState title="Noch keine Gruppen" description="Lege beim Speichern eines Projekts eine neue Gruppe an." />
+          )}
         </DialogContent>
       </Dialog>
     </Card>
@@ -1249,7 +1379,11 @@ function AgentForm() {
 }
 function Settings({ route }: { route: string }) {
   const tab =
-    route === "/account" ? "account" : route.split("/").pop() || "providers";
+    route === "/account"
+      ? "account"
+      : route === "/settings"
+        ? "providers"
+        : route.split("/").pop() || "providers";
   const tabs = [
     ["providers", "Provider"],
     ["updates", "Updates"],
@@ -1860,6 +1994,21 @@ function Failure() {
     </Card>
   );
 }
+function NotFound() {
+  return (
+    <Card>
+      <CardContent className="flex min-h-56 flex-col items-center justify-center gap-4 py-12 text-center">
+        <p className="text-sm font-medium">Diese Ansicht gibt es nicht.</p>
+        <p className="max-w-md text-sm text-muted-foreground">
+          Öffne die Übersicht oder wähle einen Bereich aus der Navigation.
+        </p>
+        <Button asChild size="sm">
+          <a href="#/">Zur Übersicht</a>
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
 function EmptyState({
   title,
   description,
@@ -1970,6 +2119,13 @@ function WorkflowEditorV2({ id }: { id: string }) {
         method: "POST",
         body: new FormData(e.target as HTMLFormElement),
       });
+      // A successful mutation must return the operator to the canvas. Keeping
+      // the form open made touch users able to submit the same create form a
+      // second time and obscured the newly created node behind the dialog.
+      if (path === "/boards/" + id + "/columns") setNewOpen(false);
+      if (path === "/boards/" + id + "/transitions") setTransitionOpen(false);
+      if (path.startsWith("/columns/")) setColumn(undefined);
+      if (path.startsWith("/transitions/")) setTransition(undefined);
       refreshData();
     } catch (err) {
       setMessage(String(err));
@@ -1979,6 +2135,8 @@ function WorkflowEditorV2({ id }: { id: string }) {
     if (!confirm(`${label} wirklich löschen?`)) return;
     try {
       await mutation(path, { method: "POST" });
+      if (path.startsWith("/columns/")) setColumn(undefined);
+      if (path.startsWith("/transitions/")) setTransition(undefined);
       refreshData();
     } catch (err) {
       setMessage(String(err));
@@ -3120,15 +3278,20 @@ function TaskDetail({ id }: { id: string }) {
                   </form>
                 </section>
               ))}
-              <div className="space-y-4">
-                {data.Comments.map((entry: any) => (
-                  <div key={entry.ID} className="border-b pb-4 last:border-0">
-                    <p className="text-sm font-medium">{entry.Author}</p>
-                    <p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">
-                      {entry.Body}
-                    </p>
-                  </div>
-                ))}
+              <div className="space-y-4" aria-label="Task-Kommentare">
+                {data.Comments.map((entry: any) => {
+                  const automated = /agent|taskboard|system|codex|qa/i.test(entry.Author || "");
+                  return (
+                    <ChatBubble
+                      key={entry.ID}
+                      author={entry.Author || "Unbekannt"}
+                      timestamp={entry.CreatedAt ? new Date(entry.CreatedAt).toLocaleString("de-DE") : undefined}
+                      side={automated ? "incoming" : "outgoing"}
+                    >
+                      <p className="whitespace-pre-wrap">{entry.Body}</p>
+                    </ChatBubble>
+                  );
+                })}
               </div>
               <form className="mt-5 grid gap-3" onSubmit={commentSubmit}>
                 <textarea
@@ -4163,6 +4326,20 @@ function Runs() {
               {run.AgentName || "Agent"} ·{" "}
               {run.Summary || run.ErrorMessage || "Kein Ergebnistext"}
             </p>
+            <dl className="mt-3 grid grid-cols-3 gap-2 text-xs text-muted-foreground sm:max-w-xl">
+              <div>
+                <dt>Gestartet</dt>
+                <dd className="mt-0.5 text-foreground">{formatDateTime(run.StartedAt || run.CreatedAt)}</dd>
+              </div>
+              <div>
+                <dt>Beendet</dt>
+                <dd className="mt-0.5 text-foreground">{formatDateTime(run.FinishedAt)}</dd>
+              </div>
+              <div>
+                <dt>Laufzeit</dt>
+                <dd className="mt-0.5 text-foreground">{formatDuration(run.DurationSeconds, run.Status)}</dd>
+              </div>
+            </dl>
           </a>
         )) : <EmptyState title="Noch keine Runs" description="Starte einen Agenten an einer Aufgabe. Hier erscheinen Laufzeit, Ergebnis und das vollständige Protokoll." />}
         {cursor && (
@@ -4173,6 +4350,17 @@ function Runs() {
       </CardContent>
     </Card>
   );
+}
+function formatDateTime(value?: string) {
+  if (!value) return "–";
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? "–" : date.toLocaleString("de-DE");
+}
+function formatDuration(seconds: unknown, status?: string) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) return status === "running" ? "läuft …" : "–";
+  if (value < 60) return `${Math.round(value)} s`;
+  return `${Math.floor(value / 60)} min ${Math.round(value % 60)} s`;
 }
 function Skills() {
   const { data: installed, error } = useAPI<any[]>("/api/v1/skills");
@@ -4325,6 +4513,16 @@ function Audit() {
               {event.TokenName ? `Token: ${event.TokenName}` : "Control Panel"}{" "}
               · {event.ResourceType || "Ressource"}
             </p>
+            <details className="mt-2 text-xs text-muted-foreground">
+              <summary className="cursor-pointer select-none hover:text-foreground">
+                Technische Details
+              </summary>
+              <dl className="mt-2 grid gap-1 rounded-md border bg-muted/30 p-3">
+                <div><dt className="inline font-medium text-foreground">Ressource: </dt><dd className="inline">{event.ResourceType || "–"}</dd></div>
+                <div><dt className="inline font-medium text-foreground">ID: </dt><dd className="inline break-all font-mono">{event.ResourceID || "–"}</dd></div>
+                {event.Metadata && <div><dt className="font-medium text-foreground">Metadaten</dt><dd className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap font-mono">{event.Metadata}</dd></div>}
+              </dl>
+            </details>
           </article>
         )) : <EmptyState title="Noch keine Audit-Einträge" description="Aktionen im Control Panel und über MCP werden hier nachvollziehbar protokolliert." />}
         {cursor && (
@@ -4337,7 +4535,11 @@ function Audit() {
   );
 }
 function RunConsole({ runID }: { runID: string }) {
-  const { data, error } = useAPI<any>(`/api/v1/runs/${runID}/logs`);
+  // The initial request deliberately fetches a bounded tail. Subsequent live
+  // notifications request only entries after the final known sequence, so a
+  // noisy terminal never causes the entire page or console history to reload.
+  const [data, setData] = useState<any>();
+  const [error, setError] = useState(false);
   const [olderLogs, setOlderLogs] = useState<any[]>([]);
   const [olderAvailable, setOlderAvailable] = useState<boolean | undefined>();
   const [message, setMessage] = useState("");
@@ -4349,6 +4551,76 @@ function RunConsole({ runID }: { runID: string }) {
   const logs = data?.entries || [];
   const visibleLogs = [...olderLogs, ...logs];
   const canLoadOlder = olderAvailable ?? Boolean(data?.truncated);
+
+  useEffect(() => {
+    let stopped = false;
+    let pending: number | undefined;
+    let controller: AbortController | undefined;
+    const load = async (incremental: boolean) => {
+      controller?.abort();
+      controller = new AbortController();
+      const latest = latestSequence.current;
+      const suffix = incremental && latest ? `?after=${encodeURIComponent(latest)}` : "";
+      try {
+        const response = await fetch(`/api/v1/runs/${runID}/logs${suffix}`, {
+          credentials: "same-origin",
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(await response.text());
+        const next = await response.json();
+        if (stopped) return;
+        setData((current: any) => {
+          if (!incremental || !current) {
+            latestSequence.current = next.entries?.[next.entries.length - 1]?.Sequence || 0;
+            return next;
+          }
+          const existing = current.entries || [];
+          const additions = (next.entries || []).filter((entry: any) =>
+            !existing.some((known: any) => known.Sequence === entry.Sequence),
+          );
+          // Preserve the stable console DOM if a notification has no fresh
+          // line (for example a run-status update).
+          if (!additions.length) return { ...current, status: next.status };
+          const merged = [...existing, ...additions];
+          // Keep a bounded live tail. Older entries remain explicitly
+          // available through the paging action rather than growing the DOM
+          // forever during a long-running agent session.
+          const entries = merged.slice(-250);
+          latestSequence.current = entries[entries.length - 1]?.Sequence || latestSequence.current;
+          return { ...current, entries, truncated: current.truncated || merged.length > entries.length, status: next.status };
+        });
+        setError(false);
+        // The API intentionally bounds every response. Catch up immediately
+        // when a particularly chatty process produced more than one page,
+        // without refreshing any surrounding resource.
+        if (incremental && next.hasMore) {
+          window.setTimeout(() => void load(true), 0);
+        }
+      } catch (reason: any) {
+        if (!stopped && reason?.name !== "AbortError" && !data) setError(true);
+      }
+    };
+    setData(undefined);
+    setError(false);
+    latestSequence.current = undefined;
+    void load(false);
+    const refresh = (event: Event) => {
+      const change = (event as CustomEvent<LiveChange>).detail ?? {};
+      // Run-log events include their owning run. Ignore output from every
+      // other agent; a globally open SSE connection must not fan one terminal
+      // line out into console refreshes for unrelated detail views.
+      if (change.table !== "agent_run_logs" || change.run_id !== runID) return;
+      window.clearTimeout(pending);
+      pending = window.setTimeout(() => void load(true), 350);
+    };
+    window.addEventListener("taskboard:data-change", refresh);
+    return () => {
+      stopped = true;
+      controller?.abort();
+      window.clearTimeout(pending);
+      window.removeEventListener("taskboard:data-change", refresh);
+    };
+  }, [runID]);
 
   const isNearEnd = () => {
     const log = logRef.current;
@@ -4392,7 +4664,6 @@ function RunConsole({ runID }: { runID: string }) {
     followLogs.current = nearEnd;
     if (nearEnd) setNewLogsAvailable(false);
   };
-
   const loadOlderLogs = async () => {
     const before = visibleLogs[0]?.Sequence;
     if (!before) return;
@@ -4469,6 +4740,7 @@ function RunDetail({ id }: { id: string }) {
       refreshData();
     } catch (err) {
       setMessage(String(err));
+    } finally {
       setBusy(false);
     }
   };

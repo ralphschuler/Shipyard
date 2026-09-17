@@ -600,6 +600,15 @@ func (s *Store) UpdateProjectGroup(c context.Context, id, name, description, col
 		return err
 	}
 	defer tx.Rollback(c)
+	// Groups are derived catalogue metadata: without members there is no group
+	// to preserve. Existing task targets are repository snapshots and therefore
+	// remain intact when their former source group is removed.
+	if len(projectIDs) == 0 {
+		if _, err = tx.Exec(c, `DELETE FROM project_groups WHERE id=$1`, id); err != nil {
+			return err
+		}
+		return tx.Commit(c)
+	}
 	if _, err = tx.Exec(c, `UPDATE project_groups SET name=$2,description=$3,color=$4,updated_at=now() WHERE id=$1`, id, strings.TrimSpace(name), strings.TrimSpace(description), color); err != nil {
 		return err
 	}
@@ -718,6 +727,26 @@ func (s *Store) TaskRepositoryTargets(c context.Context, taskID string) ([]domai
 	defer rows.Close()
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[domain.RepositoryTarget])
 }
+
+// EffectiveTaskRepositoryTargets prefers explicit task targets. If none were
+// selected, exactly one project on the task's board is an unambiguous default.
+// Boards with zero or multiple projects never fan out implicitly.
+func (s *Store) EffectiveTaskRepositoryTargets(c context.Context, taskID string) ([]domain.RepositoryTarget, error) {
+	targets, err := s.TaskRepositoryTargets(c, taskID)
+	if err != nil || len(targets) > 0 {
+		return targets, err
+	}
+	task, err := s.GetTask(c, taskID)
+	if err != nil {
+		return nil, err
+	}
+	projects, err := s.BoardProjects(c, task.BoardID)
+	if err != nil || len(projects) != 1 {
+		return nil, err
+	}
+	project := projects[0]
+	return []domain.RepositoryTarget{{TaskID: taskID, ProjectID: project.ID, ProjectName: project.Name, RepositoryURL: project.RepositoryURL, DefaultBranch: project.DefaultBranch, LocalPath: project.LocalPath}}, nil
+}
 func (s *Store) TaskTargetProjects(c context.Context, taskID string) ([]domain.Project, error) {
 	rows, err := s.DB.Query(c, `SELECT DISTINCT p.id,p.name,p.repository_url,p.default_branch,p.local_path,p.last_synced_at,p.last_sync_error,p.created_at,p.updated_at FROM projects p WHERE p.id IN (SELECT project_id FROM task_target_projects WHERE task_id=$1 UNION SELECT m.project_id FROM project_group_members m JOIN task_target_groups g ON g.group_id=m.group_id WHERE g.task_id=$1) ORDER BY p.name`, taskID)
 	if err != nil {
@@ -725,6 +754,22 @@ func (s *Store) TaskTargetProjects(c context.Context, taskID string) ([]domain.P
 	}
 	defer rows.Close()
 	return pgx.CollectRows(rows, pgx.RowToStructByNameLax[domain.Project])
+}
+
+func (s *Store) EffectiveTaskTargetProjects(c context.Context, taskID string) ([]domain.Project, error) {
+	projects, err := s.TaskTargetProjects(c, taskID)
+	if err != nil || len(projects) > 0 {
+		return projects, err
+	}
+	task, err := s.GetTask(c, taskID)
+	if err != nil {
+		return nil, err
+	}
+	projects, err = s.BoardProjects(c, task.BoardID)
+	if err != nil || len(projects) != 1 {
+		return nil, err
+	}
+	return projects, nil
 }
 func (s *Store) TaskTargetGroups(c context.Context, taskID string) ([]domain.ProjectGroup, error) {
 	rows, err := s.DB.Query(c, `SELECT g.id,g.name,g.description,g.color,g.created_at,g.updated_at FROM project_groups g JOIN task_target_groups t ON t.group_id=g.id WHERE t.task_id=$1 ORDER BY g.name`, taskID)
@@ -817,8 +862,22 @@ func (s *Store) SetProjectDefaultBranch(c context.Context, id, branch string) er
 	return err
 }
 func (s *Store) DeleteProject(c context.Context, id string) error {
-	_, err := s.DB.Exec(c, `DELETE FROM projects WHERE id=$1`, id)
-	return err
+	// A project group is catalogue metadata, not a durable task target. Task
+	// repository targets are resolved and snapshotted when the task is saved,
+	// so removing an otherwise unused group here cannot alter an existing
+	// task's scope. Keep the catalogue free of empty groups after deletion.
+	tx, err := s.DB.Begin(c)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(c)
+	if _, err = tx.Exec(c, `DELETE FROM projects WHERE id=$1`, id); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(c, `DELETE FROM project_groups g WHERE NOT EXISTS (SELECT 1 FROM project_group_members m WHERE m.group_id=g.id)`); err != nil {
+		return err
+	}
+	return tx.Commit(c)
 }
 func (s *Store) RecordProjectSync(c context.Context, id, problem string) error {
 	_, err := s.DB.Exec(c, `UPDATE projects SET last_synced_at=now(),last_sync_error=$2,updated_at=now() WHERE id=$1`, id, problem)
@@ -1441,15 +1500,25 @@ func (s *Store) DeleteTask(c context.Context, id string) error {
 // inside a larger transaction lets an interaction answer, its continuation
 // run and an optional user-selected next step become one atomic hand-off.
 func moveTaskTx(c context.Context, tx pgx.Tx, id, target, source string) error {
-	var current, board, currentName, currentType, transition string
-	err := tx.QueryRow(c, `SELECT t.column_id,t.board_id,c.name,c.column_type
-		FROM tasks t JOIN workflow_columns c ON c.id=t.column_id WHERE t.id=$1 FOR UPDATE`, id).Scan(&current, &board, &currentName, &currentType)
+	return moveTaskTxWithPolicy(c, tx, id, target, source, false)
+}
+
+// moveTaskTxWithPolicy records an implicit transition only for a narrowly
+// scoped human safety override. Agent and automation paths always pass false
+// and therefore remain governed by the board's explicit graph.
+func moveTaskTxWithPolicy(c context.Context, tx pgx.Tx, id, target, source string, allowImplicit bool) error {
+	var current, board, currentName, transition string
+	err := tx.QueryRow(c, `SELECT t.column_id,t.board_id,c.name
+		FROM tasks t JOIN workflow_columns c ON c.id=t.column_id WHERE t.id=$1 FOR UPDATE`, id).Scan(&current, &board, &currentName)
 	if err != nil {
 		return err
 	}
 	err = tx.QueryRow(c, "SELECT id FROM transitions WHERE board_id=$1 AND from_column_id=$2 AND to_column_id=$3", board, current, target).Scan(&transition)
 	if err != nil {
-		return errors.New("transition is not allowed")
+		if !allowImplicit || !errors.Is(err, pgx.ErrNoRows) {
+			return errors.New("transition is not allowed")
+		}
+		transition = ""
 	}
 	var terminal bool
 	var targetType string
@@ -1605,6 +1674,35 @@ func (s *Store) MoveTaskToColumnType(c context.Context, taskID, typeName, source
 	}
 	return true, nil
 }
+
+// MoveTaskToNeedsActionForHumanDecision is the deliberate exception to the
+// workflow graph: a person may flag any task for attention even when its
+// current column has no regular edge to the board's needs_action column. The
+// transition is recorded with no transition_id, while normal actions and all
+// agent paths remain strict.
+func (s *Store) MoveTaskToNeedsActionForHumanDecision(c context.Context, taskID string) (bool, error) {
+	var target string
+	err := s.DB.QueryRow(c, `SELECT c.id FROM tasks t JOIN workflow_columns c ON c.board_id=t.board_id
+		WHERE t.id=$1 AND c.column_type='needs_action'`, taskID).Scan(&target)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	tx, err := s.DB.Begin(c)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(c)
+	if err = moveTaskTxWithPolicy(c, tx, taskID, target, "web", true); err != nil {
+		return false, err
+	}
+	if err = tx.Commit(c); err != nil {
+		return false, err
+	}
+	return true, nil
+}
 func (s *Store) Allowed(c context.Context, task string) ([]domain.Transition, error) {
 	r, e := s.DB.Query(c, `SELECT tr.id,tr.board_id,tr.from_column_id,tr.to_column_id,tr.action_name FROM transitions tr JOIN tasks t ON t.column_id=tr.from_column_id WHERE t.id=$1`, task)
 	if e != nil {
@@ -1736,7 +1834,7 @@ func (s *Store) ResolveInteractionAndMove(c context.Context, id, answerer, freef
 	if !a.Enabled {
 		return i, nil, errors.New("agent is disabled")
 	}
-	targets, err := s.TaskRepositoryTargets(c, i.TaskID)
+	targets, err := s.EffectiveTaskRepositoryTargets(c, i.TaskID)
 	if err != nil {
 		return i, nil, err
 	}
@@ -2252,8 +2350,16 @@ func (s *Store) CreateRun(c context.Context, task, agent, rule string) (domain.A
 	if e != nil {
 		return domain.AgentRun{}, e
 	}
-	workspace := s.TaskWorkspace(c, task, a.WorkspacePath)
-	return s.createRunWithWorkspace(c, task, a, agent, rule, workspace, "", "")
+	workspace, targetProject := a.WorkspacePath, ""
+	if targets, targetErr := s.EffectiveTaskRepositoryTargets(c, task); targetErr == nil && len(targets) == 1 && targets[0].RepositoryURL != "" {
+		targetProject = targets[0].ProjectID
+		if targets[0].LocalPath != "" {
+			workspace = targets[0].LocalPath
+		} else {
+			workspace = filepath.Join("/home/agent/.taskboard-projects", targetProject)
+		}
+	}
+	return s.createRunWithWorkspace(c, task, a, agent, rule, workspace, targetProject, "")
 }
 func (s *Store) createRunWithWorkspace(c context.Context, task string, a domain.Agent, agent, rule, workspace, targetProject, batchID string) (domain.AgentRun, error) {
 	var r domain.AgentRun
@@ -2270,7 +2376,7 @@ func (s *Store) createRunWithWorkspace(c context.Context, task string, a domain.
 	return r, nil
 }
 func (s *Store) TaskWorkspace(c context.Context, taskID, fallback string) string {
-	targets, err := s.TaskRepositoryTargets(c, taskID)
+	targets, err := s.EffectiveTaskRepositoryTargets(c, taskID)
 	if err != nil || len(targets) == 0 || targets[0].RepositoryURL == "" {
 		return fallback
 	}
@@ -2294,7 +2400,7 @@ func (s *Store) CreateManualRuns(c context.Context, task, agent string) ([]domai
 	if !a.Enabled {
 		return nil, errors.New("agent is disabled")
 	}
-	targets, err := s.TaskRepositoryTargets(c, task)
+	targets, err := s.EffectiveTaskRepositoryTargets(c, task)
 	if err != nil {
 		return nil, err
 	}
@@ -2611,6 +2717,34 @@ func (s *Store) RunLogsBefore(c context.Context, id string, before, limit int) (
 	return logs, truncated, nil
 }
 
+// RunLogsAfter returns only entries written after a browser's latest known
+// sequence number.  The live console uses this instead of re-downloading its
+// complete visible tail whenever the terminal emits another chunk.
+func (s *Store) RunLogsAfter(c context.Context, id string, after, limit int) ([]domain.RunLog, bool, error) {
+	if after < 0 {
+		after = 0
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	rows, err := s.DB.Query(c, `SELECT id,agent_run_id,sequence,level,message,created_at
+		FROM agent_run_logs WHERE agent_run_id=$1 AND sequence > $2
+		ORDER BY sequence LIMIT $3`, id, after, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	logs, err := pgx.CollectRows(rows, pgx.RowToStructByPos[domain.RunLog])
+	if err != nil {
+		return nil, false, err
+	}
+	hasMore := len(logs) > limit
+	if hasMore {
+		logs = logs[:limit]
+	}
+	return logs, hasMore, nil
+}
+
 func (s *Store) RunLog(c context.Context, id string, sequence int) (domain.RunLog, error) {
 	var log domain.RunLog
 	err := s.DB.QueryRow(c, "SELECT id,agent_run_id,sequence,level,message,created_at FROM agent_run_logs WHERE agent_run_id=$1 AND sequence=$2", id, sequence).Scan(&log.ID, &log.RunID, &log.Sequence, &log.Level, &log.Message, &log.CreatedAt)
@@ -2901,7 +3035,7 @@ func (s *Store) CreateRunsForEvent(c context.Context, event domain.AutomationEve
 	if !a.Enabled {
 		return nil, errors.New("agent is disabled")
 	}
-	targets, e := s.TaskRepositoryTargets(c, event.TaskID)
+	targets, e := s.EffectiveTaskRepositoryTargets(c, event.TaskID)
 	if e != nil {
 		return nil, e
 	}

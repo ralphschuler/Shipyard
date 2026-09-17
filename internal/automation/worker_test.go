@@ -457,6 +457,21 @@ func TestCodexPromptIsPassedOnlyViaStdin(t *testing.T) {
 	}
 }
 
+func TestAgentEnvironmentIncludesOnlyTheConfiguredProviderSecretAndShipyardMCPToken(t *testing.T) {
+	t.Setenv("TASKBOARD_MCP_TOKEN", "shipyard-token")
+	t.Setenv("PROVIDER_SECRET", "provider-token")
+	t.Setenv("UNRELATED_SECRET", "must-not-leak")
+	env := strings.Join(agentEnvironment("PROVIDER_SECRET"), "\n")
+	for _, want := range []string{"TASKBOARD_MCP_TOKEN=shipyard-token", "PROVIDER_SECRET=provider-token"} {
+		if !strings.Contains(env, want) {
+			t.Fatalf("agent environment is missing %q: %s", want, env)
+		}
+	}
+	if strings.Contains(env, "UNRELATED_SECRET") {
+		t.Fatalf("agent environment leaked an unrelated secret: %s", env)
+	}
+}
+
 func TestWebhookRetryBackoffIsBoundedAndMonotonic(t *testing.T) {
 	if got := webhookRetryDelay(0); got != time.Second {
 		t.Fatalf("first webhook retry = %s, want 1s", got)
@@ -692,6 +707,14 @@ func TestRequestedInteractionsAcceptsKeyAsFieldIdentifier(t *testing.T) {
 	requests := requestedInteractions(logs)
 	if len(requests) != 1 || requests[0].Fields[0].ID != "release_decision" || requests[0].Fields[0].Key != "" {
 		t.Fatalf("legacy key was not normalized: %#v", requests)
+	}
+}
+
+func TestRequestedInteractionsDerivesAnIDFromAFieldLabel(t *testing.T) {
+	logs := []domain.RunLog{{Message: "```taskboard-interaction\n{\"key\":\"shipyard_project\",\"title\":\"Zielprojekt\",\"fields\":[{\"label\":\"project_id\",\"type\":\"text\",\"required\":true}]}\n```"}}
+	requests := requestedInteractions(logs)
+	if len(requests) != 1 || requests[0].Fields[0].ID != "project_id" {
+		t.Fatalf("label-derived interaction id = %#v", requests)
 	}
 }
 

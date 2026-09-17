@@ -21,6 +21,23 @@ const (
 	shutdownTimeout    = 10 * time.Second
 )
 
+func isStreamingPath(path string) bool {
+	return path == "/events" || path == "/mcp"
+}
+
+// requestTimeout protects ordinary requests without severing the long-lived
+// Server-Sent Events and MCP transports.
+func requestTimeout(next http.Handler) http.Handler {
+	standard := http.TimeoutHandler(next, 30*time.Second, "request timed out\n")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isStreamingPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		standard.ServeHTTP(w, r)
+	})
+}
+
 // These values are replaced by the release workflow with -ldflags. Keeping
 // development defaults makes local `go run` useful while still exposing an
 // immutable build identity to the Updates view in production.
@@ -61,7 +78,7 @@ func main() {
 	mux.Handle("/mcp", mcp.New(s, worker))
 	server := &http.Server{
 		Addr:              address,
-		Handler:           app.Protected(app.HTMX(mux)),
+		Handler:           requestTimeout(app.Protected(app.HTMX(mux))),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      0,
