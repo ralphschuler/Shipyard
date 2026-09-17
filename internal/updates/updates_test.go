@@ -43,7 +43,7 @@ func TestValidateReleaseForBranchRequiresSignedTagCommitOnApprovedBranch(t *test
 	}
 	for name, args := range map[string]struct {
 		branch, approvedBranch, tagCommit string
-		signed            bool
+		signed                            bool
 	}{
 		"empty branch": {branch: ""},
 		"wrong branch": {branch: "main", approvedBranch: "master", tagCommit: r.Commit, signed: true},
@@ -60,6 +60,9 @@ func TestValidateReleaseForBranchRequiresSignedTagCommitOnApprovedBranch(t *test
 
 func TestOrchestratorBacksUpBeforeInstallAndRollsBackAfterFailure(t *testing.T) {
 	var calls []string
+	noop := func(name string) func(context.Context, Snapshot) error {
+		return func(context.Context, Snapshot) error { calls = append(calls, name); return nil }
+	}
 	o := Orchestrator{
 		Backup: func(context.Context, Snapshot) error { calls = append(calls, "backup"); return nil },
 		Verify: func(context.Context, Snapshot) error { calls = append(calls, "verify"); return nil },
@@ -67,12 +70,24 @@ func TestOrchestratorBacksUpBeforeInstallAndRollsBackAfterFailure(t *testing.T) 
 			calls = append(calls, "migrate")
 			return errors.New("migration failed")
 		},
+		Switch:   noop("switch"),
+		Restart:  noop("restart"),
+		Health:   noop("health"),
 		Rollback: func(context.Context, Snapshot) error { calls = append(calls, "rollback"); return nil },
 	}
 	s := Snapshot{Status: "update_available", Installable: true, Release: Release{Version: "v1.3.0"}}
 	err := o.Install(context.Background(), s, func(Progress) {})
 	if err == nil || !reflect.DeepEqual(calls, []string{"backup", "verify", "migrate", "rollback"}) {
 		t.Fatalf("error = %v, calls = %v", err, calls)
+	}
+}
+
+func TestOrchestratorRequiresRecoveryBeforeMutation(t *testing.T) {
+	called := false
+	o := Orchestrator{Backup: func(context.Context, Snapshot) error { called = true; return nil }}
+	err := o.Install(context.Background(), Snapshot{Status: "update_available", Installable: true}, nil)
+	if err == nil || called {
+		t.Fatalf("error = %v, backup called = %v", err, called)
 	}
 }
 

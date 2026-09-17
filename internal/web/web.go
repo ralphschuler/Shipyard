@@ -2035,23 +2035,9 @@ func (a *App) resolveUpdates(r *http.Request) updates.Snapshot {
 	if branch == "" {
 		branch = "master"
 	}
-	var snapshot updates.Snapshot
-	if os.Getenv("TASKBOARD_UPDATE_VERSION") != "" {
-		// Explicit test/deployment snapshots are still validated strictly and
-		// never treated as trusted merely because a flag is present.
-		release := updates.Release{Version: os.Getenv("TASKBOARD_UPDATE_VERSION"), Commit: os.Getenv("TASKBOARD_UPDATE_COMMIT"), PublishedAt: os.Getenv("TASKBOARD_UPDATE_PUBLISHED_AT"), Changelog: os.Getenv("TASKBOARD_UPDATE_CHANGELOG"), URL: os.Getenv("TASKBOARD_UPDATE_URL"), MigrationRequired: os.Getenv("TASKBOARD_UPDATE_MIGRATION_REQUIRED") == "true", Verified: os.Getenv("TASKBOARD_UPDATE_VERIFIED") == "true", Compatible: os.Getenv("TASKBOARD_UPDATE_COMPATIBLE") == "true", Checksum: os.Getenv("TASKBOARD_UPDATE_SHA256")}
-		if release.URL == "" {
-			release.URL = "https://github.com/" + repository + "/releases/latest"
-		}
-		snapshot = updates.Snapshot{Current: current, Repository: repository, Branch: branch, Provider: "GitHub", Release: release, Status: "unverified", Reason: "Release-Verifikation ist unvollständig."}
-		if updates.ValidateRelease(release, repository) == nil {
-			snapshot.Status = updates.Compare(current.Version, release.Version)
-			snapshot.Installable = snapshot.Status == "update_available"
-		}
-	} else {
-		snapshot = updates.Resolve(r.Context(), current, repository, branch, updates.Client{HTTP: http.DefaultClient, BaseURL: os.Getenv("TASKBOARD_GITHUB_API_URL"), Token: os.Getenv("TASKBOARD_GITHUB_TOKEN")})
-	}
-	return snapshot
+	// Release metadata must always come from the configured GitHub API. Never
+	// accept operator- or UI-supplied version, commit, checksum, or trust flags.
+	return updates.Resolve(r.Context(), current, repository, branch, updates.Client{HTTP: http.DefaultClient, BaseURL: os.Getenv("TASKBOARD_GITHUB_API_URL"), Token: os.Getenv("TASKBOARD_GITHUB_TOKEN")})
 }
 
 func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
