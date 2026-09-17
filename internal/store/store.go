@@ -1764,6 +1764,16 @@ func moveTaskTxWithPolicy(c context.Context, tx pgx.Tx, id, target, source strin
 			return err
 		}
 	}
+	// A new QA entry starts a new human release cycle. Keep the previous
+	// decision for auditability, but prevent it from satisfying the next
+	// cycle's release gate.
+	if strings.EqualFold(strings.TrimSpace(targetName), "qa") {
+		if _, err = tx.Exec(c, `UPDATE task_decisions
+			SET superseded_at=now(), reopen_reason='Neuer QA-Zyklus nach Nacharbeit'
+			WHERE task_id=$1 AND decision_key='qa_release' AND superseded_at IS NULL`, id); err != nil {
+			return err
+		}
+	}
 	var taskTransitionID string
 	err = tx.QueryRow(c, `INSERT INTO task_transitions(task_id,from_column_id,to_column_id,transition_id,source)
 		VALUES($1,$2,$3,$4,$5) RETURNING id`, id, current, target, transition, source).Scan(&taskTransitionID)
