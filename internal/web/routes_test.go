@@ -84,6 +84,8 @@ func TestUpdatesAPIUsesGitHubMetadataOnly(t *testing.T) {
 			body = fmt.Sprintf(`{"tag_name":"v1.3.0","html_url":"https://github.com/ralphschuler/Shipyard/releases/tag/v1.3.0","published_at":"2026-09-17T10:00:00Z","target_commitish":"master","assets":[{"name":"shipyard-linux-%s","browser_download_url":"https://github.com/ralphschuler/Shipyard/releases/download/v1.3.0/shipyard-linux-%s","digest":"sha256:0123456789012345678901234567890123456789012345678901234567890123"}]}`, runtime.GOARCH, runtime.GOARCH)
 		case strings.HasSuffix(r.URL.Path, "/commits/v1.3.0"):
 			body = fmt.Sprintf(`{"sha":"%s","commit":{"verification":{"verified":true}}}`, commit)
+		case strings.HasSuffix(r.URL.Path, "/compare/master..."+commit):
+			body = `{"status":"behind","ahead_by":0,"behind_by":1}`
 		default:
 			return nil, fmt.Errorf("unexpected GitHub path %s", r.URL.Path)
 		}
@@ -134,6 +136,8 @@ func TestInstallUpdateRunsOnlyAfterVerifiedSnapshot(t *testing.T) {
 			body = fmt.Sprintf(`{"tag_name":"v1.3.0","html_url":"https://github.com/ralphschuler/Shipyard/releases/tag/v1.3.0","published_at":"2026-09-17T10:00:00Z","target_commitish":"master","assets":[{"name":"shipyard-linux-%s","browser_download_url":"https://github.com/ralphschuler/Shipyard/releases/download/v1.3.0/shipyard-linux-%s","digest":"sha256:0123456789012345678901234567890123456789012345678901234567890123"}]}`, runtime.GOARCH, runtime.GOARCH)
 		case strings.HasSuffix(r.URL.Path, "/commits/v1.3.0"):
 			body = fmt.Sprintf(`{"sha":"%s","commit":{"verification":{"verified":true}}}`, commit)
+		case strings.HasSuffix(r.URL.Path, "/compare/master..."+commit):
+			body = `{"status":"behind","ahead_by":0,"behind_by":1}`
 		default:
 			return nil, fmt.Errorf("unexpected GitHub path %s", r.URL.Path)
 		}

@@ -74,6 +74,10 @@ type githubCommit struct {
 	} `json:"commit"`
 }
 
+type githubComparison struct {
+	Status string `json:"status"`
+}
+
 func (r *githubRelease) UnmarshalJSON(b []byte) error {
 	var v struct {
 		TagName         string        `json:"tag_name"`
@@ -286,6 +290,35 @@ func (c Client) tagCommit(ctx context.Context, repo, tag string) (githubCommit, 
 	return out, nil
 }
 
+func (c Client) branchContains(ctx context.Context, repo, branch, commit string) (bool, error) {
+	base := strings.TrimRight(c.BaseURL, "/")
+	if base == "" {
+		base = "https://api.github.com"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/repos/"+repo+"/compare/"+url.PathEscape(branch)+"..."+url.PathEscape(commit), nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "Shipyard-Updates")
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+	res, err := c.HTTP.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("GitHub branch comparison returned %s", res.Status)
+	}
+	var comparison githubComparison
+	if err := json.NewDecoder(res.Body).Decode(&comparison); err != nil {
+		return false, err
+	}
+	return comparison.Status == "identical" || comparison.Status == "behind", nil
+}
+
 func Resolve(ctx context.Context, current Current, repo, branch string, client Client) Snapshot {
 	if client.HTTP == nil {
 		client.HTTP = http.DefaultClient
@@ -303,6 +336,11 @@ func Resolve(ctx context.Context, current Current, repo, branch string, client C
 	commit, err := client.tagCommit(ctx, repo, r.TagName)
 	if err != nil {
 		s.Status, s.Reason = "unverified", "Release-Tag konnte nicht auf einen Commit aufgelöst werden."
+		return s
+	}
+	contained, err := client.branchContains(ctx, repo, branch, commit.SHA)
+	if err != nil || !contained {
+		s.Status, s.Reason = "unverified", "Release-Commit gehört nicht nachweislich zum freigegebenen Zielbranch."
 		return s
 	}
 	s.Release = Release{Version: r.TagName, Commit: commit.SHA, PublishedAt: r.PublishedAt, Changelog: r.Body, URL: r.HTMLURL}
