@@ -140,3 +140,12 @@ func TestLegacyDictionariesProvideBothBrowserDirections(t *testing.T) {
 		}
 	}
 }
+
+func TestLegacyDictionariesCoverDynamicControls(t *testing.T) {
+	dictionaries := legacyDictionaries()
+	for _, phrase := range []string{"Verbindung testen", "Prüfe …", "Diff laden", "Task übergeben", "Vorschau wird geladen …", "Dieser Wechsel ist nicht erlaubt"} {
+		if got := dictionaries[languageEnglish][phrase]; got == "" || got == phrase {
+			t.Fatalf("dynamic phrase %q has no English translation: %q", phrase, got)
+		}
+	}
+}
