@@ -23,6 +23,7 @@ func TestModalAccessibilityStyleContract(t *testing.T) {
 		"dialog article>.dialog-body>form.dialog-secondary-form{display:block",
 		"dialog article>.dialog-body>form>footer{position:sticky",
 		"dialog article>.dialog-body>form+form{position:sticky",
+		"dialog article:not(:has(>form))>.dialog-body{padding:var(--space-4)}",
 	} {
 		if !strings.Contains(css, required) {
 			t.Fatalf("modal style contract is missing %q", required)
