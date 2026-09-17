@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"taskboard/internal/domain"
 	"taskboard/internal/store"
 	"testing"
@@ -139,6 +140,103 @@ func TestProcessStartsDeliveryAgentExactlyOnceAndRejectsUnknownTarget(t *testing
 	}
 	if after.ColumnID != before.ColumnID || readCount(t, deliveryCount) != 1 {
 		t.Fatalf("unknown target changed state or started delivery: before=%s after=%s starts=%d", before.ColumnID, after.ColumnID, readCount(t, deliveryCount))
+	}
+}
+
+func TestApplyConcurrentRetriesObservePersistedAppliedState(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Integration Test")
+	runGit(t, source, "config", "user.email", "integration@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+
+	board, err := s.CreateBoardWithTemplate(ctx, "Concurrent apply", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	development := integrationColumnByName(t, columns, "Entwicklung")
+	agent, err := s.CreateAgent(ctx, "Concurrent apply agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", source, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule, err := s.CreateRuleWithActions(ctx, "Concurrent apply rule", board.ID, "task.entered_column", development.ID, agent.ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask(ctx, board.ID, "Concurrent apply", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, development.ID, "mcp"); err != nil {
+		t.Fatal(err)
+	}
+	events, err := s.PendingEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event domain.AutomationEvent
+	for _, candidate := range events {
+		if candidate.TaskID == task.ID && candidate.Type == "task.entered_column" {
+			event = candidate
+		}
+	}
+	if event.ID == "" {
+		t.Fatal("development transition did not create an automation event")
+	}
+	runs, err := s.CreateRunsForEvent(ctx, event, rule)
+	if err != nil || len(runs) != 1 {
+		t.Fatalf("create delivery run: runs=%d err=%v", len(runs), err)
+	}
+	run := runs[0]
+	worktree := filepath.Join(t.TempDir(), "run")
+	runGit(t, source, "worktree", "add", worktree, "HEAD")
+	if err := os.WriteFile(filepath.Join(worktree, "delivery.txt"), []byte("delivery\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, worktree, "add", "delivery.txt")
+	if _, err = s.DB.Exec(ctx, `UPDATE agent_runs SET status='succeeded',gate_status='passed',source_workspace=$2,worktree_path=$3 WHERE id=$1`, run.ID, source, worktree); err != nil {
+		t.Fatal(err)
+	}
+
+	worker := &Worker{Store: s}
+	results := make(chan error, 2)
+	var group sync.WaitGroup
+	group.Add(2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer group.Done()
+			results <- worker.Apply(ctx, run.ID)
+		}()
+	}
+	group.Wait()
+	close(results)
+
+	var success, alreadyApplied int
+	for applyErr := range results {
+		if applyErr == nil {
+			success++
+		} else if strings.Contains(applyErr.Error(), "bereits übernommen") {
+			alreadyApplied++
+		} else {
+			t.Fatalf("unexpected concurrent apply error: %v", applyErr)
+		}
+	}
+	if success != 1 || alreadyApplied != 1 {
+		t.Fatalf("concurrent apply outcomes: success=%d already-applied=%d", success, alreadyApplied)
+	}
+	if _, err := os.Stat(filepath.Join(source, "delivery.txt")); err != nil {
+		t.Fatalf("delivery was not committed: %v", err)
 	}
 }
 

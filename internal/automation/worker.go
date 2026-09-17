@@ -1467,6 +1467,19 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	}
 	defer unlock()
 
+	// The repository lock is the serialization boundary for delivery. The
+	// delivery read above is only an early rejection for already-applied runs;
+	// a concurrent Apply may have completed while this call was waiting for
+	// the lock. Re-read the durable state after acquiring it so a retry cannot
+	// apply the same worktree diff a second time.
+	delivery, err = w.Store.RunDelivery(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if delivery.AppliedAt != nil {
+		return errors.New("Änderungen dieses Runs wurden bereits übernommen")
+	}
+
 	worktree, err := w.Store.RunWorktree(ctx, runID)
 	if err != nil || worktree == "" {
 		return errors.New("Worktree für diesen Run nicht verfügbar")
