@@ -13,9 +13,21 @@ import (
 	"reflect"
 	"strings"
 	"taskboard/internal/domain"
+	"taskboard/internal/release"
 	"testing"
 	"time"
 )
+
+func TestReleaseAuditCommentContainsDirectPRLinkAndChecks(t *testing.T) {
+	result := release.Result{PR: release.PullRequest{URL: "https://github.com/acme/app/pull/42"}}
+	request := release.Request{TaskID: "task-1", SourceBranch: "task/task-1", TargetBranch: "master", CommitSHA: strings.Repeat("a", 40)}
+	comment := releaseAuditComment(request, result)
+	for _, expected := range []string{"https://github.com/acme/app/pull/42", "task/task-1", "master", strings.Repeat("a", 40), "Checks: PR erstellt"} {
+		if !strings.Contains(comment, expected) {
+			t.Fatalf("release audit comment missing %q: %s", expected, comment)
+		}
+	}
+}
 
 func TestMeasuredUsagePointerPreservesKnownZero(t *testing.T) {
 	if value := measuredUsagePointer(0, false); value != nil {

@@ -19,6 +19,7 @@ import (
 	"sync"
 	"syscall"
 	"taskboard/internal/domain"
+	"taskboard/internal/release"
 	"taskboard/internal/store"
 	"taskboard/internal/usage"
 	"time"
@@ -26,13 +27,27 @@ import (
 )
 
 type Worker struct {
-	Store   *store.Store
-	cancels sync.Map
-	starts  sync.Map
+	Store *store.Store
+	// ReleasePublisher is configured only for projects with an explicitly
+	// approved GitHub release integration. Keeping it injectable makes the Done
+	// lifecycle testable without granting tests or normal workers GitHub access.
+	ReleasePublisher ReleasePublisher
+	cancels          sync.Map
+	starts           sync.Map
 
 	// executeRun is injectable only for orchestration tests. Production workers
 	// leave it nil and use the real provider execution path below.
 	executeRun func(context.Context, domain.AgentRun)
+}
+
+type ReleasePublisher interface {
+	Publish(context.Context, release.Request) (release.Result, error)
+}
+
+type ReleasePublisherFunc func(context.Context, release.Request) (release.Result, error)
+
+func (f ReleasePublisherFunc) Publish(ctx context.Context, request release.Request) (release.Result, error) {
+	return f(ctx, request)
 }
 
 // estimateUsageCost records the hypothetical direct-API cost from the
@@ -2122,6 +2137,12 @@ func (w *Worker) Process(ctx context.Context) {
 			}
 			deferEvent = true
 		}
+		if event.Type == "task.completed" && w.ReleasePublisher != nil {
+			if err := w.publishCompletedTask(ctx, event); err != nil {
+				deferWithReason("Release-Agent blockiert: " + err.Error())
+				continue
+			}
+		}
 		rules, err := w.Store.RulesForEvent(ctx, event)
 		if err != nil {
 			deferWithReason(err.Error())
@@ -2155,6 +2176,92 @@ func (w *Worker) Process(ctx context.Context) {
 		w.startRun(ctx, run)
 	}
 	w.processWebhookDeliveries(ctx)
+}
+
+// publishCompletedTask is the server-side trust boundary for the release
+// agent. It never accepts repository, commit, or secret metadata from an
+// event payload or agent output; all values come from the durable task,
+// project, accepted-run, and secret-assignment records.
+func (w *Worker) publishCompletedTask(ctx context.Context, event domain.AutomationEvent) error {
+	targets, err := w.Store.EffectiveTaskRepositoryTargets(ctx, event.TaskID)
+	if err != nil {
+		return errors.New("Repository-Ziel konnte nicht geladen werden")
+	}
+	if len(targets) != 1 {
+		return errors.New("genau ein Repository-Ziel ist erforderlich")
+	}
+	target := targets[0]
+	if strings.TrimSpace(target.ProjectID) == "" || strings.TrimSpace(target.RepositoryURL) == "" || strings.TrimSpace(target.DefaultBranch) == "" || strings.TrimSpace(target.LocalPath) == "" {
+		return errors.New("Repository-Ziel ist unvollständig")
+	}
+	runs, err := w.Store.RunsForTask(ctx, event.TaskID)
+	if err != nil {
+		return errors.New("akzeptierter Run konnte nicht geladen werden")
+	}
+	var accepted domain.AgentRun
+	var delivery domain.RunDelivery
+	for _, candidate := range runs {
+		if candidate.Status != "succeeded" || candidate.TargetProject != "" && candidate.TargetProject != target.ProjectID {
+			continue
+		}
+		candidateDelivery, deliveryErr := w.Store.RunDelivery(ctx, candidate.ID)
+		if deliveryErr == nil && candidateDelivery.AppliedAt != nil && candidateDelivery.AcceptedCommitSHA != "" {
+			accepted, delivery = candidate, candidateDelivery
+			break
+		}
+	}
+	if accepted.ID == "" {
+		return errors.New("kein erfolgreich akzeptierter Run für das Repository-Ziel vorhanden")
+	}
+	source, err := w.Store.RunSource(ctx, accepted.ID)
+	if err != nil || filepath.Clean(source) != filepath.Clean(target.LocalPath) {
+		return errors.New("akzeptierter Run ist nicht an den Projekt-Checkout gebunden")
+	}
+	secretEnv := strings.TrimSpace(os.Getenv("SHIPYARD_GITHUB_SECRET_ENV"))
+	if secretEnv == "" {
+		return errors.New("GitHub-Secret-Umgebungsname ist nicht konfiguriert")
+	}
+	values, err := w.Store.SecretValuesForAgent(ctx, accepted.AgentID)
+	if err != nil {
+		return errors.New("GitHub-Secret konnte nicht sicher geladen werden")
+	}
+	secret, ok := secretValueForEnv(values, secretEnv)
+	if !ok || strings.TrimSpace(secret.Value) == "" {
+		return errors.New("GitHub-Secret ist dem akzeptierten Agent nicht zugeordnet")
+	}
+	request := release.Request{
+		TaskID: event.TaskID, ProjectID: target.ProjectID, RunID: accepted.ID,
+		DiffRef:       accepted.ID + ":" + delivery.AcceptedCommitSHA,
+		RepositoryURL: target.RepositoryURL, SourcePath: source, ManagedProjectPath: target.LocalPath,
+		SourceBranch: taskIntegrationBranch(event.TaskID), TargetBranch: target.DefaultBranch,
+		CommitSHA: delivery.AcceptedCommitSHA, DiffSummary: delivery.DiffSummary,
+		Tests: "diff --check: " + delivery.GateStatus, ReviewNotes: "Manuelles Review erforderlich; kein Merge, Release oder Deployment.",
+		SecretValues: []string{secret.Value}, DoneApproved: true, PublicationLocker: w.Store,
+	}
+	result, err := w.ReleasePublisher.Publish(ctx, request)
+	if err != nil {
+		return err
+	}
+	comment := releaseAuditComment(request, result)
+	if err := w.Store.RecordAudit(ctx, "", "release.pr.published", "task", event.TaskID, map[string]string{
+		"task_id": event.TaskID, "project_id": request.ProjectID, "run_id": request.RunID,
+		"repository": request.RepositoryURL, "source_branch": request.SourceBranch, "target_branch": request.TargetBranch,
+		"commit": request.CommitSHA, "pr_url": result.PR.URL, "updated": strconv.FormatBool(result.Updated),
+	}); err != nil {
+		return errors.New("Release-Audit konnte nicht geschrieben werden")
+	}
+	if err := w.Store.AddComment(ctx, event.TaskID, "Release-Agent", comment); err != nil {
+		return errors.New("Release-Kommentar konnte nicht geschrieben werden")
+	}
+	return nil
+}
+
+func releaseAuditComment(request release.Request, result release.Result) string {
+	action := "erstellt"
+	if result.Updated {
+		action = "aktualisiert"
+	}
+	return "Release-Agent erfolgreich: " + result.PR.URL + "\n\nTask: " + request.TaskID + "\nRepository: " + request.RepositoryURL + "\nQuellbranch: " + request.SourceBranch + "\nZielbranch: " + request.TargetBranch + "\nCommit: " + request.CommitSHA + "\nChecks: PR " + action + "\nErgebnis: Manuelles Review erforderlich; kein Merge, Release oder Deployment ausgeführt."
 }
 
 func automationEventIsNoop(event domain.AutomationEvent) bool {
