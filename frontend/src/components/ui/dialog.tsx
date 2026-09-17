@@ -89,7 +89,8 @@ function DialogContent({
   > = (event) => {
     onEscapeKeyDown?.(event)
     if (event.defaultPrevented) return
-    if (!showCloseButton && !event.currentTarget.querySelector("[data-slot=dialog-close]")) {
+    const dialog = event.currentTarget as HTMLElement | null
+    if (!showCloseButton && !dialog?.querySelector("[data-slot=dialog-close]")) {
       event.preventDefault()
     }
   }
