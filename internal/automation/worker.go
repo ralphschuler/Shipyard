@@ -207,6 +207,12 @@ func requestedInteractions(logs []domain.RunLog) []interactionRequest {
 			if strings.TrimSpace(field.ID) == "" {
 				field.ID = strings.TrimSpace(field.Key)
 			}
+			// A decision is more valuable than a brittle formatting failure. The
+			// global prompt requires an explicit id, but retain a deterministic
+			// fallback for older agents that only supplied a descriptive label.
+			if strings.TrimSpace(field.ID) == "" {
+				field.ID = interactionFieldID(field.Label)
+			}
 			field.Key = ""
 			if field.ID == "" || field.Label == "" || (field.Type != "text" && field.Type != "textarea" && field.Type != "select" && field.Type != "buttons") || ((field.Type == "select" || field.Type == "buttons") && len(field.Options) == 0) {
 				valid = false
@@ -218,6 +224,23 @@ func requestedInteractions(logs []domain.RunLog) []interactionRequest {
 		}
 	}
 	return result
+}
+
+func interactionFieldID(label string) string {
+	var id strings.Builder
+	underscore := false
+	for _, r := range strings.ToLower(strings.TrimSpace(label)) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			id.WriteRune(r)
+			underscore = false
+			continue
+		}
+		if id.Len() > 0 && !underscore {
+			id.WriteByte('_')
+			underscore = true
+		}
+	}
+	return strings.Trim(id.String(), "_")
 }
 
 func requestedTaskComments(logs []domain.RunLog) []string {
@@ -494,7 +517,11 @@ func (w *Worker) runInTmux(ctx context.Context, runID, directory, command string
 // was explicitly assigned to its provider. This prevents DATABASE_URL and
 // unrelated host secrets from becoming prompt-reachable process state.
 func agentEnvironment(secretEnv string) []string {
-	keys := []string{"HOME", "PATH", "LANG", "LC_ALL", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"}
+	// Agent processes receive a deliberately narrow environment. The Shipyard
+	// MCP credential is included explicitly because Codex resolves the remote
+	// server's bearer_token_env_var when it starts; inheriting the full service
+	// environment would expose unrelated infrastructure credentials.
+	keys := []string{"HOME", "PATH", "LANG", "LC_ALL", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TASKBOARD_MCP_TOKEN"}
 	env := make([]string, 0, len(keys)+2)
 	for _, key := range keys {
 		if value, ok := os.LookupEnv(key); ok && value != "" {
@@ -1234,7 +1261,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	prompt += strings.TrimSpace(globalPrefix) + "\n" + strings.TrimSpace(agent.PromptPrefix) + "\n" + run.PromptSnapshot + "\n\nArbeite an Task-ID: " + run.TaskID + "."
 	if taskErr == nil {
 		board, _ := w.Store.GetBoard(ctx, task.BoardID)
-		projects, _ := w.Store.TaskTargetProjects(ctx, task.ID)
+		projects, _ := w.Store.EffectiveTaskTargetProjects(ctx, task.ID)
 		groups, _ := w.Store.TaskTargetGroups(ctx, task.ID)
 		history, _ := w.Store.History(ctx, task.ID)
 		comments, _ := w.Store.Comments(ctx, task.ID)
@@ -1243,6 +1270,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	}
 	prompt += "\n\nFühre die projektspezifischen Tests für deine Änderung aus und dokumentiere das Ergebnis im Abschluss. Begrenze jeden einzelnen Test-, Build- oder Installationsbefehl als direkten Befehl mit `timeout 120s <befehl>` (oder dem passenden Mechanismus der Plattform). Schreibe keinen verschachtelten `bash -lc`-Aufruf, setze keine zusätzlichen Shell-Anführungszeichen und werte `$?` nicht selbst aus; die Ausführungsumgebung meldet Status und Ausgabe. Hängt ein Befehl oder läuft er in das Limit, dokumentiere das als offenes Risiko und fahre mit anderen aussagekräftigen Prüfungen fort. Entferne vor dem Abschluss generierte Entwicklungsartefakte wie __pycache__, *.pyc, Coverage-Dateien und temporäre Daten. Beende alle temporären Server und Browser-Prozesse vor dem Abschluss; verwende keine interaktiven oder dauerhaft wartenden Befehle. Erstelle keinen Push, Merge, Release oder Deployment."
 	prompt += "\n\nDokumentiere am Ende Ergebnis, geänderte Bereiche, ausgeführte Tests und offene Risiken für Menschen als ```taskboard-comment\n…\n```. Wenn eine neue Entscheidung nötig ist, gib am Ende einen taskboard-interaction-Block aus: {\"key\":\"stabiler_schluessel\",\"title\":\"Kurze Frage\",\"body\":\"Kontext\",\"fields\":[...]}. Unterstützt: text, textarea, select, buttons. Frage keine verbindliche Nutzerentscheidung erneut ab. Öffne sie nur mit reopen:true und reason, wenn sich die Sachlage wesentlich geändert hat. Nach einer Antwort startet genau ein Folge-Run. Wenn du als Reviewer Nacharbeit verlangst, verwende zusätzlich genau einen ```taskboard-transition\n{\"target\":\"In Progress\",\"comment\":\"konkrete Nacharbeit\"}\n```-Block. Die Transition wird nur ausgeführt, wenn sie im Board erlaubt ist. Nur der Triage Agent darf zusätzlich genau einen ```taskboard-update\n{\"title\":\"…\",\"description\":\"…\"}\n```-Block und einen ```taskboard-targets\n{\"project_ids\":[\"uuid\"],\"group_ids\":[]}\n```-Block ausgeben."
+	prompt += "\n\nProjektanlage ist eine Ausnahme von bestehenden Zielprojekten: Wenn ein Task Projekte aus Repository-URLs neu anlegen oder importieren soll, ist das Fehlen einer project_id erwartbar und kein Blocker. Prüfe Duplikate anhand der Repository-URL und lege die Projekte an; ihre project_id entsteht dabei erst. Verlange nur dann eine project_id, wenn der Task ausdrücklich eine Änderung an einem bereits registrierten Einzelprojekt verlangt. Ein Run ohne tatsächliche Umsetzung darf nicht als erfolgreich beschrieben werden. Bei einer unvermeidbaren offenen Entscheidung liefere genau einen gültigen taskboard-interaction-Block; jedes fields-Element benötigt id, label, type und bei select/buttons mindestens eine Option."
 	if skills, err := w.Store.AgentSkills(ctx, run.AgentID); err == nil && len(skills) > 0 {
 		paths := make([]string, 0, len(skills))
 		for _, skill := range skills {
@@ -1438,6 +1466,12 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	if gateErr != nil {
 		_ = w.Store.AddRunLog(ctx, run.ID, "error", "Qualitäts-Gate fehlgeschlagen: "+strings.TrimSpace(string(gateOut)))
 		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Qualitäts-Gate fehlgeschlagen", gateErr.Error())
+		_ = w.finish(ctx, run, "failed")
+		return
+	}
+	if awaitingDecision {
+		reason := "Run ohne vollständige Umsetzung beendet: Eine menschliche Entscheidung ist erforderlich."
+		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Agent benötigt eine menschliche Entscheidung", reason)
 		_ = w.finish(ctx, run, "failed")
 		return
 	}

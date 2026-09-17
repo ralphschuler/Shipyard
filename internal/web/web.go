@@ -816,7 +816,7 @@ func validateAgentWorkspace(raw string) error {
 }
 func (a *App) deleteAgent(w http.ResponseWriter, r *http.Request) {
 	if e := a.store.DeleteAgent(r.Context(), r.PathValue("id")); e != nil {
-		http.Error(w, "Agent kann wegen vorhandener Run-Historie nicht gelöscht werden. Deaktiviere ihn stattdessen.", 409)
+		http.Error(w, "Agent konnte nicht ausgemustert werden: "+e.Error(), 409)
 		return
 	}
 	http.Redirect(w, r, "/agents", 303)
@@ -1669,18 +1669,16 @@ func (a *App) runAPI(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, nil, err)
 		return
 	}
-	logs, truncated, err := a.store.RecentRunLogs(r.Context(), run.ID, browserRunLogLimit)
-	if err != nil {
-		writeAPI(w, nil, err)
-		return
-	}
 	task, err := a.store.GetTask(r.Context(), run.TaskID)
 	if err != nil {
 		writeAPI(w, nil, err)
 		return
 	}
 	delivery, err := a.store.RunDelivery(r.Context(), run.ID)
-	writeAPI(w, map[string]any{"run": run, "task": task, "delivery": delivery, "logs": logs, "logsTruncated": truncated}, err)
+	// The console has its own incremental endpoint.  Do not embed a log tail in
+	// the run projection: every run status refresh would otherwise transfer the
+	// same (potentially large) terminal history a second time.
+	writeAPI(w, map[string]any{"run": run, "task": task, "delivery": delivery}, err)
 }
 func (a *App) runLogsAPI(w http.ResponseWriter, r *http.Request) {
 	run, err := a.store.Run(r.Context(), r.PathValue("id"))
@@ -1693,14 +1691,25 @@ func (a *App) runLogsAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Ungültiger Log-Seitenzeiger.", http.StatusBadRequest)
 		return
 	}
+	after, err := strconv.Atoi(r.URL.Query().Get("after"))
+	if r.URL.Query().Get("after") != "" && (err != nil || after < 0) {
+		http.Error(w, "Ungültiger Log-Fortsetzungszeiger.", http.StatusBadRequest)
+		return
+	}
+	if before > 0 && after > 0 {
+		http.Error(w, "Es kann nur eine Log-Richtung geladen werden.", http.StatusBadRequest)
+		return
+	}
 	var entries []domain.RunLog
-	var truncated bool
+	var truncated, hasMore bool
 	if before > 0 {
 		entries, truncated, err = a.store.RunLogsBefore(r.Context(), run.ID, before, browserRunLogLimit)
+	} else if after > 0 {
+		entries, hasMore, err = a.store.RunLogsAfter(r.Context(), run.ID, after, browserRunLogLimit)
 	} else {
 		entries, truncated, err = a.store.RecentRunLogs(r.Context(), run.ID, browserRunLogLimit)
 	}
-	writeAPI(w, map[string]any{"entries": entries, "truncated": truncated, "status": run.Status}, err)
+	writeAPI(w, map[string]any{"entries": entries, "truncated": truncated, "hasMore": hasMore, "status": run.Status}, err)
 }
 func (a *App) createBoardAPI(w http.ResponseWriter, r *http.Request) {
 	var input struct{ Name, Template string }
@@ -2068,7 +2077,7 @@ func (a *App) requestDecision(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Entscheidung gespeichert, Benachrichtigung fehlgeschlagen: "+err.Error(), http.StatusConflict)
 		return
 	}
-	if _, err := a.store.MoveTaskToColumnType(r.Context(), taskID, "needs_action", "web"); err != nil {
+	if _, err := a.store.MoveTaskToNeedsActionForHumanDecision(r.Context(), taskID); err != nil {
 		http.Error(w, "Entscheidung gespeichert, Task konnte nicht verschoben werden: "+err.Error(), http.StatusConflict)
 		return
 	}
