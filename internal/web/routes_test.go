@@ -127,6 +127,16 @@ func TestInstallUpdateRequiresExplicitConfirmation(t *testing.T) {
 	}
 }
 
+func TestActiveUpdateRunsQueryExcludesTheConfirmingSession(t *testing.T) {
+	query, args := activeUpdateRunsQuery("current-session-token-hash")
+	if len(args) != 1 || args[0] != "current-session-token-hash" {
+		t.Fatalf("query args = %#v, want the confirming session hash", args)
+	}
+	if !strings.Contains(query, "token_hash <> $1") {
+		t.Fatalf("query does not exclude the confirming session: %s", query)
+	}
+}
+
 func TestInstallUpdateRunsOnlyAfterVerifiedSnapshot(t *testing.T) {
 	t.Setenv("TASKBOARD_VERSION", "1.2.0")
 	t.Setenv("TASKBOARD_GITHUB_RELEASE_ALLOWLIST", "v1.3.0")

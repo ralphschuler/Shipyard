@@ -2069,8 +2069,14 @@ func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.store != nil {
+		conn, err := a.store.DB.Acquire(r.Context())
+		if err != nil {
+			http.Error(w, "Update-Sperre konnte nicht sicher geprüft werden.", http.StatusServiceUnavailable)
+			return
+		}
+		defer conn.Release()
 		var locked bool
-		err := a.store.DB.QueryRow(r.Context(), `SELECT pg_try_advisory_lock(hashtextextended('shipyard:update-install', 0))`).Scan(&locked)
+		err = conn.QueryRow(r.Context(), `SELECT pg_try_advisory_lock(hashtextextended('shipyard:update-install', 0))`).Scan(&locked)
 		if err != nil {
 			http.Error(w, "Update-Sperre konnte nicht sicher geprüft werden.", http.StatusServiceUnavailable)
 			return
@@ -2080,9 +2086,15 @@ func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer func() {
-			_, _ = a.store.DB.Exec(r.Context(), `SELECT pg_advisory_unlock(hashtextextended('shipyard:update-install', 0))`)
+			unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_, _ = conn.Exec(unlockCtx, `SELECT pg_advisory_unlock(hashtextextended('shipyard:update-install', 0))`)
 		}()
-		busy, err := a.activeUpdateRuns(r.Context())
+		currentSessionHash := ""
+		if cookie, cookieErr := r.Cookie("taskboard_session"); cookieErr == nil {
+			currentSessionHash = tokenHash(cookie.Value)
+		}
+		busy, err := a.activeUpdateRuns(r.Context(), currentSessionHash)
 		if err != nil {
 			http.Error(w, "Aktive Runs konnten nicht sicher geprüft werden.", http.StatusServiceUnavailable)
 			return
@@ -2155,15 +2167,26 @@ func updateInstallErrorMessage(error) string {
 	return "Update konnte nicht sicher installiert werden. Die Wiederherstellung wurde geprüft."
 }
 
-func (a *App) activeUpdateRuns(ctx context.Context) (bool, error) {
-	var busy bool
-	err := a.store.DB.QueryRow(ctx, `SELECT EXISTS(
-		SELECT 1 FROM user_sessions WHERE expires_at > now()
+func activeUpdateRunsQuery(currentSessionHash string) (string, []any) {
+	sessionClause := ""
+	args := []any{}
+	if currentSessionHash != "" {
+		sessionClause = " AND token_hash <> $1"
+		args = append(args, currentSessionHash)
+	}
+	return `SELECT EXISTS(
+		SELECT 1 FROM user_sessions WHERE expires_at > now()` + sessionClause + `
 	) OR EXISTS(
 		SELECT 1 FROM agent_runs WHERE status IN ('queued','running') AND workspace_snapshot <> ''
 	) OR EXISTS(
 		SELECT 1 FROM agent_run_batches WHERE status IN ('queued','running')
-	)`).Scan(&busy)
+	)`, args
+}
+
+func (a *App) activeUpdateRuns(ctx context.Context, currentSessionHash string) (bool, error) {
+	var busy bool
+	query, args := activeUpdateRunsQuery(currentSessionHash)
+	err := a.store.DB.QueryRow(ctx, query, args...).Scan(&busy)
 	return busy, err
 }
 
