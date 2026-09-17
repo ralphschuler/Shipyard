@@ -2349,7 +2349,7 @@ func (a *App) page(c context.Context, id, errText string, lang string) (boardPag
 		return boardPage{}, e
 	}
 	for i := range tasks {
-		tasks[i].TargetProjects, e = a.store.TaskTargetProjects(c, tasks[i].ID)
+		tasks[i].TargetProjects, e = a.store.EffectiveTaskTargetProjects(c, tasks[i].ID)
 		if e != nil {
 			return boardPage{}, e
 		}

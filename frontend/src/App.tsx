@@ -2708,11 +2708,14 @@ function BoardDetail({ id }: { id: string }) {
   const [filters, setFilters] = useState(() => readBoardFilters(id));
   const [searchInput, setSearchInput] = useState(filters.search);
   const [debouncedSearch, setDebouncedSearch] = useState(filters.search);
+  const filterBoardID = useRef(id);
+  const boardChanged = filterBoardID.current !== id;
   const [draggedTask, setDraggedTask] = useState("");
   const touchDrag = useRef<{ taskID: string; startX: number; startY: number; active: boolean } | undefined>(undefined);
   const suppressTaskClick = useRef(false);
   useEffect(() => {
     const next = readBoardFilters(id);
+    filterBoardID.current = id;
     setFilters(next);
     setSearchInput(next.search);
     setDebouncedSearch(next.search);
@@ -2725,8 +2728,12 @@ function BoardDetail({ id }: { id: string }) {
     return () => window.clearTimeout(timer);
   }, [searchInput]);
   useEffect(() => {
+    // During a board transition, the render still contains the previous
+    // board's filters. Wait for the board-change effect to hydrate the new
+    // state before writing anything under the new key.
+    if (boardChanged) return;
     sessionStorage.setItem(`shipyard-board-filters:${id}`, JSON.stringify(filters));
-  }, [filters, id]);
+  }, [boardChanged, filters, id]);
   const refresh = () => refreshData();
   if (error) return <Failure />;
   if (!data) return <Loading />;
