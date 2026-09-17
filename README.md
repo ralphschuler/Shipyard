@@ -45,6 +45,7 @@ Die Vorlage liegt unter `deploy/taskboard-sso.conf.example`. `TASKBOARD_PROXY_SS
   Konfigurationswerte unter `config`, etwa
   `{"reasoning_effort":"high","config":{"features.some_feature":true}}`.
 - Ein Run arbeitet in einem eigenen Git-Worktree. Erst nach bestandenem Diff-Gate darf er manuell übernommen werden.
+- Parallele Änderungen werden pro Task in einer dauerhaften `task/<task-id>`-Branch integriert. Vor jeder Übernahme wird diese Branch auf den aktuellen Remote-Default-Branch rebased; der gemeinsame Checkout bleibt ein sauberer Synchronisationsanker. Details stehen in [docs/git-integration.md](docs/git-integration.md).
 - Eine Automation verschiebt eine Aufgabe nach einem erfolgreichen Run nicht
   sofort in ihre Erfolgs-Spalte: Erst **Änderungen übernehmen** löst die
   Erfolgs-Transition aus. Bei mehreren Repository-Zielen müssen alle
