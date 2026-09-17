@@ -74,6 +74,7 @@ func (f updateRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 
 func TestUpdatesAPIUsesGitHubMetadataOnly(t *testing.T) {
 	t.Setenv("TASKBOARD_VERSION", "1.2.0")
+	t.Setenv("TASKBOARD_GITHUB_RELEASE_ALLOWLIST", "v1.3.0")
 	t.Setenv("TASKBOARD_UPDATE_VERSION", "9.9.9")
 	t.Setenv("TASKBOARD_UPDATE_VERIFIED", "true")
 	commit := "0123456789012345678901234567890123456789"
@@ -126,8 +127,19 @@ func TestInstallUpdateRequiresExplicitConfirmation(t *testing.T) {
 	}
 }
 
+func TestActiveUpdateRunsQueryExcludesTheConfirmingSession(t *testing.T) {
+	query, args := activeUpdateRunsQuery("current-session-token-hash")
+	if len(args) != 1 || args[0] != "current-session-token-hash" {
+		t.Fatalf("query args = %#v, want the confirming session hash", args)
+	}
+	if !strings.Contains(query, "token_hash <> $1") {
+		t.Fatalf("query does not exclude the confirming session: %s", query)
+	}
+}
+
 func TestInstallUpdateRunsOnlyAfterVerifiedSnapshot(t *testing.T) {
 	t.Setenv("TASKBOARD_VERSION", "1.2.0")
+	t.Setenv("TASKBOARD_GITHUB_RELEASE_ALLOWLIST", "v1.3.0")
 	commit := "0123456789012345678901234567890123456789"
 	transport := updateRoundTripper(func(r *http.Request) (*http.Response, error) {
 		var body string
@@ -148,11 +160,17 @@ func TestInstallUpdateRunsOnlyAfterVerifiedSnapshot(t *testing.T) {
 	t.Cleanup(func() { http.DefaultClient = old })
 	called := false
 	noop := func(context.Context, updates.Snapshot) error { called = true; return nil }
-	app := &App{update: &updates.Orchestrator{Backup: noop, DownloadAndVerify: func(context.Context, string, string) ([]byte, error) { return []byte("artifact"), nil }, Verify: noop, Migrate: noop, Switch: func(context.Context, updates.Snapshot, []byte) error { called = true; return nil }, Restart: noop, Health: noop, Rollback: noop}}
+	app := &App{update: &updates.Orchestrator{Backup: noop, DownloadAndVerify: func(context.Context, string, string) ([]byte, error) { return []byte("artifact"), nil }, VerifyArtifact: func(context.Context, updates.Snapshot, []byte) error { return nil }, Verify: noop, Migrate: noop, Switch: func(context.Context, updates.Snapshot, []byte) error { called = true; return nil }, Restart: noop, Health: noop, Rollback: noop}}
 	res := httptest.NewRecorder()
 	app.installUpdateAPI(res, httptest.NewRequest(http.MethodPost, "/api/v1/settings/updates/install", bytes.NewBufferString(`{"confirm":true}`)))
 	if res.Code != http.StatusOK || !called {
 		t.Fatalf("status = %d, called = %v, body = %s", res.Code, called, res.Body.String())
+	}
+}
+
+func TestUpdateInstallErrorMessageDoesNotExposeAdapterDetails(t *testing.T) {
+	if got := updateInstallErrorMessage(fmt.Errorf("open /srv/shipyard/releases/token: permission denied")); strings.Contains(got, "/srv/shipyard") || strings.Contains(got, "token") {
+		t.Fatalf("error message exposes adapter details: %q", got)
 	}
 }
 

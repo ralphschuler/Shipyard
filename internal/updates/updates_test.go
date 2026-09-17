@@ -123,6 +123,26 @@ func TestResolveRejectsTagNotContainedInApprovedBranch(t *testing.T) {
 	}
 }
 
+func TestResolveRequiresExplicitReleaseAllowlist(t *testing.T) {
+	client := Client{HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v1.3.0"}`)), Header: make(http.Header)}, nil
+	})}, GOOS: "linux", GOARCH: "amd64"}
+	snapshot := Resolve(context.Background(), Current{Version: "1.2.0"}, "ralphschuler/Shipyard", "master", client)
+	if snapshot.Installable || snapshot.Status != "unverified" {
+		t.Fatalf("snapshot = %#v, want an unverified snapshot without an allowlist", snapshot)
+	}
+}
+
+func TestResolveRejectsReleaseOutsideExplicitAllowlist(t *testing.T) {
+	client := Client{ApprovedTags: []string{"v1.4.0"}, HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v1.3.0","target_commitish":"master"}`)), Header: make(http.Header)}, nil
+	})}, GOOS: "linux", GOARCH: "amd64"}
+	snapshot := Resolve(context.Background(), Current{Version: "1.2.0"}, "ralphschuler/Shipyard", "master", client)
+	if snapshot.Installable || snapshot.Status != "unverified" {
+		t.Fatalf("snapshot = %#v, want an unverified snapshot for a non-allowlisted tag", snapshot)
+	}
+}
+
 func TestOrchestratorBacksUpBeforeInstallAndRollsBackAfterFailure(t *testing.T) {
 	var calls []string
 	var switchedArtifact []byte
@@ -135,7 +155,8 @@ func TestOrchestratorBacksUpBeforeInstallAndRollsBackAfterFailure(t *testing.T) 
 			calls = append(calls, "download")
 			return []byte("artifact"), nil
 		},
-		Verify: func(context.Context, Snapshot) error { calls = append(calls, "verify"); return nil },
+		VerifyArtifact: func(context.Context, Snapshot, []byte) error { calls = append(calls, "signature"); return nil },
+		Verify:         func(context.Context, Snapshot) error { calls = append(calls, "verify"); return nil },
 		Migrate: func(context.Context, Snapshot) error {
 			calls = append(calls, "migrate")
 			return errors.New("migration failed")
@@ -151,7 +172,7 @@ func TestOrchestratorBacksUpBeforeInstallAndRollsBackAfterFailure(t *testing.T) 
 	}
 	s := Snapshot{Status: "update_available", Installable: true, Release: Release{Version: "v1.3.0"}}
 	err := o.Install(context.Background(), s, func(Progress) {})
-	if err == nil || !reflect.DeepEqual(calls, []string{"backup", "download", "verify", "migrate", "rollback"}) {
+	if err == nil || !reflect.DeepEqual(calls, []string{"backup", "download", "signature", "verify", "migrate", "rollback"}) {
 		t.Fatalf("error = %v, calls = %v", err, calls)
 	}
 	if len(switchedArtifact) != 0 {
@@ -167,8 +188,9 @@ func TestOrchestratorPassesVerifiedArtifactToSwitch(t *testing.T) {
 		DownloadAndVerify: func(context.Context, string, string) ([]byte, error) {
 			return []byte("verified-artifact"), nil
 		},
-		Verify:  noop,
-		Migrate: noop,
+		VerifyArtifact: func(context.Context, Snapshot, []byte) error { return nil },
+		Verify:         noop,
+		Migrate:        noop,
 		Switch: func(_ context.Context, _ Snapshot, artifact []byte) error {
 			switched = append([]byte(nil), artifact...)
 			return nil
@@ -182,6 +204,26 @@ func TestOrchestratorPassesVerifiedArtifactToSwitch(t *testing.T) {
 	}
 	if string(switched) != "verified-artifact" {
 		t.Fatalf("switch received %q, want the downloaded verified artifact", switched)
+	}
+}
+
+func TestOrchestratorRequiresArtifactSignatureVerificationBeforeMutation(t *testing.T) {
+	backupCalled := false
+	o := Orchestrator{
+		Backup: func(context.Context, Snapshot) error { backupCalled = true; return nil },
+		DownloadAndVerify: func(context.Context, string, string) ([]byte, error) {
+			return []byte("artifact"), nil
+		},
+		Verify:   func(context.Context, Snapshot) error { return nil },
+		Migrate:  func(context.Context, Snapshot) error { return nil },
+		Switch:   func(context.Context, Snapshot, []byte) error { return nil },
+		Restart:  func(context.Context, Snapshot) error { return nil },
+		Health:   func(context.Context, Snapshot) error { return nil },
+		Rollback: func(context.Context, Snapshot) error { return nil },
+	}
+	err := o.Install(context.Background(), Snapshot{Status: "update_available", Installable: true}, nil)
+	if err == nil || backupCalled {
+		t.Fatalf("error = %v, backup called = %v; missing artifact signature verification must fail before mutation", err, backupCalled)
 	}
 }
 
