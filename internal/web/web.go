@@ -24,6 +24,7 @@ import (
 	"taskboard/internal/domain"
 	"taskboard/internal/skillcatalog"
 	"taskboard/internal/store"
+	"taskboard/internal/updates"
 	"taskboard/internal/validate"
 	"time"
 )
@@ -2012,58 +2013,53 @@ func (a *App) integrationsAPI(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, value, err)
 }
 
-// updatesAPI exposes only release metadata supplied by the deployment. A
-// missing verification marker never becomes an installable update. Keeping
-// this projection environment-backed also avoids storing GitHub credentials
-// or release secrets in the database.
 func (a *App) updatesAPI(w http.ResponseWriter, r *http.Request) {
-	current := map[string]string{
-		"version": os.Getenv("TASKBOARD_VERSION"),
-		"commit":  os.Getenv("TASKBOARD_COMMIT_SHA"),
-		"builtAt": os.Getenv("TASKBOARD_BUILD_TIME"),
+	current := updates.Current{Version: os.Getenv("TASKBOARD_VERSION"), Commit: os.Getenv("TASKBOARD_COMMIT_SHA"), BuiltAt: os.Getenv("TASKBOARD_BUILD_TIME")}
+	if current.Version == "" {
+		current.Version = "development"
 	}
-	if current["version"] == "" {
-		current["version"] = "development"
-	}
-	if current["commit"] == "" {
-		current["commit"] = "unknown"
+	if current.Commit == "" {
+		current.Commit = "unknown"
 	}
 	repository := os.Getenv("TASKBOARD_GITHUB_REPOSITORY")
 	if repository == "" {
 		repository = "ralphschuler/Shipyard"
 	}
-	release := map[string]any{
-		"version":           os.Getenv("TASKBOARD_UPDATE_VERSION"),
-		"commit":            os.Getenv("TASKBOARD_UPDATE_COMMIT"),
-		"publishedAt":       os.Getenv("TASKBOARD_UPDATE_PUBLISHED_AT"),
-		"changelog":         os.Getenv("TASKBOARD_UPDATE_CHANGELOG"),
-		"url":               os.Getenv("TASKBOARD_UPDATE_URL"),
-		"migrationRequired": os.Getenv("TASKBOARD_UPDATE_MIGRATION_REQUIRED") == "true",
-		"verified":          os.Getenv("TASKBOARD_UPDATE_VERIFIED") == "true",
-		"compatible":        os.Getenv("TASKBOARD_UPDATE_COMPATIBLE") == "true",
-		"checksum":          os.Getenv("TASKBOARD_UPDATE_SHA256"),
+	branch := os.Getenv("TASKBOARD_GITHUB_BRANCH")
+	if branch == "" {
+		branch = "master"
 	}
-	if release["url"] == "" && release["version"] != "" {
-		release["url"] = "https://github.com/" + repository + "/releases"
-	}
-	status := "unavailable"
-	if release["version"] != "" {
-		status = "unverified"
-		if release["verified"].(bool) && release["compatible"].(bool) && release["commit"] != "" && release["checksum"] != "" {
-			if release["version"] == current["version"] && release["commit"] == current["commit"] {
-				status = "up_to_date"
-			} else {
-				status = "update_available"
-			}
+	var snapshot updates.Snapshot
+	if os.Getenv("TASKBOARD_UPDATE_VERSION") != "" {
+		// Explicit test/deployment snapshots are still validated strictly and
+		// never treated as trusted merely because a flag is present.
+		release := updates.Release{Version: os.Getenv("TASKBOARD_UPDATE_VERSION"), Commit: os.Getenv("TASKBOARD_UPDATE_COMMIT"), PublishedAt: os.Getenv("TASKBOARD_UPDATE_PUBLISHED_AT"), Changelog: os.Getenv("TASKBOARD_UPDATE_CHANGELOG"), URL: os.Getenv("TASKBOARD_UPDATE_URL"), MigrationRequired: os.Getenv("TASKBOARD_UPDATE_MIGRATION_REQUIRED") == "true", Verified: os.Getenv("TASKBOARD_UPDATE_VERIFIED") == "true", Compatible: os.Getenv("TASKBOARD_UPDATE_COMPATIBLE") == "true", Checksum: os.Getenv("TASKBOARD_UPDATE_SHA256")}
+		if release.URL == "" {
+			release.URL = "https://github.com/" + repository + "/releases/latest"
 		}
+		snapshot = updates.Snapshot{Current: current, Repository: repository, Branch: branch, Provider: "GitHub", Release: release, Status: "unverified", Reason: "Release-Verifikation ist unvollständig."}
+		if updates.ValidateRelease(release, repository) == nil {
+			snapshot.Status = updates.Compare(current.Version, release.Version)
+			snapshot.Installable = snapshot.Status == "update_available"
+		}
+	} else {
+		snapshot = updates.Resolve(r.Context(), current, repository, branch, updates.Client{HTTP: http.DefaultClient, BaseURL: os.Getenv("TASKBOARD_GITHUB_API_URL"), Token: os.Getenv("TASKBOARD_GITHUB_TOKEN")})
 	}
-	writeAPI(w, map[string]any{"current": current, "source": map[string]string{"provider": "GitHub", "repository": repository, "branch": "master"}, "status": status, "release": release, "installable": status == "update_available"}, nil)
+	writeAPI(w, map[string]any{"current": snapshot.Current, "source": map[string]string{"provider": snapshot.Provider, "repository": snapshot.Repository, "branch": snapshot.Branch}, "status": snapshot.Status, "release": snapshot.Release, "installable": snapshot.Installable, "reason": snapshot.Reason}, nil)
 }
 
 func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
-	// The update orchestrator is deliberately not implicit: until a verified
-	// artifact and backup/restart implementation are configured, fail closed.
-	http.Error(w, "Update-Installation ist in dieser Umgebung nicht freigegeben.", http.StatusConflict)
+	var input struct {
+		Confirm bool `json:"confirm"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&input); err != nil || !input.Confirm {
+		http.Error(w, "Explizite Update-Bestätigung erforderlich.", http.StatusBadRequest)
+		return
+	}
+	// No generic shell/binary replacement is permitted. The deployment-specific
+	// backup, migration, restart and healthcheck adapter must be supplied before
+	// an installation can mutate this process.
+	http.Error(w, "Update geprüft, aber kein sicherer Installationsadapter ist konfiguriert.", http.StatusServiceUnavailable)
 }
 func (a *App) accountAPI(w http.ResponseWriter, r *http.Request) {
 	u, ok := currentUser(r.Context())

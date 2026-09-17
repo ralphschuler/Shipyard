@@ -1291,6 +1291,7 @@ function Settings({ route }: { route: string }) {
 function Updates() {
   const { data, error } = useAPI<any>("/api/v1/settings/updates");
   const [message, setMessage] = useState("");
+  const [installing, setInstalling] = useState(false);
   if (error) return <Failure />;
   if (!data) return <Loading />;
   const release = data.release || {};
@@ -1298,11 +1299,13 @@ function Updates() {
   const verifyLabel = release.verified && release.compatible ? "Verifiziert und kompatibel" : "Nicht zur Installation freigegeben";
   const install = async () => {
     if (!available || !confirm("Dieses verifizierte Release installieren? Aktive Runs müssen vorher beendet sein.")) return;
+    setInstalling(true); setMessage("Update wird geprüft und für die Wartung vorbereitet …");
     try {
-      await mutation("/settings/updates/install", { method: "POST" });
+      await mutation("/api/v1/settings/updates/install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }) });
+      setMessage("Update erfolgreich gestartet.");
     } catch (err) {
       setMessage(String(err));
-    }
+    } finally { setInstalling(false); }
   };
   return (
     <div className="grid gap-4">
@@ -1322,7 +1325,8 @@ function Updates() {
           {release.version ? <>
             <div className="grid gap-3 text-sm sm:grid-cols-2"><p><span className="text-muted-foreground">Version</span><br /><strong>{release.version}</strong></p><p><span className="text-muted-foreground">Commit</span><br /><code>{release.commit || "nicht angegeben"}</code></p><p><span className="text-muted-foreground">Veröffentlicht</span><br />{release.publishedAt || "nicht angegeben"}</p><p><span className="text-muted-foreground">Migration</span><br />{release.migrationRequired ? "Erforderlich" : "Nicht erforderlich"}</p></div>
             <div className="rounded-md bg-muted p-3 text-sm whitespace-pre-wrap">{release.changelog || "Kein Changelog angegeben."}</div>
-            <div className="flex flex-wrap items-center gap-2"><Button disabled={!available} onClick={install}>Update installieren</Button>{release.url && <a className="text-sm underline" href={release.url} target="_blank" rel="noreferrer">Auf GitHub ansehen</a>}</div>
+            <div className="flex flex-wrap items-center gap-2"><Button disabled={!available || installing} onClick={install}>{installing ? "Update wird vorbereitet …" : "Update installieren"}</Button>{release.url && <a className="text-sm underline" href={release.url} target="_blank" rel="noreferrer">Auf GitHub ansehen</a>}</div>
+            {data.reason && <p className="text-sm text-muted-foreground">{data.reason}</p>}
           </> : <p className="text-sm text-muted-foreground">Es wurde kein kompatibles Release gemeldet. Ein Installationsbutton ist deshalb nicht verfügbar.</p>}
           {message && <p className="text-sm text-destructive">{message}</p>}
         </CardContent>

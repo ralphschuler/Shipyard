@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -61,6 +62,23 @@ func TestUpdatesAPIFailsClosedForUnverifiedRelease(t *testing.T) {
 	}
 	if payload["status"] != "unverified" || payload["installable"] != false {
 		t.Fatalf("payload = %#v", payload)
+	}
+}
+
+func TestInstallUpdateRequiresExplicitConfirmation(t *testing.T) {
+	for name, body := range map[string]string{"missing": "{}", "false": `{"confirm":false}`} {
+		t.Run(name, func(t *testing.T) {
+			res := httptest.NewRecorder()
+			(&App{}).installUpdateAPI(res, httptest.NewRequest(http.MethodPost, "/api/v1/settings/updates/install", bytes.NewBufferString(body)))
+			if res.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", res.Code, http.StatusBadRequest)
+			}
+		})
+	}
+	res := httptest.NewRecorder()
+	(&App{}).installUpdateAPI(res, httptest.NewRequest(http.MethodPost, "/api/v1/settings/updates/install", bytes.NewBufferString(`{"confirm":true}`)))
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("confirmed status = %d, want %d", res.Code, http.StatusServiceUnavailable)
 	}
 }
 
