@@ -42,6 +42,27 @@ func TestCallResponsesAndOutputText(t *testing.T) {
 	}
 }
 
+func TestAccumulateOpenAIUsageSumsNativeCostAcrossRequests(t *testing.T) {
+	total := openAIUsage{}
+	firstCost, secondCost := int64(7), int64(11)
+	accumulateOpenAIUsage(&total, responseUsage{InputTokens: 10, OutputTokens: 4, CachedInputTokens: 2, TotalTokens: 14, CostMicrousd: &firstCost})
+	accumulateOpenAIUsage(&total, responseUsage{InputTokens: 3, OutputTokens: 5, ReasoningTokens: 1, TotalTokens: 8, CostMicrousd: &secondCost})
+	if total.APICalls != 2 || total.InputTokens != 13 || total.OutputTokens != 9 || total.CachedInputTokens != 2 || total.ReasoningTokens != 1 || total.TotalTokens != 22 {
+		t.Fatalf("usage was not accumulated: %#v", total)
+	}
+	if total.NativeCostMicrousd == nil || *total.NativeCostMicrousd != 18 {
+		t.Fatalf("native cost = %v, want 18 micro-USD", total.NativeCostMicrousd)
+	}
+}
+
+func TestAccumulateOpenAIUsageKeepsMissingNativeCostUnknown(t *testing.T) {
+	total := openAIUsage{}
+	accumulateOpenAIUsage(&total, responseUsage{TotalTokens: 4})
+	if total.NativeCostMicrousd != nil {
+		t.Fatalf("missing native cost became known: %v", *total.NativeCostMicrousd)
+	}
+}
+
 func TestRunToolCommandUsesWorktree(t *testing.T) {
 	if _, err := exec.LookPath("bwrap"); err != nil {
 		t.Skip("bubblewrap is required for the real sandbox integration test")

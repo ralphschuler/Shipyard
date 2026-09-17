@@ -108,6 +108,22 @@ type responseResult struct {
 	} `json:"error"`
 }
 
+func accumulateOpenAIUsage(total *openAIUsage, response responseUsage) {
+	total.APICalls++
+	total.InputTokens += response.InputTokens
+	total.OutputTokens += response.OutputTokens
+	total.CachedInputTokens += response.CachedInputTokens
+	total.CacheWriteTokens += response.CacheWriteTokens
+	total.ReasoningTokens += response.ReasoningTokens
+	total.TotalTokens += response.TotalTokens
+	if response.CostMicrousd != nil {
+		if total.NativeCostMicrousd == nil {
+			total.NativeCostMicrousd = new(int64)
+		}
+		*total.NativeCostMicrousd += *response.CostMicrousd
+	}
+}
+
 func responsesURL(base string) (string, error) {
 	if strings.TrimSpace(base) == "" {
 		return "https://api.openai.com/v1/responses", nil
@@ -301,19 +317,7 @@ func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, ap
 		if err != nil {
 			return strings.Join(transcript, "\n"), usage, err
 		}
-		usage.InputTokens += result.Usage.InputTokens
-		usage.APICalls++
-		usage.OutputTokens += result.Usage.OutputTokens
-		usage.CachedInputTokens += result.Usage.CachedInputTokens
-		usage.CacheWriteTokens += result.Usage.CacheWriteTokens
-		usage.ReasoningTokens += result.Usage.ReasoningTokens
-		usage.TotalTokens += result.Usage.TotalTokens
-		if result.Usage.CostMicrousd != nil {
-			if usage.NativeCostMicrousd == nil {
-				usage.NativeCostMicrousd = new(int64)
-			}
-			*usage.NativeCostMicrousd += *result.Usage.CostMicrousd
-		}
+		accumulateOpenAIUsage(&usage, result.Usage)
 		var outputs []map[string]string
 		for _, item := range result.Output {
 			if item.Type != "function_call" || item.Name != "run_command" {
