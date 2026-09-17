@@ -49,6 +49,8 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  onOpenAutoFocus,
+  onEscapeKeyDown,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
@@ -70,6 +72,8 @@ function DialogContent({
   const focusDialog: NonNullable<
     React.ComponentProps<typeof DialogPrimitive.Content>["onOpenAutoFocus"]
   > = (event) => {
+    onOpenAutoFocus?.(event)
+    if (event.defaultPrevented) return
     event.preventDefault()
     const dialog = event.currentTarget as HTMLElement
     const target =
@@ -79,6 +83,15 @@ function DialogContent({
       ) ??
       dialog.querySelector<HTMLElement>("[data-slot=dialog-close]")
     target?.focus()
+  }
+  const handleEscapeKeyDown: NonNullable<
+    React.ComponentProps<typeof DialogPrimitive.Content>["onEscapeKeyDown"]
+  > = (event) => {
+    onEscapeKeyDown?.(event)
+    if (event.defaultPrevented) return
+    if (!showCloseButton && !event.currentTarget.querySelector("[data-slot=dialog-close]")) {
+      event.preventDefault()
+    }
   }
 
   return (
@@ -91,6 +104,7 @@ function DialogContent({
           className
         )}
         onOpenAutoFocus={focusDialog}
+        onEscapeKeyDown={handleEscapeKeyDown}
         {...props}
       >
         {header}

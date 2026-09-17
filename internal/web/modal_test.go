@@ -42,6 +42,8 @@ func TestModalAccessibilityScriptContract(t *testing.T) {
 		"forms=[...wrapper.querySelectorAll(':scope > form')]",
 		"dialog-secondary-form",
 		"dialogFocusTarget=dialog=>dialog.querySelector('[autofocus]')",
+		"isClosableDialog=dialog=>dialog.hasAttribute('data-closable')||!!dialog.querySelector('.close,[data-close-modal]')",
+		"dialogFocusTarget=dialog=>dialog.querySelector('[autofocus]')||dialog.querySelector('.dialog-body button:not(.close):not([data-close-modal]),.dialog-body input,.dialog-body select,.dialog-body textarea,.dialog-body [tabindex]:not([tabindex=\"-1\"])')||dialog.querySelector('.close,[data-close-modal]')",
 		"nativeShowModal.call(dialog)",
 		"modalReturnFocus.delete(dialog)",
 		"event.preventDefault()",
@@ -52,5 +54,8 @@ func TestModalAccessibilityScriptContract(t *testing.T) {
 	}
 	if strings.Contains(js, "querySelector('[autofocus],button,input,select,textarea") {
 		t.Fatal("focus initialization must not use an order-dependent selector")
+	}
+	if strings.Contains(js, "button[type=\"button\"]'))event.preventDefault()") {
+		t.Fatal("Escape handling must not infer closability from arbitrary button types")
 	}
 }
