@@ -81,6 +81,8 @@ button{--pico-color:var(--on-accent)}button:focus-visible,a:focus-visible,input:
 .task-info-grid,.task-changes-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(17rem,.6fr);gap:var(--space-3);margin-bottom:var(--space-4)}.task-info-grid>article,.task-changes-grid>article{padding:var(--space-4)}.task-info-grid .task-label{display:inline-block;margin:.15rem .35rem .15rem 0;padding:.2rem .5rem;border-radius:99px;background:var(--accent-soft);color:var(--accent-strong);font-size:.85rem;font-weight:650}.task-description{white-space:pre-wrap}.task-change-list{display:grid;gap:var(--space-2)}.task-change{padding:var(--space-3);border:1px solid var(--line);background:var(--surface-raised)}.task-change header{display:flex;align-items:flex-start;justify-content:space-between;gap:var(--space-2)}.task-change p{margin:.5rem 0;white-space:pre-wrap;overflow-wrap:anywhere}.task-change small{color:var(--muted)}.task-change-error{color:var(--danger)}
 @media(max-width:720px){.task-info-grid,.task-changes-grid{grid-template-columns:1fr}.task-tabs a{flex:1;text-align:center}}
 
+.workflow-lines .edge-path:focus-visible{stroke-width:4.4;filter:drop-shadow(0 0 2px var(--surface));outline:none}
+
 /* Workflow edges use theme-aware, high-contrast colors and a non-color style cue. */
 :root{--edge-1:#075a72;--edge-2:#8a360d;--edge-3:#1d623f;--edge-4:#5a3b91}
 html[data-theme="light"]{--edge-1:#075a72;--edge-2:#8a360d;--edge-3:#1d623f;--edge-4:#5a3b91}

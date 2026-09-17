@@ -297,6 +297,8 @@ if(canvas){
  window.addEventListener('pointermove',event=>{if(!connecting)return;temporary.setAttribute('d',path(point(connecting,'right'),pointerPoint(event)))});
  window.addEventListener('pointerup',event=>{if(!connecting)return;const target=document.elementFromPoint(event.clientX,event.clientY)?.closest('.flow-node');if(target&&target!==connecting){const modal=document.getElementById('new-transition');modal.querySelector('[name=from]').value=connecting.dataset.columnId;modal.querySelector('[name=to]').value=target.dataset.columnId;modal.querySelector('[data-transition-from]').textContent=connecting.querySelector('.node-body strong').textContent;modal.querySelector('[data-transition-to]').textContent=target.querySelector('.node-body strong').textContent;openModal(modal)}temporary?.remove();temporary=null;connecting=null});
  draw();window.addEventListener('resize',draw);canvas.addEventListener('scroll',draw);
+ const enhanceEdgeAccessibility=()=>svg.querySelectorAll('.edge-path').forEach(edge=>{edge.setAttribute('role','img');edge.setAttribute('tabindex','0');edge.setAttribute('focusable','true');if(!edge.querySelector('title')){const title=document.createElementNS(svg.namespaceURI,'title');title.textContent=edge.getAttribute('aria-label')||'Workflow-Verbindung';edge.prepend(title)}});
+ const edgeObserver=new MutationObserver(enhanceEdgeAccessibility);edgeObserver.observe(svg,{childList:true});enhanceEdgeAccessibility();
 }
 
 const panel=document.getElementById('task-panel');
