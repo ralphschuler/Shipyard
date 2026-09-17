@@ -11,7 +11,7 @@ const translations: Record<Language, Record<string, string>> = {
     display: "Darstellung", systemTheme: "Systemdarstellung verwenden", light: "Hell", dark: "Dunkel",
     keyboard: "Tastatur", shortcutHints: "Hinweise zu Shortcuts anzeigen", save: "Einstellungen speichern",
     language: "Sprache", german: "Deutsch", english: "English", languageDescription: "Wähle die Sprache der Shipyard-Oberfläche.",
-    saved: "Einstellungen gespeichert.", navigationToggle: "Navigation öffnen oder schließen",
+    saved: "Einstellungen gespeichert.", navigation: "Hauptnavigation", navigationToggle: "Navigation öffnen oder schließen",
     navigationClose: "Navigation schließen", keyboardControl: "Tastatursteuerung",
   },
   en: {
@@ -24,7 +24,7 @@ const translations: Record<Language, Record<string, string>> = {
     display: "Display", systemTheme: "Use system appearance", light: "Light", dark: "Dark",
     keyboard: "Keyboard", shortcutHints: "Show keyboard shortcut hints", save: "Save settings",
     language: "Language", german: "Deutsch", english: "English", languageDescription: "Choose the language of the Shipyard interface.",
-    saved: "Settings saved.", navigationToggle: "Open or close navigation",
+    saved: "Settings saved.", navigation: "Main navigation", navigationToggle: "Open or close navigation",
     navigationClose: "Close navigation", keyboardControl: "Keyboard controls",
   },
 };

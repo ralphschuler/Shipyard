@@ -3,6 +3,8 @@ import {
   Activity,
   Bot,
   Boxes,
+  ChevronDown,
+  CircleDot,
   FolderGit2,
   Gauge,
   GitCompareArrows,
@@ -48,6 +50,7 @@ type NavItem = {
   endpoint?: string;
   icon: typeof LayoutDashboard;
 };
+type BoardNavItem = { ID: string; Name: string };
 const nav: NavItem[] = [
   { name: "overview", path: "/", icon: LayoutDashboard },
   {
@@ -151,6 +154,7 @@ function endpointUsesChange(endpoint: string, change: LiveChange) {
 export default function App() {
   const [route, setRoute] = useState(routeFromHash);
   const { data: appearance } = useAPI<any>("/api/v1/settings/appearance");
+  const { data: boards = [] } = useAPI<BoardNavItem[]>("/api/v1/boards");
   const [language, setLanguage] = useState<Language>(() => normalizeLanguage(localStorage.getItem("shipyard-language")));
   const t = (key: string) => translate(language, key);
   const [dark, setDark] = useState(
@@ -160,6 +164,10 @@ export default function App() {
     localStorage.getItem("shipyard-nav-open") !== "false",
   );
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [boardsOpen, setBoardsOpen] = useState(() => {
+    const saved = localStorage.getItem("shipyard-boards-open");
+    return saved == null ? routeFromHash().startsWith("/boards") : saved === "true";
+  });
   const mobileNavRef = useRef<HTMLElement>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   useEffect(() => {
@@ -239,6 +247,12 @@ export default function App() {
     localStorage.setItem("shipyard-nav-open", String(navOpen));
   }, [navOpen]);
   useEffect(() => {
+    localStorage.setItem("shipyard-boards-open", String(boardsOpen));
+  }, [boardsOpen]);
+  useEffect(() => {
+    if (route.startsWith("/boards/")) setBoardsOpen(true);
+  }, [route]);
+  useEffect(() => {
     const desktop = window.matchMedia("(min-width: 768px)");
     const closeMobileMenu = () => {
       if (desktop.matches) setMobileNavOpen(false);
@@ -273,16 +287,18 @@ export default function App() {
   };
   const navigateNav = (index: number, event: React.KeyboardEvent<HTMLAnchorElement>) => {
     let next = index;
-    if (event.key === "ArrowDown" || event.key === "ArrowRight") next = (index + 1) % nav.length;
-    else if (event.key === "ArrowUp" || event.key === "ArrowLeft") next = (index - 1 + nav.length) % nav.length;
+    const total = nav.length + (boardsOpen ? boards.length : 0);
+    if (event.key === "ArrowDown" || event.key === "ArrowRight") next = (index + 1) % total;
+    else if (event.key === "ArrowUp" || event.key === "ArrowLeft") next = (index - 1 + total) % total;
     else if (event.key === "Home") next = 0;
-    else if (event.key === "End") next = nav.length - 1;
+    else if (event.key === "End") next = total - 1;
     else return;
     event.preventDefault();
     document.querySelector<HTMLAnchorElement>(`[data-nav-index="${next}"]`)?.focus();
   };
   const active = nav.find((item) => item.path === route);
   const showNavLabels = navOpen || mobileNavOpen;
+  const boardsActive = route === "/boards" || route.startsWith("/boards/");
   return (
     <TooltipProvider>
       <div className="min-h-dvh bg-background">
@@ -300,40 +316,63 @@ export default function App() {
         <aside
           id="main-navigation"
           ref={mobileNavRef}
-          className={`${mobileNavOpen ? "flex w-64" : "hidden"} fixed inset-y-0 left-0 z-20 flex-col border-r bg-card md:flex ${navOpen ? "md:w-64" : "md:w-16"}`}
+          className={`shipyard-sidebar ${mobileNavOpen ? "flex w-72" : "hidden"} fixed inset-y-0 left-0 z-20 flex-col border-r md:flex ${navOpen ? "md:w-64" : "md:w-16"}`}
         >
-          <div className="flex h-16 items-center gap-3 border-b px-5">
+          <div className="shipyard-brand flex h-16 items-center gap-3 border-b px-5">
             <span className="grid size-8 place-items-center rounded-lg bg-primary text-sm font-bold text-primary-foreground">
               SY
             </span>
-            {showNavLabels && <span className="font-semibold">Shipyard</span>}
+            {showNavLabels && <span><strong className="block font-semibold">Shipyard</strong><small>Control room</small></span>}
           </div>
-          <nav className="flex-1 space-y-1 overflow-y-auto p-3">
+          <nav aria-label={t("navigation")} className="shipyard-nav flex-1 space-y-1 overflow-y-auto p-3">
             {nav.map((item, index) => {
               const Icon = item.icon;
-              const selected = item.path === route;
+              const selected = item.path === route || (item.name === "boards" && boardsActive);
               return (
-                <a
-                  key={item.path}
-                  href={"#/".concat(item.path.slice(1))}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    navigate(item.path);
-                  }}
-                  onKeyDown={(event) => navigateNav(index, event)}
-                  data-nav-index={index}
-                  aria-current={selected ? "page" : undefined}
-                  aria-label={t(item.name)}
-                  title={t(item.name)}
-                  className={
-                    selected
-                      ? "flex h-9 items-center gap-3 rounded-md bg-accent px-3 text-sm font-medium text-accent-foreground"
-                      : "flex h-9 items-center gap-3 rounded-md px-3 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
-                  }
-                >
-                  <Icon className="size-4" />
-                  {showNavLabels && t(item.name)}
-                </a>
+                <div key={item.path} className="space-y-1">
+                  {item.name === "boards" ? (
+                    <button
+                      type="button"
+                      aria-expanded={boardsOpen}
+                      aria-controls="board-subnavigation"
+                      aria-current={selected ? "page" : undefined}
+                      title={t(item.name)}
+                      className={`shipyard-nav-item ${selected ? "is-active" : ""}`}
+                      onClick={() => setBoardsOpen((value) => !value)}
+                    >
+                      <Icon className="size-4 shrink-0" />
+                      {showNavLabels && <span className="min-w-0 flex-1 text-left">{t(item.name)}</span>}
+                      {showNavLabels && <ChevronDown className={`size-4 transition-transform ${boardsOpen ? "rotate-180" : ""}`} aria-hidden="true" />}
+                    </button>
+                  ) : (
+                    <a
+                      href={`#${item.path}`}
+                      onClick={(event) => { event.preventDefault(); navigate(item.path); }}
+                      onKeyDown={(event) => navigateNav(index, event)}
+                      data-nav-index={index}
+                      aria-current={selected ? "page" : undefined}
+                      aria-label={t(item.name)}
+                      title={t(item.name)}
+                      className={`shipyard-nav-item ${selected ? "is-active" : ""}`}
+                    >
+                      <Icon className="size-4 shrink-0" />
+                      {showNavLabels && t(item.name)}
+                    </a>
+                  )}
+                  {item.name === "boards" && boardsOpen && showNavLabels && (
+                    <div id="board-subnavigation" className="board-subnavigation" aria-label="Verfügbare Boards">
+                      <a href="#/boards" onClick={(event) => { event.preventDefault(); navigate("/boards"); }} className={`board-nav-link ${route === "/boards" ? "is-active" : ""}`} aria-current={route === "/boards" ? "page" : undefined}>
+                        <span className="board-nav-glyph" aria-hidden="true">⌘</span>Alle Boards
+                      </a>
+                      {boards.map((board, boardIndex) => {
+                        const boardPath = `/boards/${board.ID}`;
+                        const boardSelected = route === boardPath || route.startsWith(`${boardPath}/`);
+                        return <a key={board.ID} href={`#${boardPath}`} onClick={(event) => { event.preventDefault(); navigate(boardPath); }} onKeyDown={(event) => navigateNav(nav.length + boardIndex, event)} data-nav-index={nav.length + boardIndex} className={`board-nav-link ${boardSelected ? "is-active" : ""}`} aria-current={boardSelected ? "page" : undefined} title={board.Name}><CircleDot className="size-3.5" aria-hidden="true" /><span>{board.Name}</span></a>;
+                      })}
+                      {boards.length === 0 && <p className="board-nav-empty">Noch keine Boards</p>}
+                    </div>
+                  )}
+                </div>
               );
             })}
           </nav>
