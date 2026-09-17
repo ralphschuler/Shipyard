@@ -103,6 +103,7 @@ func TestValidateReleaseForBranchRequiresSignedTagCommitOnApprovedBranch(t *test
 
 func TestOrchestratorBacksUpBeforeInstallAndRollsBackAfterFailure(t *testing.T) {
 	var calls []string
+	var switchedArtifact []byte
 	noop := func(name string) func(context.Context, Snapshot) error {
 		return func(context.Context, Snapshot) error { calls = append(calls, name); return nil }
 	}
@@ -117,7 +118,11 @@ func TestOrchestratorBacksUpBeforeInstallAndRollsBackAfterFailure(t *testing.T) 
 			calls = append(calls, "migrate")
 			return errors.New("migration failed")
 		},
-		Switch:   noop("switch"),
+		Switch: func(_ context.Context, _ Snapshot, artifact []byte) error {
+			calls = append(calls, "switch")
+			switchedArtifact = append([]byte(nil), artifact...)
+			return nil
+		},
 		Restart:  noop("restart"),
 		Health:   noop("health"),
 		Rollback: func(context.Context, Snapshot) error { calls = append(calls, "rollback"); return nil },
@@ -126,6 +131,35 @@ func TestOrchestratorBacksUpBeforeInstallAndRollsBackAfterFailure(t *testing.T) 
 	err := o.Install(context.Background(), s, func(Progress) {})
 	if err == nil || !reflect.DeepEqual(calls, []string{"backup", "download", "verify", "migrate", "rollback"}) {
 		t.Fatalf("error = %v, calls = %v", err, calls)
+	}
+	if len(switchedArtifact) != 0 {
+		t.Fatalf("switch must not run after migration failure: artifact = %q", switchedArtifact)
+	}
+}
+
+func TestOrchestratorPassesVerifiedArtifactToSwitch(t *testing.T) {
+	var switched []byte
+	noop := func(context.Context, Snapshot) error { return nil }
+	o := Orchestrator{
+		Backup: noop,
+		DownloadAndVerify: func(context.Context, string, string) ([]byte, error) {
+			return []byte("verified-artifact"), nil
+		},
+		Verify:  noop,
+		Migrate: noop,
+		Switch: func(_ context.Context, _ Snapshot, artifact []byte) error {
+			switched = append([]byte(nil), artifact...)
+			return nil
+		},
+		Restart:  noop,
+		Health:   noop,
+		Rollback: noop,
+	}
+	if err := o.Install(context.Background(), Snapshot{Status: "update_available", Installable: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if string(switched) != "verified-artifact" {
+		t.Fatalf("switch received %q, want the downloaded verified artifact", switched)
 	}
 }
 
@@ -144,7 +178,7 @@ func TestOrchestratorRequiresArtifactVerificationBeforeMutation(t *testing.T) {
 		Backup:   func(context.Context, Snapshot) error { backupCalled = true; return nil },
 		Verify:   func(context.Context, Snapshot) error { return nil },
 		Migrate:  func(context.Context, Snapshot) error { return nil },
-		Switch:   func(context.Context, Snapshot) error { return nil },
+		Switch:   func(context.Context, Snapshot, []byte) error { return nil },
 		Restart:  func(context.Context, Snapshot) error { return nil },
 		Health:   func(context.Context, Snapshot) error { return nil },
 		Rollback: func(context.Context, Snapshot) error { return nil },

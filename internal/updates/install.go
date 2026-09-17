@@ -28,10 +28,12 @@ type Orchestrator struct {
 	DownloadAndVerify func(context.Context, string, string) ([]byte, error)
 	Verify            func(context.Context, Snapshot) error
 	Migrate           func(context.Context, Snapshot) error
-	Switch            func(context.Context, Snapshot) error
-	Restart           func(context.Context, Snapshot) error
-	Health            func(context.Context, Snapshot) error
-	Rollback          func(context.Context, Snapshot) error
+	// Switch receives the exact bytes returned by DownloadAndVerify. A
+	// deployment adapter must install these bytes, never re-download by URL.
+	Switch   func(context.Context, Snapshot, []byte) error
+	Restart  func(context.Context, Snapshot) error
+	Health   func(context.Context, Snapshot) error
+	Rollback func(context.Context, Snapshot) error
 }
 
 func (o Orchestrator) Install(ctx context.Context, snapshot Snapshot, report func(Progress)) error {
@@ -46,17 +48,20 @@ func (o Orchestrator) Install(ctx context.Context, snapshot Snapshot, report fun
 	if o.Backup == nil || o.DownloadAndVerify == nil || o.Verify == nil || o.Migrate == nil || o.Switch == nil || o.Restart == nil || o.Health == nil || o.Rollback == nil {
 		return errors.New("update installation is not fully configured for recovery")
 	}
+	var artifact []byte
 	steps := []struct {
 		phase string
 		fn    func(context.Context, Snapshot) error
 	}{
 		{"backup", o.Backup}, {"verify", o.Verify}, {"migrate", o.Migrate},
-		{"switch", o.Switch}, {"restart", o.Restart}, {"healthcheck", o.Health},
+		{"switch", nil}, {"restart", o.Restart}, {"healthcheck", o.Health},
 	}
 	for _, step := range steps {
 		reportProgress(report, Progress{Phase: step.phase, Status: "running", Message: "Update-Schritt läuft."})
 		if step.phase == "verify" {
-			if _, err := o.DownloadAndVerify(ctx, snapshot.Release.ArtifactURL, snapshot.Release.Checksum); err != nil {
+			var err error
+			artifact, err = o.DownloadAndVerify(ctx, snapshot.Release.ArtifactURL, snapshot.Release.Checksum)
+			if err != nil {
 				reportProgress(report, Progress{Phase: step.phase, Status: "failed", Message: "Update-Schritt fehlgeschlagen."})
 				reportProgress(report, Progress{Phase: "rollback", Status: "running", Message: "Wiederherstellung läuft."})
 				if rollbackErr := o.Rollback(ctx, snapshot); rollbackErr != nil {
@@ -66,7 +71,13 @@ func (o Orchestrator) Install(ctx context.Context, snapshot Snapshot, report fun
 				return fmt.Errorf("verify: %w", err)
 			}
 		}
-		if err := step.fn(ctx, snapshot); err != nil {
+		var err error
+		if step.phase == "switch" {
+			err = o.Switch(ctx, snapshot, artifact)
+		} else {
+			err = step.fn(ctx, snapshot)
+		}
+		if err != nil {
 			reportProgress(report, Progress{Phase: step.phase, Status: "failed", Message: "Update-Schritt fehlgeschlagen."})
 			if step.phase != "backup" {
 				reportProgress(report, Progress{Phase: "rollback", Status: "running", Message: "Wiederherstellung läuft."})
