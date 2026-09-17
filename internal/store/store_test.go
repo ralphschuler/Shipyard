@@ -8,6 +8,32 @@ import (
 	"testing"
 )
 
+func TestRunRepositoryTargetsRejectMissingOrUnavailableTargets(t *testing.T) {
+	for name, targets := range map[string][]domain.RepositoryTarget{
+		"missing":                nil,
+		"repository unavailable": {{ProjectID: "project-1", ProjectName: "Shipyard"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := runRepositoryTargets(targets); err == nil {
+				t.Fatal("run target resolution must fail without an available repository target")
+			}
+		})
+	}
+}
+
+func TestRunRepositoryTargetsUsesProjectCheckoutWithoutAgentWorkspace(t *testing.T) {
+	targets, err := runRepositoryTargets([]domain.RepositoryTarget{{
+		ProjectID: "project-1", RepositoryURL: "https://github.com/example/project.git",
+		DefaultBranch: "master",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := targets[0].LocalPath, "/home/agent/.taskboard-projects/project-1"; got != want {
+		t.Fatalf("checkout path = %q, want %q", got, want)
+	}
+}
+
 func TestAutomationRuleSelectCoversDomainShape(t *testing.T) {
 	if got, want := len(automationRuleColumns), reflect.TypeOf(domain.AutomationRule{}).NumField(); got != want {
 		t.Fatalf("automation rule select has %d columns, but domain has %d fields", got, want)

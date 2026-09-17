@@ -20,7 +20,7 @@
             <p class="section-kicker">Orchestrierung</p>
             <h1>Agents</h1>
             <p>
-              Profile mit klaren Workspaces, Arbeitsrahmen und Skill-Grenzen.
+              Profile mit klaren Arbeitsrahmen und Skill-Grenzen.
             </p>
           </div>
           <button data-open-modal="new-agent">Agent anlegen</button>
@@ -42,7 +42,6 @@
               </button>
             </header>
             <p>{{.Description}}</p>
-            <p><small>Workspace: {{.WorkspacePath}}</small></p>
             <p>
               {{range .Skills}}<span class="status-pill">{{.Name}}</span>
               {{else}}<small>Keine Skills zugewiesen.</small>{{end}}
@@ -65,11 +64,6 @@
                   >Beschreibung<input
                     name="description"
                     value="{{.Description}}" /></label
-                ><label
-                  >Workspace<input
-                    name="workspace_path"
-                    value="{{.WorkspacePath}}"
-                    required /></label
                 ><label
                   >Max. parallele Runs<input
                     type="number"
@@ -167,14 +161,6 @@
         <form method="post" action="/agents">
           <label>Name<input name="name" required /></label
           ><label>Beschreibung<input name="description" /></label
-          ><label
-            >Workspace<input
-              name="workspace_path"
-              required
-              value="/home/agent/taskboard" /></label
-          ><small
-            >Der Workspace muss ein absoluter, für Shipyard erreichbarer
-            Git-Pfad sein.</small
           ><label
             >Max. parallele Runs<input
               type="number"

@@ -14,7 +14,7 @@ func TestSecretAssignmentSerializesWithReplacement(t *testing.T) {
 	t.Setenv("SHIPYARD_SECRET_KEY", "integration-secret-key")
 	ctx := context.Background()
 	suffix := time.Now().UTC().Format("20060102150405000000000")
-	agent, err := s.CreateAgent(ctx, "Secret lock agent "+suffix, "integration", "", "", "", t.TempDir(), 1)
+	agent, err := s.CreateAgent(ctx, "Secret lock agent "+suffix, "integration", "", "", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestSecretReplacementRollsBackWhenAuditFails(t *testing.T) {
 	t.Setenv("SHIPYARD_SECRET_KEY", "integration-secret-key")
 	ctx := context.Background()
 	suffix := time.Now().UTC().Format("20060102150405000000000")
-	agent, err := s.CreateAgent(ctx, "Secret rollback agent "+suffix, "integration", "", "", "", t.TempDir(), 1)
+	agent, err := s.CreateAgent(ctx, "Secret rollback agent "+suffix, "integration", "", "", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}

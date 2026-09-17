@@ -146,7 +146,7 @@ func TestWorkflowIntegrationOpenInteractionsIgnoreCompletedTasks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := s.CreateAgent(ctx, "Interaction test agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 1)
+	agent, err := s.CreateAgent(ctx, "Interaction test agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestWorkflowIntegrationMissingTargetBlocksRunAndKeepsDecisionOpen(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := s.CreateAgent(ctx, "Target selection agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 1)
+	agent, err := s.CreateAgent(ctx, "Target selection agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestWorkflowIntegrationTriageRunIsCreatedExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := s.CreateAgent(ctx, "Triage Agent "+t.Name()+" "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 1)
+	agent, err := s.CreateAgent(ctx, "Triage Agent "+t.Name()+" "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func TestAutomationFingerprintClaimSerializesConcurrentTransportRetries(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := s.CreateAgent(ctx, "Fingerprint race agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 4)
+	agent, err := s.CreateAgent(ctx, "Fingerprint race agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,7 +395,7 @@ func TestAutomationFingerprintClaimPersistsStatusAttemptsAndBlock(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := s.CreateAgent(ctx, "Fingerprint status agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 1)
+	agent, err := s.CreateAgent(ctx, "Fingerprint status agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +493,7 @@ func TestWorkflowIntegrationQAReviewReturnRequiresNewAppliedDelivery(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := s.CreateAgent(ctx, "Generation-bound agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 1)
+	agent, err := s.CreateAgent(ctx, "Generation-bound agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -570,7 +570,7 @@ func TestWorkflowIntegrationAcceptedDeliveryCommitPersistence(t *testing.T) {
 	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "mcp"); err != nil || !moved {
 		t.Fatalf("Inbox -> Backlog by ID: moved=%t err=%v", moved, err)
 	}
-	agent, err := s.CreateAgent(ctx, "Accepted commit agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 1)
+	agent, err := s.CreateAgent(ctx, "Accepted commit agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}

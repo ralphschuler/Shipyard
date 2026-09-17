@@ -161,10 +161,10 @@ type CatalogSkill struct {
 	Installs                int
 }
 type Agent struct {
-	ID, Name, Description, Adapter, Prompt, PromptPrefix, PromptSuffix, WorkspacePath string
-	Enabled                                                                           bool
-	MaxParallelRuns                                                                   int
-	CreatedAt                                                                         time.Time
+	ID, Name, Description, Adapter, Prompt, PromptPrefix, PromptSuffix string
+	Enabled                                                            bool
+	MaxParallelRuns                                                    int
+	CreatedAt                                                          time.Time
 }
 type AutomationRule struct {
 	ID, Name, BoardID, TriggerType, TargetColumnID, LabelID, AgentID, SuccessColumnID, FailureColumnID string

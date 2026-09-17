@@ -2552,6 +2552,12 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	runCtx, cancel := context.WithTimeout(ctx, agentRunTimeout)
 	w.cancels.Store(run.ID, cancel)
 	defer func() { cancel(); w.cancels.Delete(run.ID) }()
+	if err := validateRunTargetProject(run); err != nil {
+		_ = w.Store.AddRunLog(ctx, run.ID, "error", err.Error())
+		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", err.Error())
+		_ = w.finish(ctx, run, "failed")
+		return
+	}
 	if run.TargetProject != "" {
 		project, projectErr := w.Store.Project(runCtx, run.TargetProject)
 		if projectErr != nil {
@@ -3061,6 +3067,13 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		}
 	}
 	_ = w.finish(ctx, run, "succeeded")
+}
+
+func validateRunTargetProject(run domain.AgentRun) error {
+	if strings.TrimSpace(run.TargetProject) == "" {
+		return errors.New("Kein eindeutiges Projektziel für diesen Run. Weise der Aufgabe ein verfügbares Repository zu und starte den Run erneut.")
+	}
+	return nil
 }
 
 func (w *Worker) persistIncompleteUsage(ctx context.Context, run domain.AgentRun, provider, model, status string) {

@@ -170,6 +170,20 @@ func TestRetireAgentsMigrationPreservesHistoricalIdentities(t *testing.T) {
 	}
 }
 
+func TestAgentWorkspaceMigrationRemovesOnlyProfileWorkspace(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/048_remove_agent_workspace.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "ALTER TABLE agents DROP COLUMN IF EXISTS workspace_path") {
+		t.Fatal("agent migration must remove the profile workspace column")
+	}
+	if strings.Contains(text, "agent_runs") || strings.Contains(text, "workspace_snapshot") {
+		t.Fatal("agent migration must preserve historical run snapshots")
+	}
+}
+
 func TestAgentMemoryMigrationEnforcesScopeHistoryAndActiveVersion(t *testing.T) {
 	body, err := migrationFiles.ReadFile("migrations/046_agent_memory.sql")
 	if err != nil {
