@@ -2158,6 +2158,9 @@ func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAPI(w, map[string]any{"status": "succeeded", "progress": progress}, nil)
+	if a.update.AfterSuccess != nil {
+		a.update.AfterSuccess()
+	}
 }
 
 // Adapter errors can contain filesystem paths, command lines, or deployment
@@ -2168,19 +2171,15 @@ func updateInstallErrorMessage(error) string {
 }
 
 func activeUpdateRunsQuery(currentSessionHash string) (string, []any) {
-	sessionClause := ""
-	args := []any{}
-	if currentSessionHash != "" {
-		sessionClause = " AND token_hash <> $1"
-		args = append(args, currentSessionHash)
-	}
+	// Other browser sessions are not an update hazard: they survive a normal
+	// service restart and treating them as active work made stale SSO sessions
+	// block every installation. Only durable agent work is protected here.
+	_ = currentSessionHash
 	return `SELECT EXISTS(
-		SELECT 1 FROM user_sessions WHERE expires_at > now()` + sessionClause + `
-	) OR EXISTS(
 		SELECT 1 FROM agent_runs WHERE status IN ('queued','running') AND workspace_snapshot <> ''
 	) OR EXISTS(
 		SELECT 1 FROM agent_run_batches WHERE status IN ('queued','running')
-	)`, args
+	)`, nil
 }
 
 func (a *App) activeUpdateRuns(ctx context.Context, currentSessionHash string) (bool, error) {

@@ -11,6 +11,7 @@ import (
 	"taskboard/internal/automation"
 	"taskboard/internal/mcp"
 	"taskboard/internal/store"
+	"taskboard/internal/updates"
 	"taskboard/internal/web"
 	"time"
 )
@@ -70,7 +71,7 @@ func main() {
 	worker := &automation.Worker{Store: s}
 	worker.Start(ctx)
 
-	app := web.New(s, worker)
+	app := web.NewWithUpdateOrchestrator(s, worker, updates.NewProductionOrchestrator(s))
 	mux := http.NewServeMux()
 	app.Register(mux)
 	// MCP has its own bearer-token authentication and is intentionally outside
