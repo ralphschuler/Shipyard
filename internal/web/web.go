@@ -72,6 +72,7 @@ type taskPage struct {
 	Groups         []domain.ProjectGroup
 	TargetProjects []domain.Project
 	TargetGroups   []domain.ProjectGroup
+	Targets        []domain.RepositoryTarget
 	Interactions   []interactionView
 	Changes        []taskChangeView
 }
@@ -2609,7 +2610,11 @@ func (a *App) taskData(ctx context.Context, id string) (taskPage, error) {
 	if e != nil {
 		return taskPage{}, e
 	}
-	return taskPage{ID: t.ID, Task: t, Allowed: allowed, Columns: names, History: h, Comments: displayComments(comments), Interactions: views, BoardLabels: boardLabels, Runs: publicRuns, Changes: changes, Agents: agents, Projects: projects, Groups: groups, TargetProjects: targetProjects, TargetGroups: targetGroups}, nil
+	targets, e := a.store.TaskRepositoryTargets(ctx, t.ID)
+	if e != nil {
+		return taskPage{}, e
+	}
+	return taskPage{ID: t.ID, Task: t, Allowed: allowed, Columns: names, History: h, Comments: displayComments(comments), Interactions: views, BoardLabels: boardLabels, Runs: publicRuns, Changes: changes, Agents: agents, Projects: projects, Groups: groups, TargetProjects: targetProjects, TargetGroups: targetGroups, Targets: targets}, nil
 }
 func (a *App) startRun(w http.ResponseWriter, r *http.Request) {
 	runs, e := a.store.CreateManualRuns(r.Context(), r.PathValue("id"), r.FormValue("agent_id"))

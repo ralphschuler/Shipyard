@@ -678,6 +678,10 @@ func (s *Store) SetTaskTargets(c context.Context, taskID string, projectIDs, gro
 	if _, err = tx.Exec(c, `DELETE FROM task_repository_targets WHERE task_id=$1`, taskID); err != nil {
 		return err
 	}
+	targetSource := "explicit"
+	if len(projectIDs) == 0 && len(groupIDs) == 0 {
+		targetSource = "inherited"
+	}
 	for _, id := range projectIDs {
 		if _, err = tx.Exec(c, `INSERT INTO task_target_projects(task_id,project_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, taskID, id); err != nil {
 			return err
@@ -690,19 +694,31 @@ func (s *Store) SetTaskTargets(c context.Context, taskID string, projectIDs, gro
 	}
 	// Resolve direct projects and group membership now. Agent runs deliberately
 	// read this immutable snapshot, not the mutable group membership.
-	if _, err = tx.Exec(c, `INSERT INTO task_repository_targets(task_id,project_id,project_name,repository_url,default_branch,local_path,source_groups)
-		SELECT $1,p.id,p.name,p.repository_url,p.default_branch,p.local_path,'[]'::jsonb
+	if _, err = tx.Exec(c, `INSERT INTO task_repository_targets(task_id,project_id,project_name,repository_url,default_branch,local_path,source_groups,target_source)
+		SELECT $1,p.id,p.name,p.repository_url,p.default_branch,p.local_path,'[]'::jsonb,$2
 		FROM projects p JOIN task_target_projects t ON t.project_id=p.id WHERE t.task_id=$1
-		ON CONFLICT (task_id,project_id) DO NOTHING`, taskID); err != nil {
+		ON CONFLICT (task_id,project_id) DO NOTHING`, taskID, targetSource); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(c, `INSERT INTO task_repository_targets(task_id,project_id,project_name,repository_url,default_branch,local_path,source_groups)
+	if _, err = tx.Exec(c, `INSERT INTO task_repository_targets(task_id,project_id,project_name,repository_url,default_branch,local_path,source_groups,target_source)
 		SELECT $1,p.id,p.name,p.repository_url,p.default_branch,p.local_path,
-		jsonb_agg(jsonb_build_object('id',g.id,'name',g.name,'color',g.color))
+		jsonb_agg(jsonb_build_object('id',g.id,'name',g.name,'color',g.color)),'explicit'
 		FROM task_target_groups t JOIN project_groups g ON g.id=t.group_id
 		JOIN project_group_members m ON m.group_id=g.id JOIN projects p ON p.id=m.project_id
 		WHERE t.task_id=$1 GROUP BY p.id,p.name,p.repository_url,p.default_branch,p.local_path
 		ON CONFLICT (task_id,project_id) DO UPDATE SET source_groups=EXCLUDED.source_groups`, taskID); err != nil {
+		return err
+	}
+	if targetSource == "inherited" {
+		if _, err = tx.Exec(c, `INSERT INTO task_repository_targets(task_id,project_id,project_name,repository_url,default_branch,local_path,source_groups,target_source)
+			SELECT t.id,p.id,p.name,p.repository_url,p.default_branch,p.local_path,'[]'::jsonb,'inherited'
+			FROM tasks t JOIN board_projects bp ON bp.board_id=t.board_id JOIN projects p ON p.id=bp.project_id
+			WHERE t.id=$1 AND (SELECT count(*) FROM board_projects WHERE board_id=t.board_id)=1`, taskID); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(c, `UPDATE agent_interactions SET status='cancelled',answered_at=now()
+		WHERE task_id=$1 AND status='open' AND (decision_key ILIKE '%project%' OR decision_key ILIKE '%repository%' OR title ILIKE '%project%' OR title ILIKE '%repository%')`, taskID); err != nil {
 		return err
 	}
 	return tx.Commit(c)
@@ -720,7 +736,7 @@ func normalizeTargetIDs(kind string, rawIDs []string) ([]string, error) {
 	return ids, nil
 }
 func (s *Store) TaskRepositoryTargets(c context.Context, taskID string) ([]domain.RepositoryTarget, error) {
-	rows, err := s.DB.Query(c, `SELECT id,task_id,COALESCE(project_id::text,''),project_name,repository_url,default_branch,local_path,source_groups,created_at FROM task_repository_targets WHERE task_id=$1 ORDER BY project_name`, taskID)
+	rows, err := s.DB.Query(c, `SELECT id,task_id,COALESCE(project_id::text,''),project_name,repository_url,default_branch,local_path,target_source,source_groups,created_at FROM task_repository_targets WHERE task_id=$1 ORDER BY project_name`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -1118,7 +1134,7 @@ func (s *Store) DashboardAttention(c context.Context) (domain.DashboardAttention
 			SELECT DISTINCT ON (task_id) task_id,status,COALESCE(finished_at,created_at) AS terminal_at
 			FROM agent_runs ORDER BY task_id,created_at DESC,id DESC
 		) latest_run WHERE status='failed' AND terminal_at>=now()-interval '7 days'),
-		(SELECT count(*) FROM agent_interactions WHERE status='open'),
+		(SELECT count(*) FROM agent_interactions i JOIN tasks t ON t.id=i.task_id WHERE i.status='open' AND t.completed_at IS NULL),
 		(SELECT count(*) FROM tasks WHERE completed_at IS NULL AND due_date IS NOT NULL AND due_date<=now()+interval '24 hours')`).
 		Scan(&a.BlockedTasks, &a.FailedRuns7d, &a.OpenInteractions, &a.DueNext24h)
 	return a, err
@@ -1426,6 +1442,12 @@ func (s *Store) CreateTask(c context.Context, b, title, desc, priority, start, d
 	defer tx.Rollback(c)
 	var t domain.Task
 	e = tx.QueryRow(c, "INSERT INTO tasks(board_id,column_id,title,description,priority,start_date,due_date) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,board_id,column_id,title,description,priority,start_date,due_date,completed_at,created_at", b, col, strings.TrimSpace(title), desc, priority, startVal, dueVal).Scan(&t.ID, &t.BoardID, &t.ColumnID, &t.Title, &t.Description, &t.Priority, &t.StartDate, &t.DueDate, &t.CompletedAt, &t.CreatedAt)
+	if e == nil {
+		_, e = tx.Exec(c, `INSERT INTO task_repository_targets(task_id,project_id,project_name,repository_url,default_branch,local_path,source_groups,target_source)
+			SELECT $1,p.id,p.name,p.repository_url,p.default_branch,p.local_path,'[]'::jsonb,'inherited'
+			FROM board_projects bp JOIN projects p ON p.id=bp.project_id
+			WHERE bp.board_id=$2 AND (SELECT count(*) FROM board_projects WHERE board_id=$2)=1`, t.ID, b)
+	}
 	if e == nil {
 		_, e = tx.Exec(c, "INSERT INTO task_transitions(task_id,to_column_id,source) VALUES($1,$2,$3)", t.ID, col, source)
 	}
