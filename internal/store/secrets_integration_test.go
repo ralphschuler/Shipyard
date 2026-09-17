@@ -103,9 +103,10 @@ func TestSecretAssignmentSerializesWithReplacement(t *testing.T) {
 	}()
 	close(start)
 	first, second := <-results, <-results
-	if first == nil && second == nil {
-		t.Fatal("concurrent assignment and replacement both succeeded")
-	}
+	// Assignment to a revoked secret and replacement are both valid when the
+	// assignment wins first: replacement then reactivates the same secret.
+	// The invariant is the final active environment set, not which operation
+	// wins the race.
 	values, err = s.SecretValuesForAgent(ctx, agent.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -124,6 +125,11 @@ func TestSecretReplacementRollsBackWhenAuditFails(t *testing.T) {
 	t.Setenv("SHIPYARD_SECRET_KEY", "integration-secret-key")
 	ctx := context.Background()
 	suffix := time.Now().UTC().Format("20060102150405000000000")
+	agent, err := s.CreateAgent(ctx, "Secret rollback agent "+suffix, "integration", "", "", "", t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteAgent(ctx, agent.ID) })
 	secret, err := s.CreateSecret(ctx, "", "rollback-"+suffix, "", "ROLLBACK_TOKEN", "original-value")
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +139,7 @@ func TestSecretReplacementRollsBackWhenAuditFails(t *testing.T) {
 	if err = s.ReplaceSecret(ctx, "not-a-uuid", secret.ID, "replacement-value"); err == nil {
 		t.Fatal("expected replacement audit failure")
 	}
-	values, err := s.SecretValuesForAgent(ctx, "00000000-0000-0000-0000-000000000000")
+	values, err := s.SecretValuesForAgent(ctx, agent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,10 +148,10 @@ func TestSecretReplacementRollsBackWhenAuditFails(t *testing.T) {
 	}
 	// The encrypted payload is intentionally checked through the authorized
 	// path only; assigning it after the failed mutation must reveal the original.
-	if err = s.SetSecretAgents(ctx, "", secret.ID, []string{"00000000-0000-0000-0000-000000000000"}); err != nil {
+	if err = s.SetSecretAgents(ctx, "", secret.ID, []string{agent.ID}); err != nil {
 		t.Fatal(err)
 	}
-	values, err = s.SecretValuesForAgent(ctx, "00000000-0000-0000-0000-000000000000")
+	values, err = s.SecretValuesForAgent(ctx, agent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

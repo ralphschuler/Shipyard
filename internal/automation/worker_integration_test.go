@@ -191,6 +191,7 @@ func TestApplyConcurrentRetriesObservePersistedAppliedState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	backlog := integrationColumnByName(t, columns, "Backlog")
 	development := integrationColumnByName(t, columns, "Entwicklung")
 	agent, err := s.CreateAgent(ctx, "Concurrent apply agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", source, 1)
 	if err != nil {
@@ -202,6 +203,9 @@ func TestApplyConcurrentRetriesObservePersistedAppliedState(t *testing.T) {
 	}
 	task, err := s.CreateTask(ctx, board.ID, "Concurrent apply", "test", "normal", "", "", "mcp")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "mcp"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err = s.MoveTaskToColumnID(ctx, task.ID, development.ID, "mcp"); err != nil {

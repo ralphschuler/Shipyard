@@ -20,7 +20,7 @@ func TestDashboardFilteredUnboundedIncludesTelemetrySeries(t *testing.T) {
 func TestDashboardFilteredUnboundedIncludesTasksWithoutAgentRuns(t *testing.T) {
 	s := integrationStore(t)
 	ctx := context.Background()
-	board, err := s.CreateBoardWithTemplate(ctx, "Dashboard task population", "empty")
+	board, err := s.CreateBoardWithTemplate(ctx, "Dashboard task population", "software")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +36,7 @@ func TestDashboardFilteredUnboundedIncludesTasksWithoutAgentRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = s.CreateTask(ctx, board.ID, "Task without agent run", "", "normal", "", "", "test"); err != nil {
+	if _, err = s.CreateTask(ctx, board.ID, "Task without agent run", "", "normal", "", "", "mcp"); err != nil {
 		t.Fatal(err)
 	}
 
