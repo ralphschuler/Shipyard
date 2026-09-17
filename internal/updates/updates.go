@@ -387,6 +387,11 @@ func Resolve(ctx context.Context, current Current, repo, branch string, client C
 		s.Reason = releasePolicyReason(err)
 		return s
 	}
+	if strings.TrimSpace(client.Token) == "" {
+		s.Status = "unavailable"
+		s.Reason = "TASKBOARD_GITHUB_TOKEN ist nicht konfiguriert. Hinterlege ein least-privilege GitHub-Token mit reinem Leserecht."
+		return s
+	}
 	r, err := client.latest(ctx, repo)
 	if err != nil {
 		s.Reason = githubErrorReason(err, client.Token)
@@ -469,9 +474,6 @@ func githubErrorReason(err error, token string) string {
 	case http.StatusUnauthorized:
 		return "GitHub-Zugriffstoken ist ungültig oder abgelaufen. Prüfe TASKBOARD_GITHUB_TOKEN."
 	case http.StatusForbidden:
-		if strings.TrimSpace(token) == "" {
-			return "Die öffentliche GitHub-API ist rate-limitiert oder verweigert den Zugriff. Ein TASKBOARD_GITHUB_TOKEN ist für öffentliche Repositories optional, kann das Rate-Limit aber erhöhen."
-		}
 		return "GitHub-API-Zugriff verweigert oder Rate-Limit erreicht. Prüfe Token-Berechtigungen und versuche es später erneut."
 	case http.StatusNotFound:
 		return "GitHub-Repository oder Release wurde nicht gefunden. Prüfe Repository- und Branch-Konfiguration."

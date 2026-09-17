@@ -85,7 +85,7 @@ Die laufende Installation braucht für die Release-Prüfung ein externes
 Environment-File. Kopiere `deploy/taskboard.env.example` nach
 `/etc/taskboard/taskboard.env`, setze dort die Repository-/Branch-/Allowlist-
 Werte und beschränke die Dateirechte auf 600 oder 640. Für öffentliche
-Repositories ist `TASKBOARD_GITHUB_TOKEN` optional; ein least-privilege
+Repositories ist `TASKBOARD_GITHUB_TOKEN` erforderlich; verwende ein least-privilege
 Read-only-Token erhöht lediglich das GitHub-API-Rate-Limit. Exakte Release-Tags
 sowie Patch-Präfixe wie `v0.1.*` sind erlaubt;
 Signatur, Zielbranch, Repository und SHA-256-Artefaktprüfung bleiben immer
