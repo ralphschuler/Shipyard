@@ -16,6 +16,12 @@ cleanup() { rm -f "$staged_binary"; }
 trap cleanup EXIT
 
 cd "$project_dir"
+build_version="${TASKBOARD_VERSION:-$(git describe --tags --exact-match HEAD 2>/dev/null || printf 'development')}"
+build_commit="${TASKBOARD_COMMIT_SHA:-$(git rev-parse HEAD)}"
+build_time="${TASKBOARD_BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+export TASKBOARD_VERSION="$build_version"
+export TASKBOARD_COMMIT_SHA="$build_commit"
+export TASKBOARD_BUILD_TIME="$build_time"
 if [[ "${TASKBOARD_SKIP_UPDATE_CONFIG_CHECK:-0}" != "1" ]]; then
   if [[ ! -e "$update_env_file" ]]; then
     sudo -n install -o agent -g agent -m 600 deploy/taskboard.env.example "$update_env_file"
@@ -24,15 +30,12 @@ if [[ "${TASKBOARD_SKIP_UPDATE_CONFIG_CHECK:-0}" != "1" ]]; then
   TASKBOARD_ENV_FILE="$update_env_file" ./deploy/validate-update-config.sh
 fi
 if [[ -f frontend/package.json ]]; then
-  (cd frontend && npm ci && npm run build)
+  (cd frontend && timeout 120s npm ci && timeout 120s npm run build)
 fi
 # Keep the Updates view tied to the exact source that was deployed. Operators
 # may override these values for a development build, while tagged checkouts
 # automatically expose their semantic release version and immutable commit.
-build_version="${TASKBOARD_VERSION:-$(git describe --tags --exact-match HEAD 2>/dev/null || printf 'development')}"
-build_commit="${TASKBOARD_COMMIT_SHA:-$(git rev-parse HEAD)}"
-build_time="${TASKBOARD_BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-go build -trimpath -ldflags "-X main.version=$build_version -X main.commit=$build_commit -X main.builtAt=$build_time" -o "$staged_binary" ./cmd/taskboard
+timeout 120s go build -trimpath -ldflags "-X main.version=$build_version -X main.commit=$build_commit -X main.builtAt=$build_time" -o "$staged_binary" ./cmd/taskboard
 chmod 0755 "$staged_binary"
 
 # Migrations run at service start and are intentionally forward-only.  A

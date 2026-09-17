@@ -36,6 +36,28 @@ var files embed.FS
 
 var appDist, _ = fs.Sub(files, "appdist")
 
+// ValidateEmbeddedApp is used by the update adapter before the supervisor
+// restarts the service. It deliberately reads only the embedded filesystem so
+// a stale checkout directory can never make a candidate look healthy.
+func ValidateEmbeddedApp(expectedVersion, expectedCommit string) error {
+	index, err := fs.ReadFile(appDist, "index.html")
+	if err != nil || !bytes.Contains(index, []byte(`<div id="root">`)) {
+		return errors.New("embedded app index is unavailable")
+	}
+	var buildInfo struct {
+		Version string `json:"version"`
+		Commit  string `json:"commit"`
+	}
+	info, err := fs.ReadFile(appDist, "build-info.json")
+	if err != nil || json.Unmarshal(info, &buildInfo) != nil || buildInfo.Version == "" || buildInfo.Commit == "" {
+		return errors.New("embedded app build metadata is incomplete")
+	}
+	if (expectedVersion != "" && buildInfo.Version != expectedVersion) || (expectedCommit != "" && buildInfo.Commit != expectedCommit) {
+		return errors.New("embedded app build metadata does not match the release")
+	}
+	return nil
+}
+
 type App struct {
 	store        *store.Store
 	memory       *memory.Store

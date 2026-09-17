@@ -430,3 +430,10 @@ func TestProductionAdapterSwitchAndRollbackKeepOneBinaryBundle(t *testing.T) {
 		t.Fatalf("rolled back bundle = %q, err = %v", got, err)
 	}
 }
+
+func TestProductionAdapterRestartValidatesInstalledBundle(t *testing.T) {
+	p := &productionAdapter{binary: filepath.Join(t.TempDir(), "missing-taskboard")}
+	if err := p.restart(context.Background(), Snapshot{}); err == nil {
+		t.Fatal("restart must reject a candidate that cannot validate its embedded bundle")
+	}
+}

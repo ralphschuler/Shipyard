@@ -60,8 +60,8 @@ func NewProductionOrchestrator(s *store.Store) *Orchestrator {
 		Verify:            p.verify,
 		Migrate:           p.migrate,
 		Switch:            p.switchBinary,
-		// Restart is intentionally deferred until after the HTTP response. The
-		// helper runs as a transient systemd unit outside taskboard.service.
+		// Restart validates the newly installed executable. The supervisor
+		// restart itself is deferred until after the HTTP response.
 		Restart:      p.restart,
 		Health:       p.health,
 		Rollback:     p.rollback,
@@ -169,9 +169,17 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 	return os.Rename(tmpName, path)
 }
 
-func (p *productionAdapter) restart(context.Context, Snapshot) error {
-	// The actual restart is scheduled by AfterSuccess. Returning successfully
-	// here lets the API send its JSON response before systemd stops this process.
+func (p *productionAdapter) restart(ctx context.Context, snapshot Snapshot) error {
+	// The current process still owns the HTTP socket, so stopping it here would
+	// truncate the update response. Execute the newly installed binary in its
+	// isolated validation mode instead; this verifies the exact bundle that the
+	// supervisor will start, including its embedded app and build metadata.
+	cmd := exec.CommandContext(ctx, p.binary, "--validate-embedded-app", snapshot.Release.Version, snapshot.Release.Commit)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return errors.New("new release failed embedded app validation")
+	}
 	return nil
 }
 

@@ -49,6 +49,13 @@ var (
 )
 
 func main() {
+	if len(os.Args) == 4 && os.Args[1] == "--validate-embedded-app" {
+		if err := web.ValidateEmbeddedApp(os.Args[2], os.Args[3]); err != nil {
+			log.Print(err)
+			os.Exit(1)
+		}
+		return
+	}
 	setBuildMetadata()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
