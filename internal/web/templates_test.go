@@ -14,6 +14,17 @@ func TestEmbeddedTemplatesParse(t *testing.T) {
 	}
 }
 
+func TestSecretsTemplatePreservesExistingAgentAssignments(t *testing.T) {
+	page, err := files.ReadFile("templates/secrets.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(page)
+	if !strings.Contains(html, `name="agent_id" value="{{.ID}}"{{if hasAgent .ID $.AgentIDs}} checked{{end}}`) {
+		t.Fatal("secrets template must preselect persisted agent assignments")
+	}
+}
+
 func TestTaskTabsRemainAccessibleAndKeepChangesActionsInHeader(t *testing.T) {
 	page, err := files.ReadFile("templates/task.html")
 	if err != nil {

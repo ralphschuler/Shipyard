@@ -76,4 +76,80 @@ func TestSecretAssignmentSerializesWithReplacement(t *testing.T) {
 	if lockedID != target.ID {
 		t.Fatalf("target secret was not locked: %q", lockedID)
 	}
+
+	// Run the two mutators concurrently as well. Exactly one operation may win
+	// the lock/order race; the losing operation must observe the active
+	// env_name conflict, so the agent can never end up with two active values.
+	if err = s.RevokeSecret(ctx, "", target.ID); err != nil {
+		t.Fatal(err)
+	}
+	concurrent, err := s.CreateSecret(ctx, "", "concurrent-"+suffix, "", "TARGET_TEST_TOKEN", "concurrent-value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteSecret(ctx, "", concurrent.ID) })
+	if err = s.RevokeSecret(ctx, "", concurrent.ID); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	go func() {
+		<-start
+		results <- s.SetSecretAgents(ctx, "", concurrent.ID, []string{agent.ID})
+	}()
+	go func() {
+		<-start
+		results <- s.ReplaceSecret(ctx, "", concurrent.ID, "concurrent-replacement")
+	}()
+	close(start)
+	first, second := <-results, <-results
+	if first == nil && second == nil {
+		t.Fatal("concurrent assignment and replacement both succeeded")
+	}
+	values, err = s.SecretValuesForAgent(ctx, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeNames := make(map[string]bool)
+	for _, value := range values {
+		activeNames[value.EnvName] = true
+	}
+	if len(values) != 2 || !activeNames["LOCK_TEST_TOKEN"] || !activeNames["TARGET_TEST_TOKEN"] {
+		t.Fatalf("concurrent mutation produced an invalid active set: %#v (errors: %v, %v)", values, first, second)
+	}
+}
+
+func TestSecretReplacementRollsBackWhenAuditFails(t *testing.T) {
+	s := integrationStore(t)
+	t.Setenv("SHIPYARD_SECRET_KEY", "integration-secret-key")
+	ctx := context.Background()
+	suffix := time.Now().UTC().Format("20060102150405000000000")
+	secret, err := s.CreateSecret(ctx, "", "rollback-"+suffix, "", "ROLLBACK_TOKEN", "original-value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteSecret(ctx, "", secret.ID) })
+
+	if err = s.ReplaceSecret(ctx, "not-a-uuid", secret.ID, "replacement-value"); err == nil {
+		t.Fatal("expected replacement audit failure")
+	}
+	values, err := s.SecretValuesForAgent(ctx, "00000000-0000-0000-0000-000000000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 0 {
+		t.Fatalf("unassigned secret unexpectedly returned: %#v", values)
+	}
+	// The encrypted payload is intentionally checked through the authorized
+	// path only; assigning it after the failed mutation must reveal the original.
+	if err = s.SetSecretAgents(ctx, "", secret.ID, []string{"00000000-0000-0000-0000-000000000000"}); err != nil {
+		t.Fatal(err)
+	}
+	values, err = s.SecretValuesForAgent(ctx, "00000000-0000-0000-0000-000000000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 1 || values[0].Value != "original-value" {
+		t.Fatalf("failed-audit replacement was not rolled back: %#v", values)
+	}
 }

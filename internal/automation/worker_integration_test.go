@@ -33,6 +33,32 @@ func workerIntegrationStore(t *testing.T) *store.Store {
 	return s
 }
 
+func TestCheckProviderForAgentRejectsUnassignedSecret(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	suffix := time.Now().UTC().Format("20060102150405000000000")
+	agent, err := s.CreateAgent(ctx, "Provider check agent "+suffix, "integration", "", "", "", t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteAgent(ctx, agent.ID) })
+	provider, err := s.Provider(ctx, "openai")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SaveProvider(ctx, "openai", provider.Model, provider.Command, "SHIPYARD_PROVIDER_TEST_TOKEN", provider.BaseURL, provider.Options, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = s.SaveProvider(ctx, provider.Provider, provider.Model, provider.Command, provider.SecretEnv, provider.BaseURL, provider.Options, provider.Enabled)
+	})
+
+	_, err = (&Worker{Store: s}).CheckProviderForAgent(ctx, "openai", agent.ID)
+	if err == nil || !strings.Contains(err.Error(), "kein aktives Secret") {
+		t.Fatalf("unassigned agent provider check error = %v", err)
+	}
+}
+
 func TestProcessStartsDeliveryAgentExactlyOnceAndRejectsUnknownTarget(t *testing.T) {
 	s := workerIntegrationStore(t)
 	ctx := context.Background()
