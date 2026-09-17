@@ -209,6 +209,7 @@ type AuditEvent struct {
 }
 type RepositoryTarget struct {
 	ID, TaskID, ProjectID, ProjectName, RepositoryURL, DefaultBranch, LocalPath string
+	TargetSource                                                                string
 	SourceGroups                                                                []byte
 	CreatedAt                                                                   time.Time
 }

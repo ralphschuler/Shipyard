@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"taskboard/internal/domain"
@@ -116,5 +117,24 @@ func TestNormalizeTargetIDsRejectsRepositoryURLWithFormatDiagnostic(t *testing.T
 		if !strings.Contains(err.Error(), expected) {
 			t.Fatalf("error %q does not contain %q", err, expected)
 		}
+	}
+}
+
+func TestBoardInheritanceEligibleColumn(t *testing.T) {
+	for _, name := range []string{"Backlog", "Entwicklung", "In Progress"} {
+		if !boardInheritanceEligibleColumn(name) {
+			t.Errorf("%q should allow board target inheritance", name)
+		}
+	}
+	for _, name := range []string{"Inbox", "Review", "Erledigt", "QA"} {
+		if boardInheritanceEligibleColumn(name) {
+			t.Errorf("%q should not trigger board target inheritance", name)
+		}
+	}
+}
+
+func TestRunTargetSelectionRejectsMissingTargets(t *testing.T) {
+	if err := requireRunTargets(nil); !errors.Is(err, ErrTargetSelectionRequired) {
+		t.Fatalf("missing targets error = %v, want ErrTargetSelectionRequired", err)
 	}
 }

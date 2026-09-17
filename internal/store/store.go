@@ -27,6 +27,7 @@ type Store struct {
 
 var ErrNoRunCreated = errors.New("agent run already exists for this event")
 var ErrWorkspaceBusy = errors.New("workspace is busy")
+var ErrTargetSelectionRequired = errors.New("an explicit repository target selection is required")
 
 var canonicalUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 
@@ -678,6 +679,10 @@ func (s *Store) SetTaskTargets(c context.Context, taskID string, projectIDs, gro
 	if _, err = tx.Exec(c, `DELETE FROM task_repository_targets WHERE task_id=$1`, taskID); err != nil {
 		return err
 	}
+	targetSource := "explicit"
+	if len(projectIDs) == 0 && len(groupIDs) == 0 {
+		targetSource = "inherited"
+	}
 	for _, id := range projectIDs {
 		if _, err = tx.Exec(c, `INSERT INTO task_target_projects(task_id,project_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, taskID, id); err != nil {
 			return err
@@ -690,22 +695,75 @@ func (s *Store) SetTaskTargets(c context.Context, taskID string, projectIDs, gro
 	}
 	// Resolve direct projects and group membership now. Agent runs deliberately
 	// read this immutable snapshot, not the mutable group membership.
-	if _, err = tx.Exec(c, `INSERT INTO task_repository_targets(task_id,project_id,project_name,repository_url,default_branch,local_path,source_groups)
-		SELECT $1,p.id,p.name,p.repository_url,p.default_branch,p.local_path,'[]'::jsonb
+	if _, err = tx.Exec(c, `INSERT INTO task_repository_targets(task_id,project_id,project_name,repository_url,default_branch,local_path,source_groups,target_source)
+		SELECT $1,p.id,p.name,p.repository_url,p.default_branch,p.local_path,'[]'::jsonb,$2
 		FROM projects p JOIN task_target_projects t ON t.project_id=p.id WHERE t.task_id=$1
-		ON CONFLICT (task_id,project_id) DO NOTHING`, taskID); err != nil {
+		ON CONFLICT (task_id,project_id) DO NOTHING`, taskID, targetSource); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(c, `INSERT INTO task_repository_targets(task_id,project_id,project_name,repository_url,default_branch,local_path,source_groups)
+	if _, err = tx.Exec(c, `INSERT INTO task_repository_targets(task_id,project_id,project_name,repository_url,default_branch,local_path,source_groups,target_source)
 		SELECT $1,p.id,p.name,p.repository_url,p.default_branch,p.local_path,
-		jsonb_agg(jsonb_build_object('id',g.id,'name',g.name,'color',g.color))
+		jsonb_agg(jsonb_build_object('id',g.id,'name',g.name,'color',g.color)),'explicit'
 		FROM task_target_groups t JOIN project_groups g ON g.id=t.group_id
 		JOIN project_group_members m ON m.group_id=g.id JOIN projects p ON p.id=m.project_id
 		WHERE t.task_id=$1 GROUP BY p.id,p.name,p.repository_url,p.default_branch,p.local_path
 		ON CONFLICT (task_id,project_id) DO UPDATE SET source_groups=EXCLUDED.source_groups`, taskID); err != nil {
 		return err
 	}
+	if targetSource == "inherited" {
+		if _, err = tx.Exec(c, `INSERT INTO task_repository_targets(task_id,project_id,project_name,repository_url,default_branch,local_path,source_groups,target_source)
+			SELECT t.id,p.id,p.name,p.repository_url,p.default_branch,p.local_path,'[]'::jsonb,'inherited'
+			FROM tasks t JOIN board_projects bp ON bp.board_id=t.board_id JOIN projects p ON p.id=bp.project_id
+			WHERE t.id=$1 AND (SELECT count(*) FROM board_projects WHERE board_id=t.board_id)=1`, taskID); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(c, `UPDATE agent_interactions SET status='cancelled',answered_at=now()
+		WHERE task_id=$1 AND status='open' AND (decision_key ILIKE '%project%' OR decision_key ILIKE '%repository%' OR title ILIKE '%project%' OR title ILIKE '%repository%')
+		AND EXISTS (SELECT 1 FROM task_repository_targets WHERE task_id=$1)`, taskID); err != nil {
+		return err
+	}
 	return tx.Commit(c)
+}
+
+func requireRunTargets(targets []domain.RepositoryTarget) error {
+	if len(targets) == 0 {
+		return ErrTargetSelectionRequired
+	}
+	return nil
+}
+
+// runTargets resolves the durable snapshot first and permits board inheritance
+// only when the board has exactly one project. Ambiguous boards are surfaced as
+// a selection error instead of falling back to an agent workspace.
+func (s *Store) runTargets(c context.Context, taskID string) ([]domain.RepositoryTarget, error) {
+	targets, err := s.EffectiveTaskRepositoryTargets(c, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if len(targets) > 0 {
+		return targets, nil
+	}
+	task, err := s.GetTask(c, taskID)
+	if err != nil {
+		return nil, err
+	}
+	projects, err := s.BoardProjects(c, task.BoardID)
+	if err != nil {
+		return nil, err
+	}
+	if len(projects) != 1 {
+		if len(projects) == 0 {
+			return nil, fmt.Errorf("%w: board has no linked repository project", ErrTargetSelectionRequired)
+		}
+		choices := make([]string, 0, len(projects))
+		for _, project := range projects {
+			choices = append(choices, project.Name+" ("+project.RepositoryURL+")")
+		}
+		return nil, fmt.Errorf("%w: choose one repository target: %s", ErrTargetSelectionRequired, strings.Join(choices, ", "))
+	}
+	project := projects[0]
+	return []domain.RepositoryTarget{{TaskID: taskID, ProjectID: project.ID, ProjectName: project.Name, RepositoryURL: project.RepositoryURL, DefaultBranch: project.DefaultBranch, LocalPath: project.LocalPath, TargetSource: "inherited"}}, nil
 }
 
 func normalizeTargetIDs(kind string, rawIDs []string) ([]string, error) {
@@ -720,7 +778,7 @@ func normalizeTargetIDs(kind string, rawIDs []string) ([]string, error) {
 	return ids, nil
 }
 func (s *Store) TaskRepositoryTargets(c context.Context, taskID string) ([]domain.RepositoryTarget, error) {
-	rows, err := s.DB.Query(c, `SELECT id,task_id,COALESCE(project_id::text,''),project_name,repository_url,default_branch,local_path,source_groups,created_at FROM task_repository_targets WHERE task_id=$1 ORDER BY project_name`, taskID)
+	rows, err := s.DB.Query(c, `SELECT id,task_id,COALESCE(project_id::text,''),project_name,repository_url,default_branch,local_path,target_source,source_groups,created_at FROM task_repository_targets WHERE task_id=$1 ORDER BY project_name`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -745,7 +803,16 @@ func (s *Store) EffectiveTaskRepositoryTargets(c context.Context, taskID string)
 		return nil, err
 	}
 	project := projects[0]
-	return []domain.RepositoryTarget{{TaskID: taskID, ProjectID: project.ID, ProjectName: project.Name, RepositoryURL: project.RepositoryURL, DefaultBranch: project.DefaultBranch, LocalPath: project.LocalPath}}, nil
+	return []domain.RepositoryTarget{{TaskID: taskID, ProjectID: project.ID, ProjectName: project.Name, RepositoryURL: project.RepositoryURL, DefaultBranch: project.DefaultBranch, LocalPath: project.LocalPath, TargetSource: "inherited"}}, nil
+}
+
+func boardInheritanceEligibleColumn(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "backlog", "entwicklung", "in progress":
+		return true
+	default:
+		return false
+	}
 }
 func (s *Store) TaskTargetProjects(c context.Context, taskID string) ([]domain.Project, error) {
 	rows, err := s.DB.Query(c, `SELECT DISTINCT p.id,p.name,p.repository_url,p.default_branch,p.local_path,p.last_synced_at,p.last_sync_error,p.created_at,p.updated_at FROM projects p WHERE p.id IN (SELECT project_id FROM task_target_projects WHERE task_id=$1 UNION SELECT m.project_id FROM project_group_members m JOIN task_target_groups g ON g.group_id=m.group_id WHERE g.task_id=$1) ORDER BY p.name`, taskID)
@@ -1199,7 +1266,7 @@ func (s *Store) DashboardAttention(c context.Context) (domain.DashboardAttention
 			SELECT DISTINCT ON (task_id) task_id,status,COALESCE(finished_at,created_at) AS terminal_at
 			FROM agent_runs ORDER BY task_id,created_at DESC,id DESC
 		) latest_run WHERE status='failed' AND terminal_at>=now()-interval '7 days'),
-		(SELECT count(*) FROM agent_interactions WHERE status='open'),
+		(SELECT count(*) FROM agent_interactions i JOIN tasks t ON t.id=i.task_id WHERE i.status='open' AND t.completed_at IS NULL),
 		(SELECT count(*) FROM tasks WHERE completed_at IS NULL AND due_date IS NOT NULL AND due_date<=now()+interval '24 hours')`).
 		Scan(&a.BlockedTasks, &a.FailedRuns7d, &a.OpenInteractions, &a.DueNext24h)
 	return a, err
@@ -1508,6 +1575,12 @@ func (s *Store) CreateTask(c context.Context, b, title, desc, priority, start, d
 	var t domain.Task
 	e = tx.QueryRow(c, "INSERT INTO tasks(board_id,column_id,title,description,priority,start_date,due_date) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,board_id,column_id,title,description,priority,start_date,due_date,completed_at,created_at", b, col, strings.TrimSpace(title), desc, priority, startVal, dueVal).Scan(&t.ID, &t.BoardID, &t.ColumnID, &t.Title, &t.Description, &t.Priority, &t.StartDate, &t.DueDate, &t.CompletedAt, &t.CreatedAt)
 	if e == nil {
+		_, e = tx.Exec(c, `INSERT INTO task_repository_targets(task_id,project_id,project_name,repository_url,default_branch,local_path,source_groups,target_source)
+			SELECT $1,p.id,p.name,p.repository_url,p.default_branch,p.local_path,'[]'::jsonb,'inherited'
+			FROM board_projects bp JOIN projects p ON p.id=bp.project_id
+			WHERE bp.board_id=$2 AND (SELECT count(*) FROM board_projects WHERE board_id=$2)=1`, t.ID, b)
+	}
+	if e == nil {
 		_, e = tx.Exec(c, "INSERT INTO task_transitions(task_id,to_column_id,source) VALUES($1,$2,$3)", t.ID, col, source)
 	}
 	if e == nil {
@@ -1619,7 +1692,7 @@ func moveTaskTx(c context.Context, tx pgx.Tx, id, target, source string) error {
 // scoped human safety override. Agent and automation paths always pass false
 // and therefore remain governed by the board's explicit graph.
 func moveTaskTxWithPolicy(c context.Context, tx pgx.Tx, id, target, source string, allowImplicit bool) error {
-	var current, board, currentName, transition string
+	var current, board, currentName, targetName, transition string
 	err := tx.QueryRow(c, `SELECT t.column_id,t.board_id,c.name
 		FROM tasks t JOIN workflow_columns c ON c.id=t.column_id WHERE t.id=$1 FOR UPDATE`, id).Scan(&current, &board, &currentName)
 	if err != nil {
@@ -1634,7 +1707,7 @@ func moveTaskTxWithPolicy(c context.Context, tx pgx.Tx, id, target, source strin
 	}
 	var terminal bool
 	var targetType string
-	err = tx.QueryRow(c, "SELECT column_type FROM workflow_columns WHERE id=$1 AND board_id=$2", target, board).Scan(&targetType)
+	err = tx.QueryRow(c, "SELECT name,column_type FROM workflow_columns WHERE id=$1 AND board_id=$2", target, board).Scan(&targetName, &targetType)
 	if err != nil {
 		return err
 	}
@@ -1642,6 +1715,28 @@ func moveTaskTxWithPolicy(c context.Context, tx pgx.Tx, id, target, source strin
 	_, err = tx.Exec(c, "UPDATE tasks SET column_id=$2,completed_at=CASE WHEN $3 THEN now() ELSE NULL END,updated_at=now() WHERE id=$1", id, target, terminal)
 	if err != nil {
 		return err
+	}
+	if boardInheritanceEligibleColumn(targetName) {
+		// Historical tasks may predate durable target snapshots. Inherit only
+		// when the task has no explicit project/group target and its board has
+		// exactly one project. The guards make retries and concurrent transitions
+		// idempotent without ever guessing for ambiguous boards.
+		if _, err = tx.Exec(c, `INSERT INTO task_repository_targets(task_id,project_id,project_name,repository_url,default_branch,local_path,source_groups,target_source)
+			SELECT t.id,p.id,p.name,p.repository_url,p.default_branch,p.local_path,'[]'::jsonb,'inherited'
+			FROM tasks t JOIN board_projects bp ON bp.board_id=t.board_id JOIN projects p ON p.id=bp.project_id
+			WHERE t.id=$1
+			  AND NOT EXISTS (SELECT 1 FROM task_target_projects WHERE task_id=t.id)
+			  AND NOT EXISTS (SELECT 1 FROM task_target_groups WHERE task_id=t.id)
+			  AND NOT EXISTS (SELECT 1 FROM task_repository_targets WHERE task_id=t.id)
+			  AND (SELECT count(*) FROM board_projects WHERE board_id=t.board_id)=1
+			ON CONFLICT (task_id,project_id) DO NOTHING`, id); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(c, `UPDATE agent_interactions SET status='cancelled',answered_at=now()
+			WHERE task_id=$1 AND status='open' AND (decision_key ILIKE '%project%' OR decision_key ILIKE '%repository%' OR title ILIKE '%project%' OR title ILIKE '%repository%')
+			  AND EXISTS (SELECT 1 FROM task_repository_targets WHERE task_id=$1 AND target_source='inherited')`, id); err != nil {
+			return err
+		}
 	}
 	var taskTransitionID string
 	err = tx.QueryRow(c, `INSERT INTO task_transitions(task_id,from_column_id,to_column_id,transition_id,source)
@@ -1855,7 +1950,9 @@ func (s *Store) CreateInteraction(c context.Context, task, agent, run, key, fing
 	return i, err
 }
 func (s *Store) OpenInteractions(c context.Context, task string) ([]domain.AgentInteraction, error) {
-	r, err := s.DB.Query(c, `SELECT id,task_id,agent_id,COALESCE(agent_run_id::text,''),title,body,status,answered_by,schema,COALESCE(response,'null'::jsonb),created_at,answered_at,decision_key,fingerprint,COALESCE(continuation_run_id::text,'') FROM agent_interactions WHERE task_id=$1 AND status='open' ORDER BY created_at`, task)
+	r, err := s.DB.Query(c, `SELECT i.id,i.task_id,i.agent_id,COALESCE(i.agent_run_id::text,''),i.title,i.body,i.status,i.answered_by,i.schema,COALESCE(i.response,'null'::jsonb),i.created_at,i.answered_at,i.decision_key,i.fingerprint,COALESCE(i.continuation_run_id::text,'')
+		FROM agent_interactions i JOIN tasks t ON t.id=i.task_id JOIN workflow_columns c ON c.id=t.column_id
+		WHERE i.task_id=$1 AND i.status='open' AND t.completed_at IS NULL AND c.column_type <> 'done' ORDER BY i.created_at`, task)
 	if err != nil {
 		return nil, err
 	}
@@ -1946,12 +2043,12 @@ func (s *Store) ResolveInteractionAndMove(c context.Context, id, answerer, freef
 	if !a.Enabled {
 		return i, nil, errors.New("agent is disabled")
 	}
-	targets, err := s.EffectiveTaskRepositoryTargets(c, i.TaskID)
+	targets, err := s.runTargets(c, i.TaskID)
 	if err != nil {
 		return i, nil, err
 	}
 	if len(targets) == 0 {
-		targets = []domain.RepositoryTarget{{LocalPath: a.WorkspacePath}}
+		return i, nil, ErrTargetSelectionRequired
 	}
 	if _, err = tx.Exec(c, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", i.TaskID+"|manual|"+a.ID); err != nil {
 		return i, nil, err
@@ -2462,14 +2559,16 @@ func (s *Store) CreateRun(c context.Context, task, agent, rule string) (domain.A
 	if e != nil {
 		return domain.AgentRun{}, e
 	}
-	workspace, targetProject := a.WorkspacePath, ""
-	if targets, targetErr := s.EffectiveTaskRepositoryTargets(c, task); targetErr == nil && len(targets) == 1 && targets[0].RepositoryURL != "" {
-		targetProject = targets[0].ProjectID
-		if targets[0].LocalPath != "" {
-			workspace = targets[0].LocalPath
-		} else {
-			workspace = filepath.Join("/home/agent/.taskboard-projects", targetProject)
-		}
+	targets, err := s.runTargets(c, task)
+	if err != nil {
+		return domain.AgentRun{}, err
+	}
+	if err = requireRunTargets(targets); err != nil {
+		return domain.AgentRun{}, err
+	}
+	workspace, targetProject := targets[0].LocalPath, targets[0].ProjectID
+	if workspace == "" {
+		workspace = filepath.Join("/home/agent/.taskboard-projects", targetProject)
 	}
 	return s.createRunWithWorkspace(c, task, a, agent, rule, workspace, targetProject, "")
 }
@@ -2512,12 +2611,12 @@ func (s *Store) CreateManualRuns(c context.Context, task, agent string) ([]domai
 	if !a.Enabled {
 		return nil, errors.New("agent is disabled")
 	}
-	targets, err := s.EffectiveTaskRepositoryTargets(c, task)
+	targets, err := s.runTargets(c, task)
 	if err != nil {
 		return nil, err
 	}
 	if len(targets) == 0 {
-		targets = []domain.RepositoryTarget{{LocalPath: a.WorkspacePath}}
+		return nil, ErrTargetSelectionRequired
 	}
 	for _, target := range targets {
 		if target.ProjectID != "" && target.RepositoryURL == "" {
@@ -3147,12 +3246,12 @@ func (s *Store) CreateRunsForEvent(c context.Context, event domain.AutomationEve
 	if !a.Enabled {
 		return nil, errors.New("agent is disabled")
 	}
-	targets, e := s.EffectiveTaskRepositoryTargets(c, event.TaskID)
+	targets, e := s.runTargets(c, event.TaskID)
 	if e != nil {
 		return nil, e
 	}
 	if len(targets) == 0 {
-		targets = []domain.RepositoryTarget{{LocalPath: a.WorkspacePath}}
+		return nil, ErrTargetSelectionRequired
 	}
 	for _, target := range targets {
 		if target.ProjectID != "" && target.RepositoryURL == "" {
