@@ -1033,6 +1033,14 @@ func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, 
 	return commitSHA, nil
 }
 
+func isIntegrationConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "konfliktfrei") || strings.Contains(message, "drei-wege-konflikt") || strings.Contains(message, "three-way conflict")
+}
+
 func syncManagedCheckout(ctx context.Context, path, branch string, acceptedCommitSHAs ...string) error {
 	status, err := gitOutput(ctx, path, "status", "--porcelain")
 	if err != nil {
@@ -1884,6 +1892,9 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 		var applyErr error
 		commitSHA, applyErr = applyRunPatchToTaskBranch(ctx, source, worktree, runID, run.TaskID)
 		if applyErr != nil {
+			if isIntegrationConflict(applyErr) {
+				w.recordIntegrationConflict(ctx, run, applyErr)
+			}
 			return applyErr
 		}
 	} else {
@@ -1892,6 +1903,10 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	if commitSHA == "" {
 		return errors.New("Task-Branch-Commit konnte nicht verifiziert werden")
 	}
+	if baseSHA, baseErr := gitOutput(ctx, source, "rev-parse", "origin/"+repositoryBranch(ctx, source)); baseErr == nil {
+		_ = w.Store.AddRunLog(ctx, runID, "info", "Integrations-Basis-SHA: "+strings.TrimSpace(baseSHA))
+	}
+	_ = w.Store.AddRunLog(ctx, runID, "info", "Integrations-Head-SHA: "+strings.TrimSpace(commitSHA))
 	applied, err := w.Store.MarkRunApplied(ctx, runID, commitSHA)
 	if err != nil {
 		return err
@@ -1938,6 +1953,17 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	}
 	_ = w.Store.AddComment(ctx, run.TaskID, "Taskboard", "Änderungen übernommen; Erfolgs-Transition wurde ausgeführt.")
 	return nil
+}
+
+// recordIntegrationConflict keeps a failed delivery actionable without
+// changing its succeeded/gated state. Once the operator resolves the branch
+// conflict, the same Apply action can be retried against the preserved run.
+func (w *Worker) recordIntegrationConflict(ctx context.Context, run domain.AgentRun, integrationErr error) {
+	message := "Übernahme blockiert: " + integrationErr.Error()
+	_ = w.Store.AddRunLog(ctx, run.ID, "error", message)
+	if moved, moveErr := w.Store.MoveTaskToNeedsActionForHumanDecision(ctx, run.TaskID); moveErr == nil && moved {
+		_ = w.Store.AddComment(ctx, run.TaskID, "Taskboard", message+"\n\nBetroffene Dateien und nächste Schritte stehen im Run-Protokoll. Nach manueller Konfliktlösung kann die Übernahme erneut gestartet werden.")
+	}
 }
 
 // Diff returns the reviewable patch from the isolated worktree. It never reads
