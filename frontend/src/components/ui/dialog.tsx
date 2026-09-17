@@ -83,7 +83,12 @@ function DialogContent({
   const dialogChildren = React.Children.toArray(children)
   const slotOf = (child: React.ReactNode) =>
     React.isValidElement<{ "data-slot"?: string }>(child)
-      ? child.props["data-slot"]
+      ? child.props["data-slot"] ??
+        (child.type === DialogHeader
+          ? "dialog-header"
+          : child.type === DialogFooter
+            ? "dialog-footer"
+            : undefined)
       : undefined
   const header = dialogChildren.filter(
     (child) => slotOf(child) === "dialog-header"
