@@ -957,6 +957,39 @@ func removeIntegrationWorktree(ctx context.Context, source, path string) error {
 	return nil
 }
 
+// patchFiles extracts paths from a reviewable git patch before apply is run.
+// `git apply --check` is intentionally non-mutating, so looking at the
+// worktree afterwards cannot provide conflict paths. The patch itself is the
+// durable source of that diagnostic.
+func patchFiles(patch string) []string {
+	seen := make(map[string]bool)
+	files := make([]string, 0)
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" || path == "/dev/null" || seen[path] {
+			return
+		}
+		path = strings.TrimPrefix(path, "a/")
+		path = strings.TrimPrefix(path, "b/")
+		if path != "" && !seen[path] {
+			seen[path] = true
+			files = append(files, path)
+		}
+	}
+	for _, line := range strings.Split(patch, "\n") {
+		if strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "--- ") {
+			add(strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "+++ "), "--- ")))
+			continue
+		}
+		if strings.HasPrefix(line, "diff --git ") {
+			if marker := strings.Index(line, " b/"); marker >= 0 {
+				add(line[marker+3:])
+			}
+		}
+	}
+	return files
+}
+
 // applyRunPatchToTaskBranch integrates one isolated run into the durable task
 // branch. The managed source checkout is never modified, which means two
 // tasks can be accepted independently even while the remote default branch
@@ -1009,13 +1042,13 @@ func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, 
 	check := exec.CommandContext(ctx, "git", "-C", integrationPath, "apply", "--check", "-")
 	check.Stdin = strings.NewReader(string(diff))
 	if out, checkErr := check.CombinedOutput(); checkErr != nil {
-		files, _ := gitOutput(ctx, integrationPath, "diff", "--name-only", "HEAD")
+		files := strings.Join(patchFiles(string(diff)), "\n")
 		return "", managedCheckoutProblem("in der Task-Branch nicht konfliktfrei übernehmbar", files, strings.TrimSpace(string(out)))
 	}
 	apply := exec.CommandContext(ctx, "git", "-C", integrationPath, "apply", "--3way", "-")
 	apply.Stdin = strings.NewReader(string(diff))
 	if out, applyErr := apply.CombinedOutput(); applyErr != nil {
-		files, _ := gitOutput(ctx, integrationPath, "diff", "--name-only", "HEAD")
+		files := strings.Join(patchFiles(string(diff)), "\n")
 		_ = exec.CommandContext(context.Background(), "git", "-C", integrationPath, "reset", "--hard", "HEAD").Run()
 		return "", managedCheckoutProblem("in einem Drei-Wege-Konflikt", files, strings.TrimSpace(string(out)))
 	}
@@ -1887,13 +1920,31 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 			}
 		}
 	}
+	// A rebase rewrites the accepted commit SHA. Recover by the durable run
+	// marker and exact patch even when the previously persisted SHA is no
+	// longer an ancestor of the task branch; otherwise a retry would apply the
+	// same delivery a second time.
+	if !alreadyCommitted {
+		recoveredSHA, recoveryErr := findUnpersistedTaskBranchCommit(ctx, source, taskBranch, worktree, runID)
+		if recoveryErr != nil {
+			return fmt.Errorf("rebasierter Task-Branch-Commit konnte nicht geprüft werden: %w", recoveryErr)
+		}
+		if recoveredSHA != "" {
+			commitSHA := recoveredSHA
+			alreadyCommitted = true
+			_ = w.Store.AddRunLog(ctx, runID, "warning", "Rebasierter Task-Branch-Commit anhand von Run-ID und vollständigem Diff wiedererkannt.")
+			delivery.AcceptedCommitSHA = commitSHA
+		}
+	}
 	commitSHA := delivery.AcceptedCommitSHA
 	if !alreadyCommitted {
 		var applyErr error
 		commitSHA, applyErr = applyRunPatchToTaskBranch(ctx, source, worktree, runID, run.TaskID)
 		if applyErr != nil {
 			if isIntegrationConflict(applyErr) {
-				w.recordIntegrationConflict(ctx, run, applyErr)
+				if recordErr := w.recordIntegrationConflict(ctx, run, applyErr); recordErr != nil {
+					return fmt.Errorf("%w; Konfliktdiagnose konnte nicht vollständig persistiert werden: %v", applyErr, recordErr)
+				}
 			}
 			return applyErr
 		}
@@ -1958,12 +2009,21 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 // recordIntegrationConflict keeps a failed delivery actionable without
 // changing its succeeded/gated state. Once the operator resolves the branch
 // conflict, the same Apply action can be retried against the preserved run.
-func (w *Worker) recordIntegrationConflict(ctx context.Context, run domain.AgentRun, integrationErr error) {
+func (w *Worker) recordIntegrationConflict(ctx context.Context, run domain.AgentRun, integrationErr error) error {
 	message := "Übernahme blockiert: " + integrationErr.Error()
-	_ = w.Store.AddRunLog(ctx, run.ID, "error", message)
-	if moved, moveErr := w.Store.MoveTaskToNeedsActionForHumanDecision(ctx, run.TaskID); moveErr == nil && moved {
-		_ = w.Store.AddComment(ctx, run.TaskID, "Taskboard", message+"\n\nBetroffene Dateien und nächste Schritte stehen im Run-Protokoll. Nach manueller Konfliktlösung kann die Übernahme erneut gestartet werden.")
+	var persistErrors []error
+	if err := w.Store.AddRunLog(ctx, run.ID, "error", message); err != nil {
+		persistErrors = append(persistErrors, fmt.Errorf("Run-Protokoll: %w", err))
 	}
+	moved, err := w.Store.MoveTaskToNeedsActionForHumanDecision(ctx, run.TaskID)
+	if err != nil {
+		persistErrors = append(persistErrors, fmt.Errorf("Needs-action-Transition: %w", err))
+	} else if !moved {
+		persistErrors = append(persistErrors, errors.New("Needs-action-Transition wurde nicht ausgeführt"))
+	} else if err := w.Store.AddComment(ctx, run.TaskID, "Taskboard", message+"\n\nBetroffene Dateien und nächste Schritte stehen im Run-Protokoll. Nach manueller Konfliktlösung kann die Übernahme erneut gestartet werden."); err != nil {
+		persistErrors = append(persistErrors, fmt.Errorf("Task-Kommentar: %w", err))
+	}
+	return errors.Join(persistErrors...)
 }
 
 // Diff returns the reviewable patch from the isolated worktree. It never reads

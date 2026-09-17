@@ -541,6 +541,59 @@ func TestApplyRunPatchReportsThreeWayConflictAndPreservesDiff(t *testing.T) {
 	}
 }
 
+func TestApplyRunPatchToTaskBranchReportsPatchFilesBeforeApply(t *testing.T) {
+	patch := "diff --git a/shared.txt b/shared.txt\nindex 1234567..7654321 100644\n--- a/shared.txt\n+++ b/shared.txt\n@@ -1 +1 @@\n-base\n+run\n"
+	files := patchFiles(patch)
+	if !reflect.DeepEqual(files, []string{"shared.txt"}) {
+		t.Fatalf("patch files = %#v, want shared.txt", files)
+	}
+	if got := strings.Join(files, "\n"); got == "" {
+		t.Fatal("conflict diagnostics must retain patch paths before git apply mutates the worktree")
+	}
+}
+
+func TestApplyRunPatchToTaskBranchReportsConflictFiles(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	shared := filepath.Join(source, "shared.txt")
+	if err := os.WriteFile(shared, []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "shared.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, source, "remote", "add", "origin", remote)
+	runGit(t, source, "push", "-u", "origin", "master")
+	taskID := "conflict-task"
+	branch, err := ensureTaskBranch(context.Background(), source, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	branchWorktree := filepath.Join(t.TempDir(), "task-branch")
+	runGit(t, source, "worktree", "add", branchWorktree, branch)
+	if err := os.WriteFile(filepath.Join(branchWorktree, "shared.txt"), []byte("task branch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, branchWorktree, "add", "shared.txt")
+	runGit(t, branchWorktree, "commit", "-m", "task branch change")
+	runGit(t, source, "worktree", "remove", "--force", branchWorktree)
+
+	runWorktree := filepath.Join(t.TempDir(), "run")
+	runGit(t, source, "worktree", "add", runWorktree, "HEAD")
+	if err := os.WriteFile(filepath.Join(runWorktree, "shared.txt"), []byte("run change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, runWorktree, "add", "shared.txt")
+	_, err = applyRunPatchToTaskBranch(context.Background(), source, runWorktree, "conflict-run", taskID)
+	if err == nil || !strings.Contains(err.Error(), "shared.txt") || !strings.Contains(err.Error(), "Task-Branch") {
+		t.Fatalf("task branch conflict diagnosis = %v", err)
+	}
+	runGit(t, source, "worktree", "remove", "--force", runWorktree)
+}
+
 func TestApplyRunPatchBlocksDirtyCheckoutWithoutChangingIt(t *testing.T) {
 	source := t.TempDir()
 	runGit(t, source, "init", "-b", "master")
