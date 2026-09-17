@@ -5,6 +5,9 @@ on:
     branches:
       - master
   workflow_dispatch:
+  schedule:
+    # GitHub Actions schedules use UTC: every Friday at 09:00 UTC.
+    - cron: "0 9 * * 5"
 
 permissions:
   contents: write
