@@ -602,6 +602,24 @@ func TestRequestedSelfReviewRejectsFailedChecklistResult(t *testing.T) {
 	}
 }
 
+func TestRequestedSelfReviewRejectsUnconfirmedChecklistResult(t *testing.T) {
+	raw := `{"status":"passed","checklist":[{"check":"Scope/Akzeptanz","result":"maybe"},{"check":"Diff/Secrets","result":"ok"},{"check":"Tests/Fehler","result":"ok"},{"check":"Sicherheits-/Betriebsrisiken","result":"ok"},{"check":"Rückwärtskompatibilität","result":"ok"}],"tests":"go test","open_risks":"none"}`
+	if _, err := requestedSelfReview([]domain.RunLog{{Message: "```taskboard-self-review\n" + raw + "\n```"}}); err == nil {
+		t.Fatal("self-review with an unconfirmed checklist result must be rejected")
+	}
+}
+
+func TestNonCodexDeliveryUsesOnlyStructuredCompletionChannel(t *testing.T) {
+	terminal := []domain.RunLog{{Message: "```taskboard-self-review\n{\"status\":\"passed\"}\n```"}}
+	if _, err := requestedSelfReview(controlLogsForAgent("Delivery Agent", terminal, "")); err == nil {
+		t.Fatal("non-Codex terminal output must not satisfy the delivery self-review gate")
+	}
+	structured := "```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"Scope/Akzeptanz\",\"result\":\"ok\"},{\"check\":\"Diff/Secrets\",\"result\":\"ok\"},{\"check\":\"Tests/Fehler\",\"result\":\"ok\"},{\"check\":\"Sicherheits-/Betriebsrisiken\",\"result\":\"ok\"},{\"check\":\"Rückwärtskompatibilität\",\"result\":\"ok\"}],\"tests\":\"go test\",\"open_risks\":\"none\"}\n```"
+	if _, err := requestedSelfReview(controlLogsForAgent("Delivery Agent", terminal, structured)); err != nil {
+		t.Fatalf("structured completion output should satisfy the parser path: %v", err)
+	}
+}
+
 func TestCodexSelfReviewUsesOnlyTheStructuredCompletionChannel(t *testing.T) {
 	terminal := []domain.RunLog{{Message: "```taskboard-self-review\n{\"status\":\"passed\"}\n```"}}
 	if _, err := requestedSelfReview(structuredControlLogs("codex", terminal, "")); err == nil {

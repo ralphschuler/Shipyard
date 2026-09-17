@@ -92,8 +92,8 @@ func requestedSelfReview(logs []domain.RunLog) (taskboardSelfReview, error) {
 			return review, errors.New("taskboard-self-review enthält einen unvollständigen Checklistenpunkt")
 		}
 		result := strings.ToLower(strings.TrimSpace(item.Result))
-		if result == "failed" || result == "fail" || result == "fehlgeschlagen" || result == "nicht erfüllt" || result == "nicht erfuellt" {
-			return review, fmt.Errorf("taskboard-self-review enthält einen fehlgeschlagenen Checklistenpunkt %q", item.Check)
+		if !validSelfReviewResult(result) {
+			return review, fmt.Errorf("taskboard-self-review enthält keinen bestandenen Checklistenpunkt %q", item.Check)
 		}
 		if _, required := requiredChecks[check]; !required {
 			return review, fmt.Errorf("taskboard-self-review enthält keine gültige Pflichtkategorie %q", item.Check)
@@ -114,6 +114,15 @@ func requestedSelfReview(logs []domain.RunLog) (taskboardSelfReview, error) {
 	return review, nil
 }
 
+func validSelfReviewResult(result string) bool {
+	switch result {
+	case "ok", "passed", "pass", "bestanden", "erfüllt", "erfuellt", "geprüft", "geprueft":
+		return true
+	default:
+		return false
+	}
+}
+
 func structuredControlLogs(provider string, logs []domain.RunLog, structuredOutput string) []domain.RunLog {
 	if provider != "codex" {
 		return logs
@@ -122,6 +131,16 @@ func structuredControlLogs(provider string, logs []domain.RunLog, structuredOutp
 		return nil
 	}
 	return []domain.RunLog{{Message: structuredOutput}}
+}
+
+func controlLogsForAgent(agentName string, logs []domain.RunLog, structuredOutput string) []domain.RunLog {
+	if requiresSelfReview(agentName) {
+		// The provider name is intentionally forced to the structured path here:
+		// every delivery provider must use its isolated completion output, while
+		// triage agents retain terminal-driven transition compatibility.
+		return structuredControlLogs("codex", logs, structuredOutput)
+	}
+	return logs
 }
 
 func validateSelfReview(agentName string, logs []domain.RunLog, logErr error) error {
@@ -807,7 +826,7 @@ func applyRunPatch(ctx context.Context, source, worktree, runID string) (string,
 // runInTmux keeps a real interactive terminal for each CLI provider while
 // mirroring every pane byte into the durable run log. The separate logfile
 // avoids tmux's finite scrollback being the source of truth.
-func (w *Worker) runInTmux(ctx context.Context, runID, directory, command string, args []string, stdin string, env []string) (int, error) {
+func (w *Worker) runInTmux(ctx context.Context, runID, directory, command string, args []string, stdin, trustedOutputPath string, env []string) (int, error) {
 	root := "/home/agent/.taskboard-run-logs"
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return 0, err
@@ -835,7 +854,7 @@ func (w *Worker) runInTmux(ctx context.Context, runID, directory, command string
 			return 0, err
 		}
 	}
-	const runner = "#!/usr/bin/env bash\nset +e\nsleep 0.1\nmapfile -d '' -t argv < \"$1\"\nif [[ -n \"$3\" ]]; then\n  \"${argv[@]}\" < \"$3\"\nelse\n  \"${argv[@]}\"\nfi\ncode=$?\nprintf '%s' \"$code\" > \"$2\"\nexit \"$code\"\n"
+	const runner = "#!/usr/bin/env bash\nset +e\nsleep 0.1\nmapfile -d '' -t argv < \"$1\"\nif [[ -n \"$3\" && -n \"$4\" ]]; then\n  \"${argv[@]}\" < \"$3\" > \"$4\"\nelif [[ -n \"$3\" ]]; then\n  \"${argv[@]}\" < \"$3\"\nelse\n  \"${argv[@]}\"\nfi\ncode=$?\nprintf '%s' \"$code\" > \"$2\"\nexit \"$code\"\n"
 	if err := os.WriteFile(runnerPath, []byte(runner), 0o700); err != nil {
 		return 0, err
 	}
@@ -847,7 +866,8 @@ func (w *Worker) runInTmux(ctx context.Context, runID, directory, command string
 	if stdin != "" {
 		stdinArgument = stdinPath
 	}
-	startCommand := "bash " + shellQuote(runnerPath) + " " + shellQuote(argsPath) + " " + shellQuote(exitPath) + " " + shellQuote(stdinArgument)
+	outputArgument := trustedOutputPath
+	startCommand := "bash " + shellQuote(runnerPath) + " " + shellQuote(argsPath) + " " + shellQuote(exitPath) + " " + shellQuote(stdinArgument) + " " + shellQuote(outputArgument)
 	start := exec.Command("tmux", "-L", tmuxSocket, "new-session", "-d", "-s", session, "-c", directory, startCommand)
 	start.Env = env
 	if out, err := start.CombinedOutput(); err != nil {
@@ -1944,13 +1964,16 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			}
 		}
 		env = append(env, secretEnv...)
-		_, streamErr := w.runInTmux(runCtx, run.ID, run.WorkspaceSnapshot, command, args, stdin, env)
+		finalPath := filepath.Join("/home/agent/.taskboard-run-logs", run.ID+".final")
+		_ = os.Remove(finalPath)
+		trustedOutputPath := ""
+		if provider.Provider != "codex" {
+			trustedOutputPath = finalPath
+		}
+		_, streamErr := w.runInTmux(runCtx, run.ID, run.WorkspaceSnapshot, command, args, stdin, trustedOutputPath, env)
 		err = streamErr
-		if provider.Provider == "codex" {
-			finalPath := filepath.Join("/home/agent/.taskboard-run-logs", run.ID+".final")
-			if raw, readErr := os.ReadFile(finalPath); readErr == nil {
-				structuredOutput = string(raw)
-			}
+		if raw, readErr := os.ReadFile(finalPath); readErr == nil {
+			structuredOutput = string(raw)
 		}
 	}
 	// CLI adapters may emit a final machine-readable usage event even when the
@@ -2071,7 +2094,10 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 				return
 			}
 		} else {
-			controlLogs := structuredControlLogs(provider.Provider, logs, structuredOutput)
+			// Delivery actions and the self-review must come exclusively from the
+			// provider's isolated completion channel. Terminal logs are untrusted
+			// because prompts, tool output, or a provider echo can contain fences.
+			controlLogs := controlLogsForAgent(agent.Name, logs, structuredOutput)
 			if provider.Provider == "codex" && len(controlLogs) == 0 {
 				_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Codex lieferte keine Abschlussnachricht; strukturierte Task-Aktionen wurden aus Sicherheitsgründen nicht aus dem Terminal gelesen.")
 			}
