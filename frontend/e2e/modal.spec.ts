@@ -11,6 +11,15 @@ const apiFixtures: Record<string, unknown> = {
     DefaultBranch: "master",
     Boards: [],
   }],
+  "/api/v1/boards/board-1": {
+    Board: { ID: "board-1", Name: "Board 1" },
+    Labels: [],
+    Projects: [],
+    Groups: [],
+    Columns: [{ ID: "column-1", Name: "Inbox" }],
+    Tasks: [],
+    Transitions: [],
+  },
   "/api/v1/boards": Array.from({ length: 18 }, (_, index) => ({
     ID: `board-${index}`,
     Name: `Board ${index}`,
@@ -73,6 +82,11 @@ const apiFixtures: Record<string, unknown> = {
     Agents: [],
     Runs: [],
     History: [],
+    Projects: [],
+    Groups: [],
+    TargetProjects: [],
+    TargetGroups: [],
+    Changes: [],
   },
   "/api/v1/runs/run-1": {
     run: { ID: "run-1", Status: "succeeded" },
@@ -168,7 +182,7 @@ test("React project edit dialog keeps the same modal contract", async ({ page })
   await page.setViewportSize({ width: 768, height: 480 });
   await page.goto("/app/#/projects");
 
-  const trigger = page.getByRole("button", { name: "Bearbeiten" });
+  const trigger = page.getByRole("button", { name: "Bearbeiten", exact: true });
   await trigger.click();
   const dialog = page.getByRole("dialog", { name: "Projekt bearbeiten" });
   await expect(dialog).toBeVisible();
@@ -234,14 +248,16 @@ test("productive task edit dialog traps focus and keeps the backdrop inert", asy
   await page.setViewportSize({ width: 390, height: 240 });
   await page.goto("/app/#/tasks/task-1");
 
-  const trigger = page.getByRole("button", { name: "Bearbeiten" });
+  const trigger = page.getByRole("button", { name: "Bearbeiten", exact: true });
   await expect(trigger).toBeVisible();
   await trigger.click();
 
   const dialog = page.getByRole("dialog", { name: "Aufgabe bearbeiten" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByLabel("Titel")).toBeFocused();
-  await expect(dialog).toHaveCSS("background-color", /rgb/);
+  expect(await dialog.evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe(
+    "rgba(0, 0, 0, 0)",
+  );
 
   for (let index = 0; index < 10; index++) {
     await page.keyboard.press("Tab");
@@ -283,7 +299,7 @@ test("productive interaction and change-approval flows remain usable", async ({ 
   await page.getByLabel("Oberfläche").selectOption("web");
   await page.getByRole("button", { name: "Antwort speichern" }).click();
   expect(answerBody).toContain("surface=web");
-  await expect(page.getByRole("button", { name: "Bearbeiten" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Bearbeiten", exact: true })).toBeVisible();
 
   await page.route("**/runs/run-1/diff", (route) => route.fulfill({ status: 200, body: "+ modal" }));
   await page.goto("/app/#/runs/run-1");
