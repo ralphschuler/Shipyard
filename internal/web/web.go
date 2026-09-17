@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
@@ -30,8 +31,10 @@ import (
 	"time"
 )
 
-//go:embed templates/*.html static/*
+//go:embed templates/*.html static/* appdist/*
 var files embed.FS
+
+var appDist, _ = fs.Sub(files, "appdist")
 
 type App struct {
 	store        *store.Store
@@ -513,10 +516,10 @@ func NewWithUpdateOrchestrator(s *store.Store, worker *automation.Worker, orches
 	return app
 }
 func (a *App) Register(m *http.ServeMux) {
-	// The React/shadcn client is served as a protected preview during the
-	// migration. It shares the existing browser session and talks to /api/v1;
-	// legacy views stay available until their replacement is feature-complete.
-	m.Handle("GET /app/", http.StripPrefix("/app/", http.FileServer(http.Dir("frontend/dist"))))
+	// The React/shadcn client is part of this binary. Serving only the embedded
+	// release assets prevents a checkout's stale frontend/dist from surviving
+	// an update and keeps HTML, fingerprints, and backend metadata in lockstep.
+	m.Handle("GET /app/", http.StripPrefix("/app/", http.FileServerFS(appDist)))
 	m.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		// Keep the browser console clean without introducing a separately
 		// deployed asset; the actual icon remains embedded under /static.

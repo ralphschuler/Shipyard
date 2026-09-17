@@ -1,22 +1,34 @@
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
 import path from 'node:path'
-import { defineConfig } from 'vite'
+import { defineConfig, type Plugin } from 'vite'
+
+function buildInfo(): Plugin {
+  return {
+    name: 'shipyard-build-info',
+    generateBundle() {
+      this.emitFile({
+        type: 'asset',
+        fileName: 'build-info.json',
+        source: JSON.stringify({
+          version: process.env.TASKBOARD_VERSION ?? process.env.VITE_BUILD_VERSION ?? 'development',
+          commit: process.env.TASKBOARD_COMMIT_SHA ?? process.env.VITE_BUILD_COMMIT ?? 'unknown',
+        }) + '\n',
+      })
+    },
+  }
+}
 
 // https://vite.dev/config/
 export default defineConfig({
   base: '/app/',
-  plugins: [react(), tailwindcss()],
-  resolve: {
-    alias: {
-      '@': path.resolve(import.meta.dirname, './src'),
-    },
-  },
-  // The panel is frequently opened on a tablet while agents are producing
-  // output.  Keep the application shell small and cache heavyweight, stable
-  // libraries independently instead of making every navigation parse one
-  // large vendor bundle.
+  plugins: [react(), tailwindcss(), buildInfo()],
   build: {
+    outDir: '../internal/web/appdist',
+    emptyOutDir: true,
+    // The panel is frequently opened on a tablet while agents are producing
+    // output. Keep the application shell small and cache heavyweight,
+    // stable libraries independently.
     rolldownOptions: {
       output: {
         manualChunks(id) {
@@ -28,6 +40,11 @@ export default defineConfig({
           return 'vendor'
         },
       },
+    },
+  },
+  resolve: {
+    alias: {
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
 })

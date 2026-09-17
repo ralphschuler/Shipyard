@@ -57,7 +57,7 @@ npm ci
 npm run dev
 ```
 
-The Go server serves the built frontend from `frontend/dist` when that build is present. The classic server-rendered views remain available at the root paths.
+The Go server serves the fingerprinted React frontend embedded in the release binary at `/app/`. The classic server-rendered views remain available at the root paths.
 
 ## First workflow
 
@@ -110,7 +110,7 @@ MCP clients authenticate with a token and can list or create boards, tasks, proj
 
 ## Updates and releases
 
-Releases are built by the repository's GitHub Actions workflow and publish Linux artifacts for `amd64` and `arm64` with checksums. Review the workflow and the deployment examples under [`deploy/`](deploy/) before adapting them to an installation. Update checks are optional and should be configured only with a repository and release allowlist that you control; public repositories do not require a GitHub token. Changelogs use the GitHub release body and fall back to `TASKBOARD_CHANGELOG_PATH`, `CHANGELOG.md`, or `CHANGELOG.markdown`; local files are limited to 1 MiB and are display-only.
+Releases are built by the repository's GitHub Actions workflow and publish Linux artifacts for `amd64` and `arm64` with checksums. Each binary runs `npm ci`/`npm run build` first and embeds the resulting fingerprinted React app under `/app/`; no checkout `frontend/dist` is read in production. `build-info.json` records the release version and commit alongside the backend metadata. Review the workflow and the deployment examples under [`deploy/`](deploy/) before adapting them to an installation. After an update, verify `/app/` and `/app/build-info.json` while the service is running. Update checks are optional and should be configured only with a repository and release allowlist that you control; public repositories do not require a GitHub token. Changelogs use the GitHub release body and fall back to `TASKBOARD_CHANGELOG_PATH`, `CHANGELOG.md`, or `CHANGELOG.markdown`; local files are limited to 1 MiB and are display-only.
 
 This README documents the user-facing setup. Host-specific reverse-proxy, backup, restore, and service-unit procedures belong in deployment runbooks and must be adapted to the target environment.
 

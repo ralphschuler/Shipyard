@@ -24,7 +24,7 @@ if [[ "${TASKBOARD_SKIP_UPDATE_CONFIG_CHECK:-0}" != "1" ]]; then
   TASKBOARD_ENV_FILE="$update_env_file" ./deploy/validate-update-config.sh
 fi
 if [[ -f frontend/package.json ]]; then
-  (cd frontend && npm run build)
+  (cd frontend && npm ci && npm run build)
 fi
 # Keep the Updates view tied to the exact source that was deployed. Operators
 # may override these values for a development build, while tagged checkouts
