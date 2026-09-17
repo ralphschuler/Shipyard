@@ -85,3 +85,19 @@ func TestFactInputJSONTagsPreserveDistinctFields(t *testing.T) {
 		t.Fatalf("distinct fields were not preserved: %s", b)
 	}
 }
+
+func TestFactStatusMetadataOnlyConfirmsConfirmedFacts(t *testing.T) {
+	if statusSetsConfirmation("revoked") {
+		t.Fatal("revocation must not set confirmation metadata")
+	}
+	if statusSetsConfirmation("confirmed") != true {
+		t.Fatal("confirmation must set confirmation metadata")
+	}
+}
+
+func TestRetentionResultReportsBothMemoryKinds(t *testing.T) {
+	result := RetentionResult{ConversationRows: 2, FactRows: 3}
+	if result.TotalRows() != 5 {
+		t.Fatalf("total retention rows = %d, want 5", result.TotalRows())
+	}
+}

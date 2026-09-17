@@ -551,6 +551,7 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("POST /api/v1/memory/facts", a.createMemoryFactAPI)
 	m.HandleFunc("POST /api/v1/memory/facts/{id}/status", a.setMemoryFactStatusAPI)
 	m.HandleFunc("DELETE /api/v1/memory", a.deleteMemoryAPI)
+	m.HandleFunc("POST /api/v1/memory/retention", a.retainMemoryAPI)
 	m.HandleFunc("GET /api/v1/settings/providers", a.providersAPI)
 	m.HandleFunc("GET /api/v1/settings/secrets", a.secretsAPI)
 	m.HandleFunc("POST /api/v1/settings/secrets", a.createSecretAPI)

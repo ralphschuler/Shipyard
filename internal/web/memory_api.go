@@ -53,7 +53,14 @@ func (a *App) memoryAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"messages": items, "context": pack})
+	var nextBefore string
+	var nextBeforeID string
+	if len(items) == limit {
+		last := items[len(items)-1]
+		nextBefore = last.OccurredAt.Format(time.RFC3339Nano)
+		nextBeforeID = last.ID
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"messages": items, "context": pack, "next_before": nextBefore, "next_before_id": nextBeforeID})
 }
 
 func (a *App) createMemoryFactAPI(w http.ResponseWriter, r *http.Request) {
@@ -112,4 +119,19 @@ func (a *App) deleteMemoryAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]int64{"deleted_messages": n})
+}
+
+func (a *App) retainMemoryAPI(w http.ResponseWriter, r *http.Request) {
+	scope, err := a.memoryScope(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	result, err := a.memory.RetainWithPolicyStats(r.Context(), scope, memory.RetentionPolicy{})
+	if err != nil {
+		http.Error(w, "memory retention unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
 }

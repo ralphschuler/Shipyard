@@ -48,6 +48,15 @@ type RetentionPolicy struct {
 	FactAge         time.Duration
 }
 
+type RetentionResult struct {
+	ConversationRows int64 `json:"conversation_rows"`
+	FactRows         int64 `json:"fact_rows"`
+}
+
+func (r RetentionResult) TotalRows() int64 { return r.ConversationRows + r.FactRows }
+
+func statusSetsConfirmation(status string) bool { return status == "confirmed" }
+
 func (p RetentionPolicy) normalized() RetentionPolicy {
 	if p.ConversationAge <= 0 {
 		p.ConversationAge = 365 * 24 * time.Hour

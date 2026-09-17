@@ -45,6 +45,13 @@ func (s *Store) AppendConversation(ctx context.Context, scope Scope, p Provenanc
 		return "", err
 	}
 	defer tx.Rollback(ctx)
+	var runOK bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agent_runs WHERE id=$1 AND task_id=$2 AND agent_id=$3)`, p.RunID, scope.TaskID, scope.AgentID).Scan(&runOK); err != nil {
+		return "", err
+	}
+	if !runOK {
+		return "", ErrInvalidProvenance
+	}
 	var id string
 	if err = tx.QueryRow(ctx, `INSERT INTO memory_conversations(tenant_id,user_id,project_id,task_id,agent_id,thread_id,message_id,run_id,role,content,content_hash,occurred_at,expires_at,provenance_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, m.ThreadID, m.MessageID, m.RunID, m.Role, m.Content, Hash(m.Content), m.OccurredAt, m.ExpiresAt, pJSON(p)).Scan(&id); err != nil {
 		return "", err
@@ -108,6 +115,18 @@ func (s *Store) UpsertFact(ctx context.Context, scope Scope, in FactInput, actor
 		return "", err
 	}
 	defer tx.Rollback(ctx)
+	var provenanceOK bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM agent_runs r
+		JOIN memory_conversations c ON c.message_id=$6 AND c.run_id=r.id
+		WHERE r.id=$7 AND r.task_id=$4 AND r.agent_id=$5
+		  AND c.tenant_id=$1 AND c.user_id=$2 AND c.project_id=$3 AND c.task_id=$4 AND c.agent_id=$5
+	)`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, in.MessageID, in.RunID).Scan(&provenanceOK); err != nil {
+		return "", err
+	}
+	if !provenanceOK {
+		return "", ErrInvalidProvenance
+	}
 	key := DedupeKey(in.Subject, in.Predicate, object)
 	var factID, oldVersion string
 	var existingObject []byte
@@ -185,7 +204,11 @@ func (s *Store) SetFactStatus(ctx context.Context, scope Scope, factID, actorID,
 	if err = tx.QueryRow(ctx, `UPDATE memory_facts SET status=$1,updated_at=now() WHERE id=$2 RETURNING id`, status, factID).Scan(&factID); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(ctx, `UPDATE memory_fact_versions SET confirmed_by=$1,confirmed_at=now() WHERE id=(SELECT current_version_id FROM memory_facts WHERE id=$2)`, actorID, factID); err != nil {
+	if statusSetsConfirmation(status) {
+		if _, err = tx.Exec(ctx, `UPDATE memory_fact_versions SET confirmed_by=$1,confirmed_at=now() WHERE id=(SELECT current_version_id FROM memory_facts WHERE id=$2)`, actorID, factID); err != nil {
+			return err
+		}
+	} else if _, err = tx.Exec(ctx, `UPDATE memory_fact_versions SET confirmed_by=NULL,confirmed_at=NULL WHERE id=(SELECT current_version_id FROM memory_facts WHERE id=$1)`, factID); err != nil {
 		return err
 	}
 	if err = s.auditTx(ctx, tx, scope, actorID, status, factID, "ok", map[string]any{"actor_role": role, "high_impact": highImpact}); err != nil {
@@ -195,30 +218,38 @@ func (s *Store) SetFactStatus(ctx context.Context, scope Scope, factID, actorID,
 }
 
 func (s *Store) Retain(ctx context.Context, scope Scope) (int64, error) {
-	return s.RetainWithPolicy(ctx, scope, RetentionPolicy{})
+	r, err := s.RetainWithPolicyStats(ctx, scope, RetentionPolicy{})
+	return r.TotalRows(), err
 }
 
 func (s *Store) RetainWithPolicy(ctx context.Context, scope Scope, policy RetentionPolicy) (int64, error) {
+	r, err := s.RetainWithPolicyStats(ctx, scope, policy)
+	return r.TotalRows(), err
+}
+
+func (s *Store) RetainWithPolicyStats(ctx context.Context, scope Scope, policy RetentionPolicy) (RetentionResult, error) {
 	if _, err := scopeArgs(scope); err != nil {
-		return 0, err
+		return RetentionResult{}, err
 	}
 	policy = policy.normalized()
 	tx, err := s.db.DB.Begin(ctx)
 	if err != nil {
-		return 0, err
+		return RetentionResult{}, err
 	}
 	defer tx.Rollback(ctx)
 	r, err := tx.Exec(ctx, `DELETE FROM memory_conversations WHERE tenant_id=$1 AND user_id=$2 AND project_id=$3 AND task_id=$4 AND agent_id=$5 AND (expires_at<now() OR occurred_at<$6)`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, time.Now().Add(-policy.ConversationAge))
 	if err != nil {
-		return 0, err
+		return RetentionResult{}, err
 	}
-	if _, err = tx.Exec(ctx, `DELETE FROM memory_facts WHERE tenant_id=$1 AND user_id=$2 AND project_id=$3 AND task_id=$4 AND agent_id=$5 AND (expires_at<now() OR updated_at<$6)`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, time.Now().Add(-policy.FactAge)); err != nil {
-		return 0, err
+	f, err := tx.Exec(ctx, `DELETE FROM memory_facts WHERE tenant_id=$1 AND user_id=$2 AND project_id=$3 AND task_id=$4 AND agent_id=$5 AND (expires_at<now() OR updated_at<$6)`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, time.Now().Add(-policy.FactAge))
+	if err != nil {
+		return RetentionResult{}, err
 	}
-	if err = s.auditTx(ctx, tx, scope, scope.UserID, "retained", "", "ok", map[string]any{"conversation_rows": r.RowsAffected()}); err != nil {
-		return 0, err
+	result := RetentionResult{ConversationRows: r.RowsAffected(), FactRows: f.RowsAffected()}
+	if err = s.auditTx(ctx, tx, scope, scope.UserID, "retained", "", "ok", map[string]any{"conversation_rows": result.ConversationRows, "fact_rows": result.FactRows}); err != nil {
+		return RetentionResult{}, err
 	}
-	return r.RowsAffected(), tx.Commit(ctx)
+	return result, tx.Commit(ctx)
 }
 
 // RetrieveContextPack applies scope predicates in SQL and enforces the hard
