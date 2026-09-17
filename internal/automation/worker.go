@@ -35,6 +35,40 @@ type Worker struct {
 	executeRun func(context.Context, domain.AgentRun)
 }
 
+// estimateUsageCost records the hypothetical direct-API cost from the
+// versioned catalog. This also applies to incomplete runs: a subscription or
+// flat-rate provider can omit native billing while still reporting enough
+// tokens for a transparent comparison estimate.
+func estimateUsageCost(report *domain.UsageReport, price domain.UsagePrice) bool {
+	result := usage.Calculate(usage.Report{
+		Provider:          report.Provider,
+		Model:             report.Model,
+		ServiceTier:       report.ServiceTier,
+		InputTokens:       report.InputTokens,
+		OutputTokens:      report.OutputTokens,
+		CachedInputTokens: report.CachedInputTokens,
+		CacheWriteTokens:  report.CacheWriteTokens,
+		ReasoningTokens:   report.ReasoningTokens,
+		TotalTokens:       report.TotalTokens,
+	}, usage.Price{
+		Version:     price.Version,
+		Input:       price.Input,
+		Output:      price.Output,
+		CachedInput: price.CachedInput,
+		CacheWrite:  price.CacheWrite,
+		Reasoning:   price.Reasoning,
+	})
+	if !result.Known {
+		return false
+	}
+	report.CostSource = "estimated"
+	report.CalculatedCostMicrousd = &result.Microusd
+	report.PriceVersion = price.Version
+	now := time.Now()
+	report.CostCalculatedAt = &now
+	return true
+}
+
 const agentRunTimeout = 20 * time.Minute
 const defaultMaxAutomationEventAttempts = 3
 const maxWebhookDeliveryAttempts = 5
@@ -2325,16 +2359,9 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	} else if partial.TotalTokens != nil {
 		partial.Status = "complete"
 	}
-	if err == nil && nativeCostMicrousd == nil {
+	if nativeCostMicrousd == nil {
 		if price, priceErr := w.Store.ResolveUsagePrice(ctx, partial.Provider, partial.Model, partial.ServiceTier, run.CreatedAt); priceErr == nil {
-			result := usage.Calculate(usage.Report{Provider: partial.Provider, Model: partial.Model, ServiceTier: partial.ServiceTier, InputTokens: partial.InputTokens, OutputTokens: partial.OutputTokens, CachedInputTokens: partial.CachedInputTokens, CacheWriteTokens: partial.CacheWriteTokens, ReasoningTokens: partial.ReasoningTokens, TotalTokens: partial.TotalTokens}, usage.Price{Version: price.Version, Input: price.Input, Output: price.Output, CachedInput: price.CachedInput, CacheWrite: price.CacheWrite, Reasoning: price.Reasoning})
-			if result.Known {
-				partial.CostSource = "estimated"
-				partial.CalculatedCostMicrousd = &result.Microusd
-				partial.PriceVersion = price.Version
-				now := time.Now()
-				partial.CostCalculatedAt = &now
-			}
+			estimateUsageCost(&partial, price)
 		}
 	}
 	if usageErr := w.Store.SetRunUsage(ctx, run.ID, partial); usageErr != nil {
