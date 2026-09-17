@@ -31,6 +31,27 @@ func TestPersistentRunQueueMigrationStoresWakeAndWaitState(t *testing.T) {
 	}
 }
 
+func TestSandboxEffectivePolicyMigrationBackfillsLegacyRuns(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/050_backfill_sandbox_effective_policy.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{
+		"UPDATE agent_runs",
+		"sandbox_effective = jsonb_build_object",
+		"sandbox_profiles",
+		"sandbox_effective = '{}'::jsonb",
+		"network_mode",
+		"write_mode",
+		"WHERE p.name = r.sandbox_profile",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("sandbox compatibility migration is missing %q", required)
+		}
+	}
+}
+
 func TestAgentTransitionSourceMigrationAdmitsWorkerSources(t *testing.T) {
 	body, err := migrationFiles.ReadFile("migrations/034_agent_transition_sources.sql")
 	if err != nil {
