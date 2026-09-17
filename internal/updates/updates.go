@@ -470,7 +470,7 @@ func githubErrorReason(err error, token string) string {
 		return "GitHub-Zugriffstoken ist ungültig oder abgelaufen. Prüfe TASKBOARD_GITHUB_TOKEN."
 	case http.StatusForbidden:
 		if strings.TrimSpace(token) == "" {
-			return "GitHub-Zugriffstoken fehlt. Setze TASKBOARD_GITHUB_TOKEN in der externen Service-Konfiguration."
+			return "Die öffentliche GitHub-API ist rate-limitiert oder verweigert den Zugriff. Ein TASKBOARD_GITHUB_TOKEN ist für öffentliche Repositories optional, kann das Rate-Limit aber erhöhen."
 		}
 		return "GitHub-API-Zugriff verweigert oder Rate-Limit erreicht. Prüfe Token-Berechtigungen und versuche es später erneut."
 	case http.StatusNotFound:

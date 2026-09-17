@@ -177,13 +177,16 @@ func TestClientUsesConfiguredGitHubToken(t *testing.T) {
 	}
 }
 
-func TestResolveReportsMissingTokenWithoutProviderBody(t *testing.T) {
+func TestResolveReportsPublicAPIRateLimitWithoutProviderBody(t *testing.T) {
 	client := Client{ApprovedTags: []string{"v0.1.*"}, HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusForbidden, Status: "403 Forbidden", Body: io.NopCloser(strings.NewReader("provider secret response")), Header: make(http.Header)}, nil
 	})}, GOOS: "linux", GOARCH: "amd64"}
 	snapshot := Resolve(context.Background(), Current{Version: "v0.1.3"}, "ralphschuler/Shipyard", "master", client)
-	if snapshot.Status != "unavailable" || !strings.Contains(snapshot.Reason, "TASKBOARD_GITHUB_TOKEN") {
+	if snapshot.Status != "unavailable" || !strings.Contains(snapshot.Reason, "öffentliche GitHub-API") {
 		t.Fatalf("snapshot = %#v", snapshot)
+	}
+	if strings.Contains(snapshot.Reason, "Token fehlt") {
+		t.Fatalf("public-repository mode incorrectly requires a token: %q", snapshot.Reason)
 	}
 	if strings.Contains(snapshot.Reason, "provider secret") {
 		t.Fatalf("provider response leaked: %q", snapshot.Reason)

@@ -5,7 +5,7 @@ set -euo pipefail
 
 env_file="${TASKBOARD_ENV_FILE:-/etc/taskboard/taskboard.env}"
 if [[ ! -r "$env_file" ]]; then
-  printf 'update configuration missing: create %s from deploy/taskboard.env.example and set a read-only GitHub token\n' "$env_file" >&2
+  printf 'update configuration missing: create %s from deploy/taskboard.env.example and configure the repository, branch, and release policy\n' "$env_file" >&2
   exit 1
 fi
 
@@ -43,8 +43,8 @@ if [[ -z "$branch" || "$branch" == *$'\n'* ]]; then
   printf 'TASKBOARD_GITHUB_BRANCH is missing or malformed\n' >&2
   exit 1
 fi
-if [[ -z "$token" || "$token" == *$'\n'* ]]; then
-  printf 'TASKBOARD_GITHUB_TOKEN is missing; use a least-privilege read-only token\n' >&2
+if [[ "$token" == *$'\n'* ]]; then
+  printf 'TASKBOARD_GITHUB_TOKEN is malformed\n' >&2
   exit 1
 fi
 if [[ -z "${allowlist//[[:space:]]/}" ]]; then
@@ -68,4 +68,8 @@ if (( entry_count == 0 )); then
   exit 1
 fi
 
-printf 'update configuration valid: repository=%s branch=%s policy_entries=%s token=present\n' "$repository" "$branch" "$entry_count"
+token_state="optional-not-configured"
+if [[ -n "$token" ]]; then
+  token_state="present"
+fi
+printf 'update configuration valid: repository=%s branch=%s policy_entries=%s token=%s\n' "$repository" "$branch" "$entry_count" "$token_state"
