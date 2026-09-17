@@ -406,3 +406,27 @@ func TestOrchestratorBlocksBusyRunsAndDoesNotMutate(t *testing.T) {
 		t.Fatalf("error = %v, backup called = %v", err, called)
 	}
 }
+
+func TestProductionAdapterSwitchAndRollbackKeepOneBinaryBundle(t *testing.T) {
+	dir := t.TempDir()
+	p := &productionAdapter{binary: filepath.Join(dir, "taskboard"), previous: filepath.Join(dir, "taskboard.previous-update")}
+	oldBundle := []byte("old-backend-with-old-embedded-assets")
+	newBundle := []byte("new-backend-with-new-embedded-assets")
+	if err := os.WriteFile(p.binary, oldBundle, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.switchBinary(context.Background(), Snapshot{}, newBundle); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(p.binary)
+	if err != nil || string(got) != string(newBundle) {
+		t.Fatalf("installed bundle = %q, err = %v", got, err)
+	}
+	if err := p.rollback(context.Background(), Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(p.binary)
+	if err != nil || string(got) != string(oldBundle) {
+		t.Fatalf("rolled back bundle = %q, err = %v", got, err)
+	}
+}

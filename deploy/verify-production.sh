@@ -46,6 +46,19 @@ systemctl is-active --quiet taskboard
 systemctl is-active --quiet nginx
 curl --fail --silent --show-error --insecure "${base_url%/}/healthz" >/dev/null
 
+# The running binary owns the panel assets. Verify the public smoke path and
+# its build identity together so a stale checkout directory cannot mask a bad
+# release installation.
+app_index="$(curl --fail --silent --show-error --insecure "${base_url%/}/app/")"
+app_build_info="$(curl --fail --silent --show-error --insecure "${base_url%/}/app/build-info.json")"
+case "$app_index" in
+  *'<div id="root">'*) ;;
+  *) printf 'embedded app index is missing the application root\n' >&2; exit 1 ;;
+esac
+case "$app_build_info" in
+  *'"version":""'*|*'"commit":""'*) printf 'embedded app build metadata is incomplete\n' >&2; exit 1 ;;
+esac
+
 if [[ "${TASKBOARD_VERIFY_UPDATE_CONFIG:-1}" == "1" ]]; then
   TASKBOARD_ENV_FILE="$update_env_file" "$(dirname "$0")/validate-update-config.sh"
   update_payload="$(curl --fail --silent --show-error --insecure "${base_url%/}/api/v1/settings/updates")"

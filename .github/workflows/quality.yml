@@ -21,7 +21,9 @@ jobs:
       - name: Build frontend
         run: cd frontend && npm ci && npm run build
       - name: Frontend lint
-        run: cd frontend && npm run lint
+        run: timeout 120s npm run lint --prefix frontend
+      - name: Frontend browser tests
+        run: timeout 120s npm run test:e2e --prefix frontend
   go:
     name: Go correctness and race detection
     runs-on: ubuntu-24.04
@@ -32,9 +34,16 @@ jobs:
         with:
           go-version: stable
           check-latest: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build embedded frontend for Go tests
+        run: timeout 120s npm ci --prefix frontend && timeout 120s npm run build --prefix frontend
       - name: Vet
-        run: go vet ./...
+        run: timeout 120s go vet ./...
       - name: Unit and integration tests (shuffled)
-        run: go test -shuffle=on -count=3 ./...
+        run: timeout 120s go test -shuffle=on -count=3 ./...
       - name: Race detector
-        run: go test -race ./...
+        run: timeout 120s go test -race ./...
