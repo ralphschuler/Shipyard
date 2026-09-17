@@ -1203,6 +1203,20 @@ func (w *Worker) recordSecretUse(ctx context.Context, run domain.AgentRun, secre
 	})
 }
 
+// failSecretAudit stops execution before a secret is handed to a provider.
+// Both durable terminal-state operations are attempted even when the first
+// database operation fails. Errors are logged without secret metadata so an
+// outage cannot leave the run silently non-terminal or expose a value.
+func (w *Worker) failSecretAudit(ctx context.Context, run domain.AgentRun, provider, model string) {
+	w.persistIncompleteUsage(ctx, run, provider, model, "secret_audit_failed")
+	if err := w.Store.SetRunStatus(ctx, run.ID, "failed", "", "Secret-Nutzung konnte nicht auditiert werden"); err != nil {
+		log.Printf("secret audit failure: could not mark run %s failed", run.ID)
+	}
+	if err := w.finish(ctx, run, "failed"); err != nil {
+		log.Printf("secret audit failure: could not finish run %s", run.ID)
+	}
+}
+
 func (w *Worker) Start(ctx context.Context) {
 	// Commands cannot survive a service restart reliably. Mark them terminal so
 	// their workspace lock does not block future automation runs forever, then
@@ -1891,9 +1905,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			return
 		}
 		if auditErr := w.recordSecretUse(ctx, run, secret); auditErr != nil {
-			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "secret_audit_failed")
-			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", "Secret-Nutzung konnte nicht auditiert werden")
-			_ = w.finish(ctx, run, "failed")
+			w.failSecretAudit(ctx, run, provider.Provider, provider.Model)
 			return
 		}
 		text, usage, responseErr := runOpenAIResponses(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot)
@@ -1927,9 +1939,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		for _, secret := range secretValues {
 			secretEnv = append(secretEnv, secret.EnvName+"="+secret.Value)
 			if auditErr := w.recordSecretUse(ctx, run, secret); auditErr != nil {
-				w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "secret_audit_failed")
-				_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", "Secret-Nutzung konnte nicht auditiert werden")
-				_ = w.finish(ctx, run, "failed")
+				w.failSecretAudit(ctx, run, provider.Provider, provider.Model)
 				return
 			}
 		}
