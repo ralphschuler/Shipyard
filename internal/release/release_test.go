@@ -137,6 +137,26 @@ func TestPublishLooksUpBeforePushAndDoesNotPushWhenLookupFails(t *testing.T) {
 	}
 }
 
+func TestPublishDoesNotPushWhenMatchingPRIsInvalid(t *testing.T) {
+	r := validRequest()
+	gh := &fakeGitHub{prs: []PullRequest{{Number: 7, URL: "https://github.com/other/repo/pull/7", Head: r.SourceBranch, Base: r.TargetBranch}}}
+	pusher := &fakePusher{}
+	if _, err := Publish(context.Background(), r, pusher, gh); err == nil {
+		t.Fatal("expected invalid matching PR to block release")
+	}
+	if len(pusher.calls) != 0 {
+		t.Fatalf("push calls = %#v", pusher.calls)
+	}
+}
+
+func TestGitHubRepositoryRejectsQueryAndFragment(t *testing.T) {
+	for _, raw := range []string{"https://github.com/acme/app?x=1", "https://github.com/acme/app#fragment"} {
+		if _, _, err := githubRepository(raw); err == nil {
+			t.Fatalf("expected non-canonical repository URL to be rejected: %s", raw)
+		}
+	}
+}
+
 func TestPublishRedactsConfiguredSecretsFromPRAndErrors(t *testing.T) {
 	r := validRequest()
 	r.SecretValues = []string{"top-secret"}

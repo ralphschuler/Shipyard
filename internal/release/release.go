@@ -26,8 +26,8 @@ type Request struct {
 }
 
 type PushInput struct {
-	RepositoryPath, Remote, Branch, CommitSHA string
-	Force                                     bool
+	RepositoryPath, RepositoryURL, Remote, Branch, CommitSHA string
+	Force                                                    bool
 }
 type Pusher interface {
 	Push(context.Context, PushInput) error
@@ -57,6 +57,14 @@ func redact(value string, secrets []string) string {
 		if secret != "" {
 			value = strings.ReplaceAll(value, secret, "[REDACTED]")
 		}
+	}
+	for _, pattern := range []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(authorization\s*:\s*bearer\s+)[^\s]+`),
+		regexp.MustCompile(`(?i)(\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|password|passwd|secret|private[_-]?key)\s*[:=]\s*)[^\s#]+`),
+		regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
+		regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b`),
+	} {
+		value = pattern.ReplaceAllString(value, "[REDACTED]")
 	}
 	return value
 }
@@ -120,19 +128,21 @@ func Publish(ctx context.Context, request Request, pusher Pusher, github GitHub)
 	if err != nil {
 		return Result{}, safeError("matching PR lookup failed", err, request.SecretValues)
 	}
-	push := PushInput{RepositoryPath: request.SourcePath, Remote: "origin", Branch: request.SourceBranch, CommitSHA: request.CommitSHA}
+	if existing != nil {
+		if err := validatePRForInput(*existing, in); err != nil {
+			return Result{}, safeError("matching PR validation failed", err, request.SecretValues)
+		}
+	}
+	push := PushInput{RepositoryPath: request.SourcePath, RepositoryURL: request.RepositoryURL, Remote: "origin", Branch: request.SourceBranch, CommitSHA: request.CommitSHA}
 	if err := pusher.Push(ctx, push); err != nil {
 		return Result{}, safeError("accepted branch push failed", err, request.SecretValues)
 	}
 	if existing != nil {
-		if existing.Number <= 0 {
-			return Result{}, safeError("matching PR has no valid number", nil, request.SecretValues)
-		}
 		pr, err := github.UpdatePR(ctx, existing.Number, in)
 		if err != nil {
 			return Result{}, safeError("matching PR update failed", err, request.SecretValues)
 		}
-		if err := validatePR(pr); err != nil {
+		if err := validatePRForInput(pr, in); err != nil {
 			return Result{}, safeError("updated PR validation failed", err, request.SecretValues)
 		}
 		return Result{PR: pr, Marker: marker, Updated: true}, nil
@@ -142,15 +152,15 @@ func Publish(ctx context.Context, request Request, pusher Pusher, github GitHub)
 		// A concurrent process may have created the matching PR between lookup
 		// and creation. Re-read it and update rather than creating a duplicate.
 		existing, lookupErr := github.FindPR(ctx, owner, repo, request.SourceBranch, request.TargetBranch, marker)
-		if lookupErr == nil && existing != nil && existing.Number > 0 {
+		if lookupErr == nil && existing != nil && validatePRForInput(*existing, in) == nil {
 			pr, updateErr := github.UpdatePR(ctx, existing.Number, in)
-			if updateErr == nil && validatePR(pr) == nil {
+			if updateErr == nil && validatePRForInput(pr, in) == nil {
 				return Result{PR: pr, Marker: marker, Updated: true}, nil
 			}
 		}
 		return Result{}, safeError("PR creation failed", err, request.SecretValues)
 	}
-	if err := validatePR(pr); err != nil {
+	if err := validatePRForInput(pr, in); err != nil {
 		return Result{}, safeError("created PR validation failed", err, request.SecretValues)
 	}
 	return Result{PR: pr, Marker: marker}, nil
@@ -163,9 +173,31 @@ func validatePR(pr PullRequest) error {
 	return nil
 }
 
+func validatePRForInput(pr PullRequest, in PullRequestInput) error {
+	if err := validatePR(pr); err != nil {
+		return err
+	}
+	owner, repo, err := githubRepository("https://github.com/" + in.Repository)
+	if err != nil {
+		return err
+	}
+	u, err := url.Parse(pr.URL)
+	if err != nil || u.Scheme != "https" || u.Host != "github.com" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		return errors.New("PR URL must be a canonical HTTPS GitHub URL")
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) != 4 || !strings.EqualFold(parts[0], owner) || !strings.EqualFold(parts[1], repo) || parts[2] != "pull" || parts[3] == "" {
+		return errors.New("PR URL does not belong to the assigned repository")
+	}
+	if (pr.Head != "" && pr.Head != in.Head) || (pr.Base != "" && pr.Base != in.Base) {
+		return errors.New("PR branches do not match the assigned source and target branches")
+	}
+	return nil
+}
+
 func githubRepository(raw string) (string, string, error) {
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || strings.ToLower(u.Host) != "github.com" || u.User != nil {
+	if err != nil || u.Scheme != "https" || u.Host != "github.com" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
 		return "", "", errors.New("repository must be an HTTPS GitHub URL")
 	}
 	parts := strings.Split(strings.Trim(strings.TrimSuffix(u.Path, ".git"), "/"), "/")
@@ -194,6 +226,16 @@ func (GitPusher) Push(ctx context.Context, in PushInput) error {
 	if !branchPattern.MatchString(in.Branch) || strings.Contains(in.Branch, "..") {
 		return errors.New("invalid push branch")
 	}
+	if strings.TrimSpace(in.RepositoryURL) != "" {
+		expectedOwner, expectedRepo, err := githubRepository(in.RepositoryURL)
+		if err != nil {
+			return errors.New("assigned repository is invalid")
+		}
+		remoteURL, err := gitOutput(ctx, in.RepositoryPath, "remote", "get-url", "--push", in.Remote)
+		if err != nil || !sameGitHubRepository(remoteURL, expectedOwner, expectedRepo) {
+			return errors.New("managed checkout remote does not match the assigned repository")
+		}
+	}
 	cmd := exec.CommandContext(ctx, "git", "-C", in.RepositoryPath, "rev-parse", "--verify", "HEAD^{commit}")
 	output, err := cmd.Output()
 	if err != nil || !strings.EqualFold(strings.TrimSpace(string(output)), in.CommitSHA) {
@@ -206,6 +248,24 @@ func (GitPusher) Push(ctx context.Context, in PushInput) error {
 		return errors.New("git push failed")
 	}
 	return nil
+}
+
+func sameGitHubRepository(raw, owner, repo string) bool {
+	raw = strings.TrimSpace(raw)
+	if strings.HasSuffix(raw, ".git") {
+		raw = strings.TrimSuffix(raw, ".git")
+	}
+	if strings.HasPrefix(raw, "git@github.com:") {
+		raw = "https://github.com/" + strings.TrimPrefix(raw, "git@github.com:")
+	}
+	gotOwner, gotRepo, err := githubRepository(raw)
+	return err == nil && strings.EqualFold(gotOwner, owner) && strings.EqualFold(gotRepo, repo)
+}
+
+func gitOutput(ctx context.Context, directory string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", directory}, args...)...)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
 }
 
 type Client struct {

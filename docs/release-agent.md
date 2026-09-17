@@ -16,12 +16,17 @@ closed. The PR body includes the task/project, branches, commit, change
 summary, tests, and review notes. The returned `Result.PR.URL` is the direct
 audit/comment reference.
 
+An existing PR is validated against the assigned repository and exact
+source/target branches before any push. `GitPusher` also verifies that the
+managed checkout's push remote resolves to the assigned GitHub repository.
+
 `GitPusher` accepts only the exact `HEAD` commit of the managed checkout, so a
 caller cannot substitute an unrelated SHA. `release.Client` receives a token
 from a server-side secret assignment. It does not read service environment
 variables, only accepts the canonical `https://api.github.com` API endpoint,
 and does not include the token or HTTP response body in errors. Known secret
-values are redacted from PR summaries and adapter errors. The repository
+values and common token/key patterns are redacted from PR summaries and
+adapter errors. The repository
 currently has no canonical
 Done-release event payload or release-agent secret assignment, so worker
 wiring is intentionally not guessed: missing configuration must block the
