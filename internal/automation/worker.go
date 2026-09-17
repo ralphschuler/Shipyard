@@ -1292,21 +1292,30 @@ func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, 
 			return "", managedCheckoutProblem("mit dem aktuellen Remote-Stand nicht konfliktfrei rebasierbar", files, strings.TrimSpace(string(out)))
 		}
 	}
-	check := exec.CommandContext(ctx, "git", "-C", integrationPath, "apply", "--check", "-")
-	check.Stdin = strings.NewReader(string(diff))
-	if out, checkErr := check.CombinedOutput(); checkErr != nil {
-		files := strings.Join(patchFiles(string(diff)), "\n")
-		return "", managedCheckoutProblem("in der Task-Branch nicht konfliktfrei übernehmbar", files, strings.TrimSpace(string(out)))
-	}
+	// Do not preflight with `git apply --check`: it cannot model the three-way
+	// base and rejects additions that are already present after a rebase. The
+	// three-way apply below is the single source of truth for applicability.
 	apply := exec.CommandContext(ctx, "git", "-C", integrationPath, "apply", "--3way", "-")
 	apply.Stdin = strings.NewReader(string(diff))
 	if out, applyErr := apply.CombinedOutput(); applyErr != nil {
 		files := strings.Join(patchFiles(string(diff)), "\n")
 		_ = exec.CommandContext(context.Background(), "git", "-C", integrationPath, "reset", "--hard", "HEAD").Run()
-		return "", managedCheckoutProblem("in einem Drei-Wege-Konflikt", files, strings.TrimSpace(string(out)))
+		return "", managedCheckoutProblem("in der Task-Branch in einem Drei-Wege-Konflikt", files, strings.TrimSpace(string(out)))
 	}
 	if out, addErr := exec.CommandContext(ctx, "git", "-C", integrationPath, "add", "-A").CombinedOutput(); addErr != nil {
 		return "", errors.New(strings.TrimSpace(string(out)))
+	}
+	if status, statusErr := gitOutput(ctx, integrationPath, "status", "--porcelain"); statusErr != nil {
+		return "", fmt.Errorf("Task-Branch-Status konnte nach Drei-Wege-Apply nicht verifiziert werden: %w", statusErr)
+	} else if strings.TrimSpace(status) == "" {
+		// A rebased branch may already contain the exact change. Treat the
+		// successful three-way no-op as idempotent instead of attempting an
+		// empty audit commit.
+		commitSHA, headErr := gitOutput(ctx, integrationPath, "rev-parse", "HEAD")
+		if headErr != nil {
+			return "", fmt.Errorf("bestehender Task-Branch-Commit konnte nicht verifiziert werden: %w", headErr)
+		}
+		return commitSHA, nil
 	}
 	commit := exec.CommandContext(ctx, "git", "-C", integrationPath, "-c", "user.name=Taskboard", "-c", "user.email=taskboard@local", "commit", "-m", "taskboard: accept run "+runID)
 	if out, commitErr := commit.CombinedOutput(); commitErr != nil {

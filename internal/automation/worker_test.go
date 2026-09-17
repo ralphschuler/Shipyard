@@ -696,6 +696,51 @@ func TestApplyRunPatchToTaskBranchReportsConflictFiles(t *testing.T) {
 	runGit(t, source, "worktree", "remove", "--force", runWorktree)
 }
 
+func TestApplyRunPatchToTaskBranchUsesThreeWayForExistingRebasedFile(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "README.md")
+	runGit(t, source, "commit", "-m", "initial")
+
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, source, "remote", "add", "origin", remote)
+	runGit(t, source, "push", "-u", "origin", "master")
+	taskID := "existing-file-task"
+	branch, err := ensureTaskBranch(context.Background(), source, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	branchWorktree := filepath.Join(t.TempDir(), "task-branch")
+	runGit(t, source, "worktree", "add", branchWorktree, branch)
+	if err := os.WriteFile(filepath.Join(branchWorktree, "migrations-048.sql"), []byte("migration\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, branchWorktree, "add", "migrations-048.sql")
+	runGit(t, branchWorktree, "commit", "-m", "rebase already introduced migration")
+	runGit(t, source, "worktree", "remove", "--force", branchWorktree)
+
+	runWorktree := filepath.Join(t.TempDir(), "run")
+	runGit(t, source, "worktree", "add", runWorktree, "HEAD")
+	if err := os.WriteFile(filepath.Join(runWorktree, "migrations-048.sql"), []byte("migration\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, runWorktree, "add", "migrations-048.sql")
+	if _, err := applyRunPatchToTaskBranch(context.Background(), source, runWorktree, "existing-file-run", taskID); err != nil {
+		t.Fatalf("existing rebased file should use the three-way path: %v", err)
+	}
+	if _, err := gitOutput(context.Background(), source, "show", branch+":migrations-048.sql"); err != nil {
+		t.Fatalf("three-way integration did not retain existing file: %v", err)
+	}
+	runGit(t, source, "worktree", "remove", "--force", runWorktree)
+}
+
 func TestApplyRunPatchBlocksDirtyCheckoutWithoutChangingIt(t *testing.T) {
 	source := t.TempDir()
 	runGit(t, source, "init", "-b", "master")
