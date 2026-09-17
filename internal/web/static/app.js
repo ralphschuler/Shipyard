@@ -17,7 +17,7 @@ const applyTheme=()=>{const selected=shipyardPrefs.theme||'system';document.docu
 applyTheme();
 systemDark.addEventListener?.('change',()=>{if((shipyardPrefs.theme||'system')==='system')applyTheme()});
 document.title=document.title.replace(/Taskboard/g,'Shipyard');
-const loadTranslations=fetch('/api/i18n',{credentials:'same-origin'}).then(response=>response.ok?response.json():null).then(data=>{if(data?.translations)shipyardTranslations.en=data.translations;if(data?.language==='de'||data?.language==='en')activeShipyardLanguage=data.language;applyLanguage();return data}).catch(()=>{applyLanguage();return null});
+const loadTranslations=fetch('/api/i18n',{credentials:'same-origin'}).then(response=>response.ok?response.json():null).then(data=>{const dictionaries=data?.languages||{};if(data?.translations&&!dictionaries.en)dictionaries.en=data.translations;shipyardTranslations.de=dictionaries.de||{};shipyardTranslations.en=dictionaries.en||{};if(data?.language==='de'||data?.language==='en')activeShipyardLanguage=data.language;applyLanguage();return data}).catch(()=>{applyLanguage();return null});
 document.addEventListener('change',event=>{if(!(event.target instanceof HTMLSelectElement)||event.target.name!=='language')return;activeShipyardLanguage=event.target.value==='en'?'en':'de';const value=activeShipyardLanguage;document.cookie=`shipyard_language=${value}; path=/; max-age=31536000; SameSite=Lax`;try{localStorage.setItem('shipyard.language',value)}catch(_){}if(value==='de'||Object.keys(shipyardTranslations.en).length)applyLanguage();else loadTranslations.then(applyLanguage);});
 // Keep focus on the invoking control and make Escape opt-in for closable
 // dialogs. Native showModal() supplies the remaining focus containment.

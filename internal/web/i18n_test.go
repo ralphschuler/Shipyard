@@ -122,3 +122,16 @@ func TestLocalizeHTMLLeavesPartialDynamicTextUntouched(t *testing.T) {
 		t.Fatalf("complete static text was not translated: %s", english)
 	}
 }
+
+func TestLegacyDictionariesProvideBothBrowserDirections(t *testing.T) {
+	dictionaries := legacyDictionaries()
+	if dictionaries[languageGerman]["Neue Aufgabe"] != "Neue Aufgabe" {
+		t.Fatalf("German dictionary must preserve the source phrase")
+	}
+	if dictionaries[languageEnglish]["Neue Aufgabe"] != "New task" {
+		t.Fatalf("English dictionary must translate the source phrase")
+	}
+	if len(dictionaries[languageGerman]) != len(dictionaries[languageEnglish]) {
+		t.Fatalf("language dictionaries have different coverage: de=%d en=%d", len(dictionaries[languageGerman]), len(dictionaries[languageEnglish]))
+	}
+}

@@ -1551,7 +1551,9 @@ func (a *App) render(r *http.Request, w http.ResponseWriter, name string, data a
 }
 
 func (a *App) i18nAPI(w http.ResponseWriter, r *http.Request) {
-	writeAPI(w, map[string]any{"language": a.accountLanguage(r), "translations": legacyDictionary("en")}, nil)
+	// Keep the original flat English field for API consumers while exposing
+	// the bidirectional dictionaries used by the browser.
+	writeAPI(w, map[string]any{"language": a.accountLanguage(r), "translations": legacyDictionary(languageEnglish), "languages": legacyDictionaries()}, nil)
 }
 func (a *App) account(w http.ResponseWriter, r *http.Request) {
 	u, ok := currentUser(r.Context())

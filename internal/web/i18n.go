@@ -105,10 +105,24 @@ func init() {
 }
 
 func legacyDictionary(lang string) map[string]string {
-	if normalizeLanguage(lang) != languageEnglish {
-		return map[string]string{}
+	if normalizeLanguage(lang) == languageEnglish {
+		return legacyPhrases
 	}
-	return legacyPhrases
+	// The browser needs a German dictionary as well.  Returning identity
+	// entries is intentional: dynamically created controls can be switched
+	// back from English without keeping a second, divergent phrase list.
+	dictionary := make(map[string]string, len(legacyPhrases))
+	for german := range legacyPhrases {
+		dictionary[german] = german
+	}
+	return dictionary
+}
+
+func legacyDictionaries() map[string]map[string]string {
+	return map[string]map[string]string{
+		languageGerman:  legacyDictionary(languageGerman),
+		languageEnglish: legacyDictionary(languageEnglish),
+	}
 }
 
 func localizeHTML(html, lang string) string {
