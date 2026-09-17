@@ -74,6 +74,7 @@ const defaultMaxAutomationEventAttempts = 3
 const maxWebhookDeliveryAttempts = 5
 const worktreeRetention = 7 * 24 * time.Hour
 const worktreeCleanupInterval = 15 * time.Minute
+const integrationQueueInterval = 5 * time.Second
 
 const tmuxSocket = "taskboard"
 
@@ -891,6 +892,136 @@ func taskIntegrationBranch(taskID string) string {
 	return "task/" + strings.TrimSpace(taskID)
 }
 
+func integrationPushArgs(branch, defaultBranch string) ([]string, error) {
+	branch = strings.TrimSpace(branch)
+	defaultBranch = strings.TrimSpace(defaultBranch)
+	if branch == "" || strings.HasPrefix(branch, "-") || branch == defaultBranch || !strings.HasPrefix(branch, "task/") {
+		return nil, errors.New("ungültiges oder unsicheres Integrationsziel")
+	}
+	if defaultBranch == "" || strings.HasPrefix(defaultBranch, "-") {
+		return nil, errors.New("ungültiger Default-Branch")
+	}
+	return []string{"push", "--force-with-lease", "origin", branch + ":" + branch}, nil
+}
+
+// processIntegrationQueue is deliberately restartable: every step is stored
+// before the next external Git operation. A transient push/PR failure leaves
+// the job visible and eligible for a later poll instead of losing delivery.
+func (w *Worker) processIntegrationQueue(ctx context.Context) {
+	jobs, err := w.Store.IntegrationJobs(ctx, 20)
+	if err != nil {
+		return
+	}
+	for _, job := range jobs {
+		if err := w.processIntegrationJob(ctx, job); err != nil {
+			_ = w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, err.Error(), job.PRNumber, job.Attempts+1)
+		}
+	}
+}
+
+func (w *Worker) processIntegrationJob(ctx context.Context, job domain.IntegrationJob) error {
+	unlock, err := lockRepository(ctx, job.RepositoryPath)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	integrationPath := filepath.Join(taskIntegrationDirectory(job.RepositoryPath), "queue-"+job.ID)
+	if err := os.MkdirAll(filepath.Dir(integrationPath), 0o700); err != nil {
+		return err
+	}
+	if err := removeIntegrationWorktree(ctx, job.RepositoryPath, integrationPath); err != nil {
+		return err
+	}
+	if out, addErr := exec.CommandContext(ctx, "git", "-C", job.RepositoryPath, "worktree", "add", integrationPath, job.Branch).CombinedOutput(); addErr != nil {
+		return fmt.Errorf("Queue-Integrations-Worktree konnte nicht angelegt werden: %s", strings.TrimSpace(string(out)))
+	}
+	defer func() { _ = removeIntegrationWorktree(context.Background(), job.RepositoryPath, integrationPath) }()
+	if job.Step == "fetch" || job.Status == "queued" {
+		if _, err = gitOutput(ctx, job.RepositoryPath, "fetch", "--no-tags", "origin", job.DefaultBranch); err != nil {
+			return fmt.Errorf("Fetch fehlgeschlagen: %w", err)
+		}
+		job.BaseSHA, err = gitOutput(ctx, job.RepositoryPath, "rev-parse", "origin/"+job.DefaultBranch)
+		if err != nil {
+			return fmt.Errorf("Remote-Basis konnte nicht gelesen werden: %w", err)
+		}
+		job.Step, job.Status = "rebase", "running"
+		if err = w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts); err != nil {
+			return err
+		}
+	}
+	if job.Step == "rebase" {
+		if _, err = gitOutput(ctx, integrationPath, "rebase", "origin/"+job.DefaultBranch); err != nil {
+			return fmt.Errorf("Rebase für %s fehlgeschlagen: %w", job.Branch, err)
+		}
+		job.HeadSHA, err = gitOutput(ctx, integrationPath, "rev-parse", "HEAD")
+		if err != nil {
+			return err
+		}
+		job.Step = "push"
+		if err = w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts); err != nil {
+			return err
+		}
+	}
+	if job.Step == "push" {
+		args, argsErr := integrationPushArgs(job.Branch, job.DefaultBranch)
+		if argsErr != nil {
+			return argsErr
+		}
+		if _, err = gitOutput(ctx, integrationPath, args...); err != nil {
+			return fmt.Errorf("Push fehlgeschlagen: %w", err)
+		}
+		job.Step, job.Status = "pr", "pushed"
+		if err = w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts); err != nil {
+			return err
+		}
+	}
+	if job.Step == "pr" {
+		// gh is the configured provider boundary. It uses the operator's
+		// existing credential setup and never receives credentials from task data.
+		remote, remoteErr := gitOutput(ctx, job.RepositoryPath, "remote", "get-url", "origin")
+		if remoteErr != nil {
+			return fmt.Errorf("Remote-URL für PR konnte nicht gelesen werden: %w", remoteErr)
+		}
+		out, ghErr := exec.CommandContext(ctx, "gh", "-R", remote, "pr", "list", "--head", job.Branch, "--base", job.DefaultBranch, "--state", "all", "--json", "number,url", "--limit", "1").CombinedOutput()
+		if ghErr == nil {
+			var existing []struct {
+				Number int    `json:"number"`
+				URL    string `json:"url"`
+			}
+			if json.Unmarshal(out, &existing) == nil && len(existing) > 0 && existing[0].Number > 0 && existing[0].URL != "" {
+				job.PRNumber, job.PRURL = existing[0].Number, existing[0].URL
+			}
+		}
+		if job.PRNumber == 0 {
+			out, ghErr = exec.CommandContext(ctx, "gh", "-R", remote, "pr", "create", "--base", job.DefaultBranch, "--head", job.Branch, "--fill").CombinedOutput()
+			if ghErr == nil {
+				// gh pr create prints the URL, while gh pr view provides the
+				// stable number/URL shape persisted by Shipyard.
+				out, ghErr = exec.CommandContext(ctx, "gh", "-R", remote, "pr", "view", job.Branch, "--json", "number,url").CombinedOutput()
+			}
+		}
+		if ghErr != nil {
+			return fmt.Errorf("PR-Aktualisierung fehlgeschlagen: %s", strings.TrimSpace(string(out)))
+		}
+		if job.PRNumber == 0 {
+			var pr struct {
+				Number int    `json:"number"`
+				URL    string `json:"url"`
+			}
+			if json.Unmarshal(out, &pr) != nil || pr.Number == 0 || pr.URL == "" {
+				return errors.New("gh lieferte keine gültigen PR-Metadaten")
+			}
+			job.PRNumber, job.PRURL = pr.Number, pr.URL
+		}
+		if err = w.Store.SetRunIntegration(ctx, job.RunID, job.Branch, job.BaseSHA, job.HeadSHA, "pr_open", job.PRURL, job.PRNumber); err != nil {
+			return err
+		}
+		job.Step, job.Status = "done", "succeeded"
+		return w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts)
+	}
+	return nil
+}
+
 func taskIntegrationDirectory(source string) string {
 	if configured := strings.TrimSpace(os.Getenv("TASKBOARD_INTEGRATION_ROOT")); configured != "" {
 		return filepath.Clean(configured)
@@ -1680,6 +1811,18 @@ func (w *Worker) Start(ctx context.Context) {
 			}
 		}
 	}()
+	go func() {
+		tick := time.NewTicker(integrationQueueInterval)
+		defer tick.Stop()
+		for {
+			w.processIntegrationQueue(ctx)
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+		}
+	}()
 }
 
 func (w *Worker) cleanupExpiredWorktrees(ctx context.Context) {
@@ -1954,10 +2097,18 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	if commitSHA == "" {
 		return errors.New("Task-Branch-Commit konnte nicht verifiziert werden")
 	}
-	if baseSHA, baseErr := gitOutput(ctx, source, "rev-parse", "origin/"+repositoryBranch(ctx, source)); baseErr == nil {
+	defaultBranch := repositoryBranch(ctx, source)
+	baseSHA, baseErr := gitOutput(ctx, source, "rev-parse", "origin/"+defaultBranch)
+	if baseErr == nil {
 		_ = w.Store.AddRunLog(ctx, runID, "info", "Integrations-Basis-SHA: "+strings.TrimSpace(baseSHA))
 	}
 	_ = w.Store.AddRunLog(ctx, runID, "info", "Integrations-Head-SHA: "+strings.TrimSpace(commitSHA))
+	if err := w.Store.SetRunIntegration(ctx, runID, taskBranch, strings.TrimSpace(baseSHA), strings.TrimSpace(commitSHA), "queued", "", 0); err != nil {
+		return err
+	}
+	if _, err := w.Store.EnqueueIntegration(ctx, domain.IntegrationJob{RepositoryPath: source, RunID: runID, TaskID: run.TaskID, Branch: taskBranch, DefaultBranch: defaultBranch, BaseSHA: strings.TrimSpace(baseSHA), HeadSHA: strings.TrimSpace(commitSHA)}); err != nil {
+		return fmt.Errorf("Integrationswarteschlange konnte nicht angelegt werden: %w", err)
+	}
 	applied, err := w.Store.MarkRunApplied(ctx, runID, commitSHA)
 	if err != nil {
 		return err

@@ -21,6 +21,11 @@ Repository-Lock serialisiert nur die kurze Git-Integrationsphase; Agenten
 können weiterhin parallel laufen.
 
 Die Task-Branch ist der vorgesehene Push-/PR-Zielpunkt. Der Default-Branch wird
-nicht von Agent-Runs verändert. Ein PR sollte mit `--force-with-lease` nach
-einem Rebase aktualisiert und anschließend über die normalen GitHub-Checks
-gemergt werden.
+nicht von Agent-Runs verändert. Nach dem lokalen Commit legt Shipyard eine
+persistent gespeicherte Repository-Queue an. Diese arbeitet Fetch, Rebase,
+`git push --force-with-lease` und die PR-Erstellung/-Wiedererkennung als
+wiederanlaufbare Schritte ab. Ein Dienstneustart oder ein temporärer Remote-
+Fehler verliert daher keine Delivery; der nächste Queue-Lauf setzt beim
+gespeicherten Schritt fort. Branch, Basis-/Head-SHA, Queue-Status und PR-
+Metadaten werden am Run gespeichert und angezeigt. Ein PR wird anschließend
+über die normalen Provider-Checks gemergt.

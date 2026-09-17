@@ -2779,8 +2779,31 @@ func (s *Store) RunQueueStatus(c context.Context, id string) (domain.RunQueueSta
 }
 func (s *Store) RunDelivery(c context.Context, id string) (domain.RunDelivery, error) {
 	var d domain.RunDelivery
-	err := s.DB.QueryRow(c, "SELECT diff_summary,gate_status,gate_output,input_tokens,output_tokens,token_usage,estimated_cost_microusd,duration_seconds,COALESCE(accepted_commit_sha,''),applied_at FROM agent_runs WHERE id=$1", id).Scan(&d.DiffSummary, &d.GateStatus, &d.GateOutput, &d.InputTokens, &d.OutputTokens, &d.TokenUsage, &d.EstimatedCostMicrousd, &d.DurationSeconds, &d.AcceptedCommitSHA, &d.AppliedAt)
+	err := s.DB.QueryRow(c, "SELECT diff_summary,gate_status,gate_output,input_tokens,output_tokens,token_usage,estimated_cost_microusd,duration_seconds,COALESCE(accepted_commit_sha,''),COALESCE(integration_branch,''),COALESCE(integration_base_sha,''),COALESCE(integration_head_sha,''),COALESCE(integration_status,''),COALESCE(pr_url,''),COALESCE(pr_number,0),applied_at FROM agent_runs WHERE id=$1", id).Scan(&d.DiffSummary, &d.GateStatus, &d.GateOutput, &d.InputTokens, &d.OutputTokens, &d.TokenUsage, &d.EstimatedCostMicrousd, &d.DurationSeconds, &d.AcceptedCommitSHA, &d.IntegrationBranch, &d.IntegrationBaseSHA, &d.IntegrationHeadSHA, &d.IntegrationStatus, &d.PRURL, &d.PRNumber, &d.AppliedAt)
 	return d, err
+}
+
+func (s *Store) EnqueueIntegration(c context.Context, job domain.IntegrationJob) (domain.IntegrationJob, error) {
+	var result domain.IntegrationJob
+	err := s.DB.QueryRow(c, `INSERT INTO repository_integration_queue(repository_path,run_id,task_id,branch,default_branch,base_sha,head_sha)
+		VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(run_id) DO UPDATE SET head_sha=EXCLUDED.head_sha,updated_at=now()
+		RETURNING id,repository_path,run_id,task_id,branch,default_branch,base_sha,head_sha,status,step,pr_url,pr_number,attempts,last_error,next_attempt_at,created_at,updated_at`, job.RepositoryPath, job.RunID, job.TaskID, job.Branch, job.DefaultBranch, job.BaseSHA, job.HeadSHA).
+		Scan(&result.ID, &result.RepositoryPath, &result.RunID, &result.TaskID, &result.Branch, &result.DefaultBranch, &result.BaseSHA, &result.HeadSHA, &result.Status, &result.Step, &result.PRURL, &result.PRNumber, &result.Attempts, &result.LastError, &result.NextAttemptAt, &result.CreatedAt, &result.UpdatedAt)
+	return result, err
+}
+
+func (s *Store) UpdateIntegration(c context.Context, id, status, step, baseSHA, headSHA, prURL, lastError string, prNumber, attempts int) error {
+	_, err := s.DB.Exec(c, `UPDATE repository_integration_queue SET status=$2,step=$3,base_sha=$4,head_sha=$5,pr_url=$6,last_error=$7,pr_number=$8,attempts=$9,next_attempt_at=CASE WHEN $7='' THEN now() ELSE now()+LEAST(make_interval(secs => 5 * greatest($9,1)),interval '5 minutes') END,updated_at=now() WHERE id=$1`, id, status, step, baseSHA, headSHA, prURL, lastError, prNumber, attempts)
+	return err
+}
+
+func (s *Store) IntegrationJobs(c context.Context, limit int) ([]domain.IntegrationJob, error) {
+	rows, err := s.DB.Query(c, `SELECT id,repository_path,run_id,task_id,branch,default_branch,base_sha,head_sha,status,step,pr_url,pr_number,attempts,last_error,next_attempt_at,created_at,updated_at FROM repository_integration_queue WHERE status IN ('queued','running','pushed','pr_open') AND next_attempt_at<=now() ORDER BY repository_path,created_at FOR UPDATE SKIP LOCKED LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[domain.IntegrationJob])
 }
 
 // AcceptedRunCommitSHAs is the trust boundary for follow-up delivery runs.
@@ -2859,6 +2882,10 @@ func (s *Store) ReclaimableRunWorktrees(c context.Context, before time.Time, lim
 func (s *Store) MarkRunApplied(c context.Context, id, commitSHA string) (bool, error) {
 	tag, err := s.DB.Exec(c, "UPDATE agent_runs SET accepted_commit_sha=$2,applied_at=now(),summary='Änderungen übernommen' WHERE id=$1 AND applied_at IS NULL AND $2 <> ''", id, commitSHA)
 	return tag.RowsAffected() == 1, err
+}
+func (s *Store) SetRunIntegration(c context.Context, id, branch, baseSHA, headSHA, status, prURL string, prNumber int) error {
+	_, err := s.DB.Exec(c, `UPDATE agent_runs SET integration_branch=$2,integration_base_sha=$3,integration_head_sha=$4,integration_status=$5,pr_url=$6,pr_number=$7 WHERE id=$1`, id, branch, baseSHA, headSHA, status, prURL, prNumber)
+	return err
 }
 func (s *Store) MarkRunDiscarded(c context.Context, id string) error {
 	_, err := s.DB.Exec(c, "UPDATE agent_runs SET summary='Änderungen verworfen' WHERE id=$1", id)

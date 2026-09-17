@@ -219,11 +219,22 @@ type AgentRunBatch struct {
 	CreatedAt, UpdatedAt                                            time.Time
 }
 type RunDelivery struct {
-	DiffSummary, GateStatus, GateOutput                    string
-	AcceptedCommitSHA                                      string
-	InputTokens, OutputTokens, TokenUsage, DurationSeconds int
-	EstimatedCostMicrousd                                  int64
-	AppliedAt                                              *time.Time
+	DiffSummary, GateStatus, GateOutput                       string
+	AcceptedCommitSHA                                         string
+	IntegrationBranch, IntegrationBaseSHA, IntegrationHeadSHA string
+	IntegrationStatus, PRURL                                  string
+	PRNumber                                                  int
+	InputTokens, OutputTokens, TokenUsage, DurationSeconds    int
+	EstimatedCostMicrousd                                     int64
+	AppliedAt                                                 *time.Time
+}
+
+type IntegrationJob struct {
+	ID, RepositoryPath, RunID, TaskID, Branch, DefaultBranch string
+	BaseSHA, HeadSHA, Status, Step, PRURL, LastError         string
+	PRNumber, Attempts                                       int
+	NextAttemptAt                                            time.Time
+	CreatedAt, UpdatedAt                                     time.Time
 }
 type UsageReport struct {
 	Provider, Model, ServiceTier, Status, CostSource, PriceVersion string

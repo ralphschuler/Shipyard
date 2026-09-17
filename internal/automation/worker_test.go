@@ -413,6 +413,19 @@ func TestApplyRunPatchToTaskBranchKeepsSourceCleanAndRebasesRemote(t *testing.T)
 	}
 }
 
+func TestIntegrationPushArgsNeverTargetsDefaultBranch(t *testing.T) {
+	args, err := integrationPushArgs("task/example", "master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(args, " ") != "push --force-with-lease origin task/example:task/example" {
+		t.Fatalf("push args = %q", strings.Join(args, " "))
+	}
+	if _, err := integrationPushArgs("master", "master"); err == nil {
+		t.Fatal("default branch must never be a task push target")
+	}
+}
+
 func TestApplyRunPatchAcceptsTwoSequentialRunWorktrees(t *testing.T) {
 	source := t.TempDir()
 	runGit(t, source, "init", "-b", "master")
