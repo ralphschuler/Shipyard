@@ -253,3 +253,30 @@
   > p:first-child {
   color: var(--foreground);
 }
+
+/* Recent comments carry the conversation; older entries stay lighter and
+   tighter so a long task history remains scannable on small screens. */
+[data-testid="task-comment"] {
+  max-width: min(46rem, 92%);
+  border-radius: var(--radius-xl);
+  border: 1px solid var(--border);
+  padding: 0.7rem 0.9rem;
+}
+[data-testid="task-comment"][data-prominent="true"] {
+  padding: 0.9rem 1rem;
+  box-shadow: 0 1px 2px oklch(0 0 0 / 5%);
+}
+[data-testid="task-comment"][data-prominent="false"] {
+  opacity: 0.86;
+}
+[data-testid="task-comment"] details > summary {
+  max-width: 70ch;
+}
+[data-testid="task-comment"] details[open] > summary {
+  margin-bottom: 0.5rem;
+}
+@media (max-width: 640px) {
+  [data-testid="task-comment"] {
+    max-width: 100%;
+  }
+}
