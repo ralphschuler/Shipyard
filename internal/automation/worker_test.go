@@ -431,6 +431,13 @@ func TestRequestedSelfReviewRejectsUnknownOrDuplicateCategories(t *testing.T) {
 	}
 }
 
+func TestRequestedSelfReviewRejectsFailedChecklistResult(t *testing.T) {
+	raw := `{"status":"passed","checklist":[{"check":"Scope/Akzeptanz","result":"ok"},{"check":"Diff/Secrets","result":"failed"},{"check":"Tests/Fehler","result":"ok"},{"check":"Sicherheits-/Betriebsrisiken","result":"ok"},{"check":"Rückwärtskompatibilität","result":"ok"}],"tests":"go test ./...","open_risks":"none"}`
+	if _, err := requestedSelfReview([]domain.RunLog{{Message: "```taskboard-self-review\n" + raw + "\n```"}}); err == nil {
+		t.Fatal("self-review with a failed checklist result must be rejected")
+	}
+}
+
 func TestCodexSelfReviewUsesOnlyTheStructuredCompletionChannel(t *testing.T) {
 	terminal := []domain.RunLog{{Message: "```taskboard-self-review\n{\"status\":\"passed\"}\n```"}}
 	if _, err := requestedSelfReview(structuredControlLogs("codex", terminal, "")); err == nil {

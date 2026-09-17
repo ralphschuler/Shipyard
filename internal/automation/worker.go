@@ -91,6 +91,10 @@ func requestedSelfReview(logs []domain.RunLog) (taskboardSelfReview, error) {
 		if strings.TrimSpace(item.Check) == "" || strings.TrimSpace(item.Result) == "" {
 			return review, errors.New("taskboard-self-review enthält einen unvollständigen Checklistenpunkt")
 		}
+		result := strings.ToLower(strings.TrimSpace(item.Result))
+		if result == "failed" || result == "fail" || result == "fehlgeschlagen" || result == "nicht erfüllt" || result == "nicht erfuellt" {
+			return review, fmt.Errorf("taskboard-self-review enthält einen fehlgeschlagenen Checklistenpunkt %q", item.Check)
+		}
 		if _, required := requiredChecks[check]; !required {
 			return review, fmt.Errorf("taskboard-self-review enthält keine gültige Pflichtkategorie %q", item.Check)
 		}
