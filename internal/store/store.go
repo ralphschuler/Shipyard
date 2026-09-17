@@ -897,7 +897,7 @@ func (s *Store) Dashboard(c context.Context) (domain.Dashboard, error) {
 // telemetry consumers to request a reproducible historical slice.
 func (s *Store) DashboardFiltered(c context.Context, from, to *time.Time, provider, model, agent, board string) (domain.Dashboard, error) {
 	d, err := s.Dashboard(c)
-	if err != nil || (from == nil && to == nil && provider == "" && model == "" && agent == "" && board == "") {
+	if err != nil {
 		return d, err
 	}
 	// The legacy dashboard contains operational task metrics as well as
@@ -964,7 +964,10 @@ func (s *Store) DashboardFiltered(c context.Context, from, to *time.Time, provid
 	}
 	seriesFrom, seriesTo := from, to
 	if seriesFrom == nil {
-		start := time.Now().AddDate(0, 0, -29)
+		var start time.Time
+		if err = s.DB.QueryRow(c, `SELECT COALESCE(min(r.created_at), current_date) FROM agent_runs r `+where, args...).Scan(&start); err != nil {
+			return d, err
+		}
 		seriesFrom = &start
 	}
 	if seriesTo == nil {
