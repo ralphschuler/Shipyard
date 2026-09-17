@@ -50,7 +50,8 @@ export function renderMarkdown(source: string): ReactNode {
       const code: string[] = [];
       index++;
       while (index < lines.length && !/^```/.test(lines[index].trim())) code.push(lines[index++]);
-      if (index < lines.length) index++;
+      if (index >= lines.length) throw new Error("Unterminated Markdown code block");
+      index++;
       blocks.push(<pre className="max-w-full overflow-x-auto rounded-md bg-muted p-3 text-xs" key={blocks.length}><code>{code.join("\n")}</code></pre>);
       continue;
     }
