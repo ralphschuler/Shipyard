@@ -11,7 +11,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS memory_conversations_message
 -- its current_version_id pointer, never to a historical version row.
 CREATE OR REPLACE FUNCTION memory_fact_versions_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  RAISE EXCEPTION 'memory fact versions are append-only';
+	IF TG_OP = 'DELETE' AND current_setting('shipyard.memory_delete', true) = 'on' THEN
+		RETURN OLD;
+	END IF;
+	RAISE EXCEPTION 'memory fact versions are append-only';
 END $$;
 DROP TRIGGER IF EXISTS memory_fact_versions_append_only ON memory_fact_versions;
 CREATE TRIGGER memory_fact_versions_append_only BEFORE UPDATE OR DELETE ON memory_fact_versions

@@ -29,12 +29,11 @@ func (a *App) memoryScope(r *http.Request) (memory.Scope, error) {
 	var allowed bool
 	err := a.store.DB.QueryRow(r.Context(), `SELECT EXISTS(
 		SELECT 1 FROM workspace_members wm
-		JOIN projects p ON p.id=$3
-		JOIN tasks t ON t.id=$4
+		JOIN task_repository_targets target ON target.project_id=$3 AND target.task_id=$4
+		JOIN tasks t ON t.id=target.task_id
 		JOIN agents ag ON ag.id=$5 AND ag.retired_at IS NULL
 		WHERE wm.workspace_id=$1 AND wm.user_id=$2
-		  AND (EXISTS (SELECT 1 FROM task_target_projects tp WHERE tp.task_id=t.id AND tp.project_id=p.id)
-		       OR EXISTS (SELECT 1 FROM board_projects bp WHERE bp.project_id=p.id AND bp.board_id=t.board_id))
+		  AND target.task_id=t.id AND target.project_id=$3
 	)`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID).Scan(&allowed)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

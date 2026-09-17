@@ -509,6 +509,7 @@ func NewWithUpdateOrchestrator(s *store.Store, worker *automation.Worker, orches
 	app := &App{store: s, memory: memory.New(s), worker: worker, update: orchestrator, live: &liveHub{clients: map[chan string]struct{}{}}, logins: newLoginThrottle(), templates: templates}
 	go s.ListenChanges(context.Background(), app.live.publish)
 	go app.syncProjectsLoop()
+	go app.memoryRetentionLoop()
 	return app
 }
 func (a *App) Register(m *http.ServeMux) {
@@ -565,6 +566,7 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("POST /api/v1/account/tokens", a.createAccountTokenAPI)
 	m.HandleFunc("GET /dashboard/attention", a.dashboardAttention)
 	m.HandleFunc("GET /healthz", a.health)
+	m.HandleFunc("GET /metrics", a.metrics)
 	m.HandleFunc("GET /setup", a.setup)
 	m.HandleFunc("POST /setup", a.setup)
 	m.HandleFunc("GET /login", a.login)
@@ -675,6 +677,20 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("GET /runs/{id}/diff", a.runDiff)
 	m.HandleFunc("POST /runs/{id}/reject", a.rejectRun)
 	m.HandleFunc("POST /notifications/{id}/read", a.readNotification)
+}
+
+func (a *App) metrics(w http.ResponseWriter, r *http.Request) {
+	if _, ok := currentUser(r.Context()); !ok {
+		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	metrics := a.memory.RetentionMetrics()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"memory_retention_runs_total":     metrics.Runs,
+		"memory_retention_rows_total":     metrics.Rows,
+		"memory_retention_failures_total": metrics.Failures,
+	})
 }
 func (a *App) health(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
@@ -1828,6 +1844,18 @@ func (a *App) syncProjectsLoop() {
 			_ = a.syncProjectRepo(ctx, project)
 			cancel()
 		}
+	}
+}
+
+func (a *App) memoryRetentionLoop() {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		if _, err := a.memory.RetainAll(ctx, memory.RetentionPolicy{}); err != nil {
+			a.memory.RecordRetentionFailure()
+		}
+		cancel()
 	}
 }
 func (a *App) dashboard(w http.ResponseWriter, r *http.Request) {

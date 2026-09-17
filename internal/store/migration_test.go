@@ -188,3 +188,29 @@ func TestAgentMemoryMigrationEnforcesScopeHistoryAndActiveVersion(t *testing.T) 
 		}
 	}
 }
+
+func TestMemoryHardeningAllowsOnlyExplicitRetentionDeletes(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/048_memory_hardening.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"shipyard.memory_delete", "TG_OP = 'DELETE'", "memory_fact_versions_append_only"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("memory hardening migration missing %q", required)
+		}
+	}
+}
+
+func TestMemoryRetentionMigrationAddsScopedAgeIndexes(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/049_memory_retention_indexes.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"memory_conversations_retention_scope", "memory_facts_retention_updated", "updated_at"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("memory retention migration missing %q", required)
+		}
+	}
+}

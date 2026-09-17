@@ -17,9 +17,16 @@ import (
 // Store is deliberately a narrow service façade. Callers cannot supply a
 // partial WHERE clause; every query starts with the complete validated scope.
 type Store struct {
-	db            *store.Store
-	retentionRuns atomic.Int64
-	retentionRows atomic.Int64
+	db                *store.Store
+	retentionRuns     atomic.Int64
+	retentionRows     atomic.Int64
+	retentionFailures atomic.Int64
+}
+
+type RetentionMetrics struct {
+	Runs     int64 `json:"runs"`
+	Rows     int64 `json:"rows"`
+	Failures int64 `json:"failures"`
 }
 
 func New(s *store.Store) *Store { return &Store{db: s} }
@@ -270,6 +277,9 @@ func (s *Store) RetainWithPolicyStats(ctx context.Context, scope Scope, policy R
 		return RetentionResult{}, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT set_config('shipyard.memory_delete','on',true)`); err != nil {
+		return RetentionResult{}, err
+	}
 	r, err := tx.Exec(ctx, `DELETE FROM memory_conversations WHERE tenant_id=$1 AND user_id=$2 AND project_id=$3 AND task_id=$4 AND agent_id=$5 AND (expires_at<now() OR occurred_at<$6)`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, time.Now().Add(-policy.ConversationAge))
 	if err != nil {
 		return RetentionResult{}, err
@@ -289,6 +299,47 @@ func (s *Store) RetainWithPolicyStats(ctx context.Context, scope Scope, policy R
 	s.retentionRows.Add(result.TotalRows())
 	return result, nil
 }
+
+// RetainAll applies the configured policy to every scope represented in the
+// memory tables. The scope list is read before deletion, so each operation is
+// still audited with its owning user and all deletes remain scope predicates.
+func (s *Store) RetainAll(ctx context.Context, policy RetentionPolicy) (RetentionResult, error) {
+	rows, err := s.db.DB.Query(ctx, `SELECT tenant_id,user_id,project_id,task_id,agent_id FROM memory_conversations UNION SELECT tenant_id,user_id,project_id,task_id,agent_id FROM memory_facts`)
+	if err != nil {
+		return RetentionResult{}, err
+	}
+	var scopes []Scope
+	for rows.Next() {
+		var scope Scope
+		if err = rows.Scan(&scope.TenantID, &scope.UserID, &scope.ProjectID, &scope.TaskID, &scope.AgentID); err != nil {
+			rows.Close()
+			return RetentionResult{}, err
+		}
+		scopes = append(scopes, scope)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return RetentionResult{}, err
+	}
+	rows.Close()
+	var total RetentionResult
+	for _, scope := range scopes {
+		result, retainErr := s.RetainWithPolicyStats(ctx, scope, policy)
+		if retainErr != nil {
+			return total, retainErr
+		}
+		total.ConversationRows += result.ConversationRows
+		total.FactRows += result.FactRows
+		total.Runs += result.Runs
+	}
+	return total, nil
+}
+
+func (s *Store) RetentionMetrics() RetentionMetrics {
+	return RetentionMetrics{Runs: s.retentionRuns.Load(), Rows: s.retentionRows.Load(), Failures: s.retentionFailures.Load()}
+}
+
+func (s *Store) RecordRetentionFailure() { s.retentionFailures.Add(1) }
 
 // RetrieveContextPack applies scope predicates in SQL and enforces the hard
 // budget after deterministic ordering. Pending high-impact facts never enter.
@@ -361,6 +412,9 @@ func (s *Store) DeleteMemoryStats(ctx context.Context, scope Scope) (RetentionRe
 		return RetentionResult{}, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT set_config('shipyard.memory_delete','on',true)`); err != nil {
+		return RetentionResult{}, err
+	}
 	var n int64
 	if err = tx.QueryRow(ctx, `WITH deleted AS (DELETE FROM memory_conversations WHERE tenant_id=$1 AND user_id=$2 AND project_id=$3 AND task_id=$4 AND agent_id=$5 RETURNING 1) SELECT count(*) FROM deleted`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID).Scan(&n); err != nil {
 		return RetentionResult{}, err
