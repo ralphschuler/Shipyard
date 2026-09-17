@@ -841,7 +841,7 @@ func (s *Store) Dashboard(c context.Context) (domain.Dashboard, error) {
 	if err != nil {
 		return d, err
 	}
-	if err = s.DB.QueryRow(c, `SELECT count(*) FILTER (WHERE status='queued'),count(*) FILTER (WHERE status='running'),count(*) FILTER (WHERE status='succeeded'),count(*) FILTER (WHERE status='failed') FROM agent_runs`).Scan(&d.Runs.Queued, &d.Runs.Running, &d.Runs.Succeeded, &d.Runs.Failed); err != nil {
+	if err = s.DB.QueryRow(c, `SELECT count(*) FILTER (WHERE status='queued'),count(*) FILTER (WHERE status='queued' AND (EXISTS (SELECT 1 FROM agent_runs prior WHERE prior.workspace_snapshot=agent_runs.workspace_snapshot AND prior.status='queued' AND (prior.created_at<agent_runs.created_at OR (prior.created_at=agent_runs.created_at AND prior.id<agent_runs.id))) OR (SELECT count(*) FROM agent_runs active WHERE active.workspace_snapshot=agent_runs.workspace_snapshot AND active.status='running') >= (SELECT max_parallel_runs FROM agents WHERE id=agent_runs.agent_id))),count(*) FILTER (WHERE status='running'),count(*) FILTER (WHERE status='succeeded'),count(*) FILTER (WHERE status='failed') FROM agent_runs`).Scan(&d.Runs.Queued, &d.Runs.ResourceWaiting, &d.Runs.Running, &d.Runs.Succeeded, &d.Runs.Failed); err != nil {
 		return d, err
 	}
 	if err = s.DB.QueryRow(c, `SELECT COALESCE(sum(estimated_cost_microusd),0) FROM agent_runs`).Scan(&d.EstimatedCostMicrousd); err != nil {
@@ -2374,6 +2374,12 @@ func createRunTx(c context.Context, tx pgx.Tx, task string, a domain.Agent, agen
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.AgentRun{}, false, nil
 	}
+	if err == nil {
+		metadata, _ := json.Marshal(map[string]string{"workspace": workspace, "source": map[bool]string{true: "automation", false: "manual"}[event != ""]})
+		if _, auditErr := tx.Exec(c, `INSERT INTO audit_events(kind,resource_type,resource_id,metadata) VALUES('agent_run.queued','agent_run',$1,$2)`, run.ID, metadata); auditErr != nil {
+			return domain.AgentRun{}, false, auditErr
+		}
+	}
 	return run, err == nil, err
 }
 func (s *Store) RefreshRunBatch(c context.Context, id string) (domain.AgentRunBatch, error) {
@@ -2424,11 +2430,16 @@ func (s *Store) Run(c context.Context, id string) (domain.AgentRun, error) {
 // retry point; no in-memory queue is required to recover after a restart.
 func (s *Store) RunQueueStatus(c context.Context, id string) (domain.RunQueueStatus, error) {
 	var status domain.RunQueueStatus
+	if err := s.RefreshQueueState(c); err != nil {
+		return status, err
+	}
 	err := s.DB.QueryRow(c, `SELECT
 		CASE WHEN r.status='queued' THEN 1+(SELECT count(*) FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id))) ELSE 0 END,
 		CASE WHEN r.status<>'queued' THEN '' WHEN EXISTS(SELECT 1 FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id))) THEN 'Wartet auf vorherige Runs im Workspace' WHEN (SELECT count(*) FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running') >= a.max_parallel_runs THEN 'Workspace ist ausgelastet' ELSE '' END,
-		COALESCE((SELECT active.id::text FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running' ORDER BY active.started_at,active.created_at,active.id LIMIT 1),''), now()+interval '3 seconds'
-		FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE r.id=$1`, id).Scan(&status.Position, &status.WaitingReason, &status.BlockingRunID, &status.NextAttemptAt)
+		COALESCE((SELECT active.id::text FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running' ORDER BY active.started_at,active.created_at,active.id LIMIT 1),''),
+		COALESCE((SELECT activeAgent.name FROM agents activeAgent JOIN agent_runs active ON active.agent_id=activeAgent.id WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running' ORDER BY active.started_at,active.created_at,active.id LIMIT 1),''),
+		r.workspace_snapshot, COALESCE(r.queue_wait_started_at,r.created_at), r.queue_next_attempt_at
+		FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE r.id=$1`, id).Scan(&status.Position, &status.WaitingReason, &status.BlockingRunID, &status.BlockingAgent, &status.Workspace, &status.WaitingSince, &status.NextAttemptAt)
 	return status, err
 }
 func (s *Store) RunDelivery(c context.Context, id string) (domain.RunDelivery, error) {
@@ -2602,6 +2613,11 @@ func (s *Store) RunTrace(c context.Context, id string) (domain.RunTrace, error) 
 		return trace, err
 	}
 	trace.Items = append(trace.Items, domain.RunTraceItem{At: created, Kind: "Run eingeplant", Detail: "Agent-Run wurde in die Warteschlange gelegt."})
+	var waitStarted *time.Time
+	var waitReason string
+	if queueErr := s.DB.QueryRow(c, "SELECT queue_wait_started_at,queue_wait_reason FROM agent_runs WHERE id=$1", id).Scan(&waitStarted, &waitReason); queueErr == nil && waitStarted != nil && waitReason != "" {
+		trace.Items = append(trace.Items, domain.RunTraceItem{At: *waitStarted, Kind: "Warten auf Workspace", Detail: waitReason})
+	}
 	if trace.EventID != "" {
 		var eventType string
 		var occurred time.Time
@@ -2633,12 +2649,26 @@ func (s *Store) RunTrace(c context.Context, id string) (domain.RunTrace, error) 
 	return trace, nil
 }
 func (s *Store) QueuedRuns(c context.Context) ([]domain.AgentRun, error) {
+	if err := s.RefreshQueueState(c); err != nil {
+		return nil, err
+	}
 	rows, err := s.DB.Query(c, "SELECT id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at FROM agent_runs WHERE status='queued' ORDER BY created_at LIMIT 20")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[domain.AgentRun])
+}
+
+// RefreshQueueState persists the current resource explanation and a bounded
+// retry point. It is safe to call from every worker cycle and after restart.
+func (s *Store) RefreshQueueState(c context.Context) error {
+	_, err := s.DB.Exec(c, `UPDATE agent_runs r SET
+		queue_wait_started_at=COALESCE(r.queue_wait_started_at,r.created_at),
+		queue_wait_reason=CASE WHEN EXISTS (SELECT 1 FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id))) THEN 'Wartet auf vorherige Runs im Workspace' WHEN (SELECT count(*) FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running') >= (SELECT max_parallel_runs FROM agents WHERE id=r.agent_id) THEN 'Workspace ist ausgelastet' ELSE '' END,
+		queue_next_attempt_at=CASE WHEN EXISTS (SELECT 1 FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id))) OR (SELECT count(*) FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running') >= (SELECT max_parallel_runs FROM agents WHERE id=r.agent_id) THEN GREATEST(r.queue_next_attempt_at,now()+interval '3 seconds') ELSE LEAST(r.queue_next_attempt_at,now()) END
+		WHERE r.status='queued'`)
+	return err
 }
 
 // RecoverInterruptedRuns releases workspaces after a service restart. A running
@@ -2657,15 +2687,31 @@ func (s *Store) RecoverInterruptedRuns(c context.Context) ([]domain.AgentRun, er
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[domain.AgentRun])
 }
 func (s *Store) ClaimRun(c context.Context, id string) (bool, error) {
-	tag, err := s.DB.Exec(c, `UPDATE agent_runs r SET status='running',started_at=now()
+	tag, err := s.DB.Exec(c, `UPDATE agent_runs r SET status='running',started_at=now(),queue_wait_reason=''
 		WHERE r.id=$1 AND r.status='queued'
+		AND r.queue_next_attempt_at <= now()
 		AND NOT EXISTS (SELECT 1 FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id)))
 		AND (SELECT count(*) FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running') < (SELECT max_parallel_runs FROM agents WHERE id=r.agent_id)`, id)
 	return tag.RowsAffected() == 1, err
 }
 func (s *Store) CancelRun(c context.Context, id string) (bool, error) {
-	tag, err := s.DB.Exec(c, "UPDATE agent_runs SET status='cancelled',finished_at=now(),summary='Run durch Nutzer abgebrochen' WHERE id=$1 AND status IN('queued','running')", id)
+	tag, err := s.DB.Exec(c, "UPDATE agent_runs SET status='cancelled',finished_at=now(),summary='Run durch Nutzer abgebrochen',queue_wait_reason='' WHERE id=$1 AND status IN('queued','running')", id)
+	if err == nil && tag.RowsAffected() == 1 {
+		_ = s.RecordAudit(c, "", "agent_run.cancelled", "agent_run", id, map[string]string{"reason": "user requested"})
+	}
 	return tag.RowsAffected() == 1, err
+}
+
+// WakeWorkspace makes queued runs immediately eligible after a terminal run
+// releases a repository. ClaimRun remains the single atomic start gate.
+func (s *Store) WakeWorkspace(c context.Context, runID string) error {
+	_, err := s.DB.Exec(c, `WITH released AS (SELECT workspace_snapshot FROM agent_runs WHERE id=$1)
+		UPDATE agent_runs r SET queue_next_attempt_at=now(),queue_wait_reason=''
+		FROM released WHERE r.status='queued' AND r.workspace_snapshot=released.workspace_snapshot`, runID)
+	if err == nil {
+		_ = s.RecordAudit(c, "", "agent_run.queue_wakeup", "agent_run", runID, map[string]string{"reason": "workspace released"})
+	}
+	return err
 }
 func (s *Store) CreateNotification(c context.Context, task, run, kind, message string) error {
 	_, err := s.DB.Exec(c, "INSERT INTO notifications(task_id,agent_run_id,kind,message) VALUES(NULLIF($1,'')::uuid,NULLIF($2,'')::uuid,$3,$4)", task, run, kind, message)

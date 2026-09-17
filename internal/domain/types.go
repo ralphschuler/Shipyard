@@ -120,7 +120,7 @@ type TokenBreakdown struct {
 type DashboardAttention struct {
 	BlockedTasks, FailedRuns7d, OpenInteractions, DueNext24h int
 }
-type RunMetrics struct{ Queued, Running, Succeeded, Failed int }
+type RunMetrics struct{ Queued, ResourceWaiting, Running, Succeeded, Failed int }
 type CostMetric struct {
 	Name           string
 	AmountMicrousd int64
@@ -180,6 +180,9 @@ type RunQueueStatus struct {
 	Position      int
 	WaitingReason string
 	BlockingRunID string
+	BlockingAgent string
+	Workspace     string
+	WaitingSince  time.Time
 	NextAttemptAt time.Time
 }
 

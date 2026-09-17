@@ -1463,6 +1463,9 @@ func (w *Worker) Cancel(ctx context.Context, runID string) error {
 	if !cancelled {
 		return errors.New("dieser Run wurde bereits beendet")
 	}
+	if err := w.Store.WakeWorkspace(ctx, run.ID); err != nil {
+		log.Printf("run cancel: workspace wake-up for %s failed: %v", run.ID, err)
+	}
 	if value, ok := w.cancels.Load(runID); ok {
 		value.(context.CancelFunc)()
 	}
@@ -2277,6 +2280,12 @@ func (w *Worker) persistIncompleteUsage(ctx context.Context, run domain.AgentRun
 	})
 }
 func (w *Worker) finish(ctx context.Context, run domain.AgentRun, status string) error {
+	// Make queued targets eligible before handling auxiliary notifications. This
+	// is durable and idempotent, so a crash or a concurrent worker cannot lose
+	// the wake-up or start a run twice.
+	if err := w.Store.WakeWorkspace(ctx, run.ID); err != nil {
+		log.Printf("run finish: workspace wake-up for %s failed: %v", run.ID, err)
+	}
 	// Cancellation wins over every concurrently completing worker branch. The
 	// database update in CancelRun is conditional, so observing cancellation
 	// here makes this terminal handler a no-op rather than emitting a false

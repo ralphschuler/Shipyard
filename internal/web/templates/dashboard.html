@@ -50,7 +50,8 @@
         <article class="priority-panel run-status-panel">
           <header><div><p class="section-kicker">Agents</p><h2>Run-Status</h2><p class="panel-summary">Ausführungen im gesamten System</p></div></header>
           <div class="priority-chart">
-            <div><span>Wartend</span><strong>{{.Dashboard.Runs.Queued}}</strong></div>
+            <div><span>In Queue</span><strong>{{.Dashboard.Runs.Queued}}</strong></div>
+            <div><span>Wartet auf Workspace</span><strong>{{.Dashboard.Runs.ResourceWaiting}}</strong></div>
             <div><span>Läuft</span><strong>{{.Dashboard.Runs.Running}}</strong></div>
             <div><span>Erfolgreich</span><strong>{{.Dashboard.Runs.Succeeded}}</strong></div>
             <div{{if gt .Dashboard.Runs.Failed 0}} class="run-status-failed"{{end}}><span>Fehlgeschlagen</span><strong>{{.Dashboard.Runs.Failed}}</strong></div>

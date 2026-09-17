@@ -18,6 +18,19 @@ func TestActiveBatchMigrationsProtectManualAndAutomationRuns(t *testing.T) {
 	}
 }
 
+func TestPersistentRunQueueMigrationStoresWakeAndWaitState(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/047_persistent_run_queue.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"queue_wait_started_at", "queue_wait_reason", "queue_next_attempt_at", "agent_runs_queue_ready", "WHERE status = 'queued'"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("persistent queue migration is missing %q", required)
+		}
+	}
+}
+
 func TestAgentTransitionSourceMigrationAdmitsWorkerSources(t *testing.T) {
 	body, err := migrationFiles.ReadFile("migrations/034_agent_transition_sources.sql")
 	if err != nil {
