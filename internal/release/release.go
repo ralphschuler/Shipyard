@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -19,15 +20,23 @@ var shaPattern = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 var branchPattern = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
 
 type Request struct {
-	TaskID, ProjectID, RepositoryURL, SourcePath, SourceBranch, TargetBranch string
-	CommitSHA, DiffSummary, Tests, ReviewNotes                               string
-	SecretValues                                                             []string
-	DoneApproved                                                             bool
+	TaskID, ProjectID, RunID, DiffRef, RepositoryURL, SourcePath, ManagedProjectPath, SourceBranch, TargetBranch string
+	CommitSHA, DiffSummary, Tests, ReviewNotes                                                                   string
+	SecretValues                                                                                                 []string
+	DoneApproved                                                                                                 bool
+	PublicationLocker                                                                                            PublicationLocker
+}
+
+// PublicationLocker is backed by a durable store in production. Holding the
+// returned function keeps the cross-process lock until the PR operation is
+// complete; callers must not substitute a process-local mutex.
+type PublicationLocker interface {
+	AcquirePublication(context.Context, string) (func(), error)
 }
 
 type PushInput struct {
-	RepositoryPath, RepositoryURL, Remote, Branch, CommitSHA string
-	Force                                                    bool
+	RepositoryPath, ManagedProjectPath, RepositoryURL, Remote, Branch, CommitSHA string
+	Force                                                                        bool
 }
 type Pusher interface {
 	Push(context.Context, PushInput) error
@@ -80,13 +89,16 @@ func (r Request) validate() error {
 	if !r.DoneApproved {
 		return errors.New("release requires an explicit Done approval")
 	}
-	for name, value := range map[string]string{"task": r.TaskID, "project": r.ProjectID, "source branch": r.SourceBranch, "target branch": r.TargetBranch, "commit": r.CommitSHA} {
+	for name, value := range map[string]string{"task": r.TaskID, "project": r.ProjectID, "run": r.RunID, "diff": r.DiffRef, "source branch": r.SourceBranch, "target branch": r.TargetBranch, "commit": r.CommitSHA} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("missing %s identity", name)
 		}
 	}
 	if strings.TrimSpace(r.SourcePath) == "" {
 		return errors.New("missing source repository path")
+	}
+	if filepath.Clean(r.SourcePath) != filepath.Clean(r.ManagedProjectPath) || !filepath.IsAbs(r.SourcePath) {
+		return errors.New("source repository path is not the assigned managed checkout")
 	}
 	if !shaPattern.MatchString(r.CommitSHA) {
 		return errors.New("accepted commit must be a full SHA-1")
@@ -104,7 +116,7 @@ func Publish(ctx context.Context, request Request, pusher Pusher, github GitHub)
 	if err := request.validate(); err != nil {
 		return Result{}, safeError("release validation failed", err, request.SecretValues)
 	}
-	if pusher == nil || github == nil {
+	if pusher == nil || github == nil || request.PublicationLocker == nil {
 		return Result{}, safeError("release adapters are not configured", nil, request.SecretValues)
 	}
 	owner, repo, err := githubRepository(request.RepositoryURL)
@@ -121,6 +133,11 @@ func Publish(ctx context.Context, request Request, pusher Pusher, github GitHub)
 	// Unlock would let a third retry create a new mutex while a second retry
 	// is still queued on the old one.
 	defer lock.Unlock()
+	durableUnlock, err := request.PublicationLocker.AcquirePublication(ctx, lockKey)
+	if err != nil {
+		return Result{}, safeError("publication lock acquisition failed", err, request.SecretValues)
+	}
+	defer durableUnlock()
 
 	body := prBody(request, marker)
 	in := PullRequestInput{Repository: owner + "/" + repo, Title: "Shipyard: " + request.TaskID, Head: request.SourceBranch, Base: request.TargetBranch, Body: body}
@@ -133,7 +150,7 @@ func Publish(ctx context.Context, request Request, pusher Pusher, github GitHub)
 			return Result{}, safeError("matching PR validation failed", err, request.SecretValues)
 		}
 	}
-	push := PushInput{RepositoryPath: request.SourcePath, RepositoryURL: request.RepositoryURL, Remote: "origin", Branch: request.SourceBranch, CommitSHA: request.CommitSHA}
+	push := PushInput{RepositoryPath: request.SourcePath, ManagedProjectPath: request.ManagedProjectPath, RepositoryURL: request.RepositoryURL, Remote: "origin", Branch: request.SourceBranch, CommitSHA: request.CommitSHA}
 	if err := pusher.Push(ctx, push); err != nil {
 		return Result{}, safeError("accepted branch push failed", err, request.SecretValues)
 	}
@@ -208,7 +225,7 @@ func githubRepository(raw string) (string, string, error) {
 }
 
 func prBody(r Request, marker string) string {
-	return strings.Join([]string{marker, "## Shipyard task", r.TaskID, "", "- Project: `" + r.ProjectID + "`", "- Source branch: `" + r.SourceBranch + "`", "- Target branch: `" + r.TargetBranch + "`", "- Accepted commit: `" + r.CommitSHA + "`", "", "## Change summary", redact(r.DiffSummary, r.SecretValues), "", "## Tests", redact(r.Tests, r.SecretValues), "", "## Review notes", redact(r.ReviewNotes, r.SecretValues)}, "\n")
+	return strings.Join([]string{marker, "## Shipyard task", r.TaskID, "", "- Project: `" + r.ProjectID + "`", "- Accepted run: `" + r.RunID + "`", "- Diff reference: `" + r.DiffRef + "`", "- Source branch: `" + r.SourceBranch + "`", "- Target branch: `" + r.TargetBranch + "`", "- Accepted commit: `" + r.CommitSHA + "`", "", "## Change summary", redact(r.DiffSummary, r.SecretValues), "", "## Tests", redact(r.Tests, r.SecretValues), "", "## Review notes", redact(r.ReviewNotes, r.SecretValues)}, "\n")
 }
 
 type GitPusher struct{}
@@ -219,6 +236,9 @@ func (GitPusher) Push(ctx context.Context, in PushInput) error {
 	}
 	if in.Remote == "" {
 		return errors.New("push remote is required")
+	}
+	if filepath.Clean(in.RepositoryPath) != filepath.Clean(in.ManagedProjectPath) || !filepath.IsAbs(in.RepositoryPath) {
+		return errors.New("push checkout is not the assigned managed checkout")
 	}
 	if !shaPattern.MatchString(in.CommitSHA) {
 		return errors.New("accepted commit must be a full SHA-1")
@@ -304,12 +324,17 @@ func (c Client) endpoint(path string) (string, error) {
 	return base + path, nil
 }
 func (c Client) request(ctx context.Context, method, path string, body any, out any) error {
+	_, err := c.requestHeaders(ctx, method, path, body, out)
+	return err
+}
+
+func (c Client) requestHeaders(ctx context.Context, method, path string, body any, out any) (http.Header, error) {
 	if c.Token == "" {
-		return errors.New("GitHub token is not configured")
+		return nil, errors.New("GitHub token is not configured")
 	}
 	endpoint, err := c.endpoint(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var reader *strings.Reader
 	if body == nil {
@@ -317,13 +342,13 @@ func (c Client) request(ctx context.Context, method, path string, body any, out 
 	} else {
 		data, marshalErr := json.Marshal(body)
 		if marshalErr != nil {
-			return marshalErr
+			return nil, marshalErr
 		}
 		reader = strings.NewReader(string(data))
 	}
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
-		return errors.New("GitHub request could not be created")
+		return nil, errors.New("GitHub request could not be created")
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("Authorization", "Bearer "+c.Token)
@@ -333,33 +358,52 @@ func (c Client) request(ctx context.Context, method, path string, body any, out 
 	}
 	resp, err := c.client().Do(req)
 	if err != nil {
-		return errors.New("GitHub request failed")
+		return nil, errors.New("GitHub request failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("GitHub returned HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("GitHub returned HTTP %d", resp.StatusCode)
 	}
 	if out != nil && json.NewDecoder(resp.Body).Decode(out) != nil {
-		return errors.New("GitHub returned invalid JSON")
+		return nil, errors.New("GitHub returned invalid JSON")
 	}
-	return nil
+	return resp.Header, nil
 }
 func (c Client) FindPR(ctx context.Context, owner, repo, head, base, marker string) (*PullRequest, error) {
-	var prs []githubPR
 	path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/pulls?state=open&head=" + url.QueryEscape(owner+":"+head) + "&base=" + url.QueryEscape(base)
-	if err := c.request(ctx, http.MethodGet, path, nil, &prs); err != nil {
-		return nil, err
-	}
-	var found *PullRequest
-	for _, pr := range prs {
-		if strings.Contains(pr.Body, marker) {
-			if found != nil {
-				return nil, errors.New("multiple matching open PRs found")
-			}
-			found = &PullRequest{Number: pr.Number, URL: pr.HTMLURL, Head: pr.Head.Ref, Base: pr.Base.Ref, Body: pr.Body}
+	path += "&per_page=100"
+	var previous *PullRequest
+	for path != "" {
+		var prs []githubPR
+		header, err := c.requestHeaders(ctx, http.MethodGet, path, nil, &prs)
+		if err != nil {
+			return nil, err
 		}
+		for _, pr := range prs {
+			if strings.Contains(pr.Body, marker) {
+				if previous != nil {
+					return nil, errors.New("multiple matching open PRs found")
+				}
+				previous = &PullRequest{Number: pr.Number, URL: pr.HTMLURL, Head: pr.Head.Ref, Base: pr.Base.Ref, Body: pr.Body}
+			}
+		}
+		path = nextLink(header.Get("Link"))
 	}
-	return found, nil
+	return previous, nil
+}
+
+var nextLinkPattern = regexp.MustCompile(`<([^>]+)>;\s*rel="next"`)
+
+func nextLink(link string) string {
+	match := nextLinkPattern.FindStringSubmatch(link)
+	if len(match) != 2 {
+		return ""
+	}
+	u, err := url.Parse(match[1])
+	if err != nil || u.Scheme != "https" || u.Host != "api.github.com" || u.User != nil || u.Fragment != "" {
+		return ""
+	}
+	return u.RequestURI()
 }
 func (c Client) CreatePR(ctx context.Context, in PullRequestInput) (PullRequest, error) {
 	var pr githubPR

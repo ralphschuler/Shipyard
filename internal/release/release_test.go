@@ -3,9 +3,12 @@ package release
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -17,6 +20,13 @@ type fakeGitHub struct {
 	findErr error
 	order   *[]string
 	mu      sync.Mutex
+}
+
+type fakePublicationLocker struct{ acquired int }
+
+func (f *fakePublicationLocker) AcquirePublication(context.Context, string) (func(), error) {
+	f.acquired++
+	return func() {}, nil
 }
 
 func (f *fakeGitHub) FindPR(context.Context, string, string, string, string, string) (*PullRequest, error) {
@@ -60,8 +70,9 @@ func (f *fakePusher) Push(_ context.Context, in PushInput) error {
 func validRequest() Request {
 	return Request{
 		TaskID: "541eed12-d2f4-42b6-ba8f-17d363b09d22", ProjectID: "0c8bedae-53b6-4517-895a-3e16816fdb69",
-		RepositoryURL: "https://github.com/acme/app.git", SourcePath: "/managed/acme-app", SourceBranch: "task/541eed12-d2f4-42b6-ba8f-17d363b09d22", TargetBranch: "master",
+		RunID: "run-541eed12", DiffRef: "run-541eed12:diff", RepositoryURL: "https://github.com/acme/app.git", SourcePath: "/managed/acme-app", ManagedProjectPath: "/managed/acme-app", SourceBranch: "task/541eed12-d2f4-42b6-ba8f-17d363b09d22", TargetBranch: "master",
 		CommitSHA: "0123456789012345678901234567890123456789", DiffSummary: "change", Tests: "go test ./...", DoneApproved: true,
+		PublicationLocker: &fakePublicationLocker{},
 	}
 }
 
@@ -110,6 +121,9 @@ func TestPublishBlocksMissingApprovalOrIdentity(t *testing.T) {
 		"repository": func(r *Request) { r.RepositoryURL = "" },
 		"commit":     func(r *Request) { r.CommitSHA = "" },
 		"target":     func(r *Request) { r.TargetBranch = "" },
+		"run":        func(r *Request) { r.RunID = "" },
+		"diff":       func(r *Request) { r.DiffRef = "" },
+		"checkout":   func(r *Request) { r.SourcePath = "/managed/other" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := validRequest()
@@ -120,6 +134,49 @@ func TestPublishBlocksMissingApprovalOrIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestPublishRequiresDurablePublicationLock(t *testing.T) {
+	r := validRequest()
+	r.PublicationLocker = nil
+	if _, err := Publish(context.Background(), r, &fakePusher{}, &fakeGitHub{}); err == nil || !strings.Contains(err.Error(), "adapters") {
+		t.Fatalf("expected fail-closed lock configuration error, got %v", err)
+	}
+}
+
+func TestGitHubFindPRFollowsPagination(t *testing.T) {
+	request := validRequest()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(r.URL.RawQuery, "page=2") {
+			_, _ = w.Write([]byte(`[{"number":7,"html_url":"https://github.com/acme/app/pull/7","body":"<!-- shipyard-release-task:541eed12-d2f4-42b6-ba8f-17d363b09d22 -->","head":{"ref":"task/541eed12-d2f4-42b6-ba8f-17d363b09d22"},"base":{"ref":"master"}}]`))
+			return
+		}
+		w.Header().Set("Link", `<https://api.github.com/repos/acme/app/pulls?state=open&head=acme%3Atask%2F541eed12-d2f4-42b6-ba8f-17d363b09d22&base=master&page=2>; rel="next"`)
+		_, _ = w.Write([]byte(`[]`))
+	})
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("IPv4 listener unavailable: %v", err)
+	}
+	server := &http.Server{Handler: handler}
+	go server.Serve(listener)
+	defer server.Close()
+	serverURL := "http://" + listener.Addr().String()
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		r.URL.Scheme = "http"
+		r.URL.Host = strings.TrimPrefix(serverURL, "http://")
+		return http.DefaultTransport.RoundTrip(r)
+	})
+	client := Client{BaseURL: "https://api.github.com", Token: "test-token", HTTP: &http.Client{Transport: transport}}
+	pr, err := client.FindPR(context.Background(), "acme", "app", request.SourceBranch, request.TargetBranch, "<!-- shipyard-release-task:"+request.TaskID+" -->")
+	if err != nil || pr == nil || pr.Number != 7 {
+		t.Fatalf("FindPR() = %#v, %v", pr, err)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestPublishLooksUpBeforePushAndDoesNotPushWhenLookupFails(t *testing.T) {
 	r := validRequest()

@@ -3558,3 +3558,24 @@ func (s *Store) AddRunLog(c context.Context, id, level, message string) error {
 	WHERE l.agent_run_id=$1::uuid`, id, level, message)
 	return e
 }
+
+// AcquirePublication holds a PostgreSQL transaction-scoped advisory lock for
+// one deterministic release identity. It is intentionally exposed as a
+// structural adapter for internal/release, so separate worker processes share
+// the same idempotency boundary. The returned function rolls back the small
+// lock-only transaction and therefore releases the lock without committing any
+// application data.
+func (s *Store) AcquirePublication(c context.Context, key string) (func(), error) {
+	if strings.TrimSpace(key) == "" {
+		return nil, errors.New("publication lock key is required")
+	}
+	tx, err := s.DB.Begin(c)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = tx.Exec(c, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", key); err != nil {
+		_ = tx.Rollback(c)
+		return nil, err
+	}
+	return func() { _ = tx.Rollback(context.Background()) }, nil
+}

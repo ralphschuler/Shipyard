@@ -3,12 +3,19 @@
 `internal/release` is the constrained publication boundary for an explicitly
 approved Done task. The caller constructs a `release.Request` from the
 accepted run and repository target. The request fails closed unless approval,
-project/task identity, repository, source/target branches, managed checkout,
-and a full accepted commit SHA are present.
+project/task/run identity, a deterministic diff reference, repository,
+source/target branches, the assigned managed checkout, and a full accepted
+commit SHA are present.
 
 `Publish` first finds an open PR by exact source/target branches and the stable
 marker `<!-- shipyard-release-task:<task-id> -->`, before any branch write. It
-serializes matching publications per repository/branch/task in the process,
+requires a durable `PublicationLocker`; the Store implementation holds a
+PostgreSQL transaction-scoped advisory lock for the repository/branch/task
+identity, so retries from separate worker processes cannot both create a PR.
+The lock is held through lookup, push, and create/update. A process-local
+mutex remains only as a latency optimization.
+
+It serializes matching publications per repository/branch/task in the process,
 pushes the accepted commit with a normal `git push` (never force), and updates
 the matching PR or creates one when none exists. If GitHub reports a create
 race, it re-reads and updates the matching PR; multiple matching PRs fail
@@ -20,8 +27,9 @@ An existing PR is validated against the assigned repository and exact
 source/target branches before any push. `GitPusher` also verifies that the
 managed checkout's push remote resolves to the assigned GitHub repository.
 
-`GitPusher` accepts only the exact `HEAD` commit of the managed checkout, so a
-caller cannot substitute an unrelated SHA. `release.Client` receives a token
+`GitPusher` accepts only the exact `HEAD` commit of the assigned managed
+checkout, so a caller cannot substitute an unrelated SHA or another checkout
+of the same remote. `release.Client` receives a token
 from a server-side secret assignment. It does not read service environment
 variables, only accepts the canonical `https://api.github.com` API endpoint,
 and does not include the token or HTTP response body in errors. Known secret
