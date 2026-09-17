@@ -103,3 +103,16 @@ func TestAutomationFingerprintMigrationHasAtomicDurableClaim(t *testing.T) {
 		}
 	}
 }
+
+func TestAutomationPayloadRepairMigrationRecreatesCanonicalFunction(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/044_repair_automation_payload_function.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"CREATE OR REPLACE FUNCTION canonical_automation_payload", "jsonb_object_agg", "jsonb_array_elements", "transport_id"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("repair migration is missing %q", required)
+		}
+	}
+}

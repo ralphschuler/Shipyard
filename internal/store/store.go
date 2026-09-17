@@ -279,7 +279,7 @@ func (s *Store) UsagePrices(ctx context.Context) ([]domain.UsagePrice, error) {
 }
 
 func (s *Store) SaveUsagePrice(ctx context.Context, p domain.UsagePrice) error {
-	_, err := s.DB.Exec(ctx, `INSERT INTO usage_price_catalog(provider,model,service_tier,valid_from,valid_until,input_microusd_per_million,output_microusd_per_million,cached_input_microusd_per_million,cache_write_microusd_per_million,reasoning_microusd_per_million,version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, p.Provider, p.Model, p.ServiceTier, p.ValidFrom, p.ValidUntil, p.Input, p.Output, p.CachedInput, p.CacheWrite, p.Reasoning, p.Version)
+	_, err := s.DB.Exec(ctx, `INSERT INTO usage_price_catalog(provider,model,service_tier,valid_from,valid_until,input_microusd_per_million,output_microusd_per_million,cached_input_microusd_per_million,cache_write_microusd_per_million,reasoning_microusd_per_million,version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, p.Provider, p.Model, p.ServiceTier, p.ValidFrom, p.ValidUntil, p.Input, p.Output, p.CachedInput, p.CacheWrite, p.Reasoning, p.Version)
 	return err
 }
 
@@ -291,7 +291,7 @@ func (s *Store) SaveUsagePriceWithAudit(ctx context.Context, p domain.UsagePrice
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `INSERT INTO usage_price_catalog(provider,model,service_tier,valid_from,valid_until,input_microusd_per_million,output_microusd_per_million,cached_input_microusd_per_million,cache_write_microusd_per_million,reasoning_microusd_per_million,version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, p.Provider, p.Model, p.ServiceTier, p.ValidFrom, p.ValidUntil, p.Input, p.Output, p.CachedInput, p.CacheWrite, p.Reasoning, p.Version); err != nil {
+	if _, err = tx.Exec(ctx, `INSERT INTO usage_price_catalog(provider,model,service_tier,valid_from,valid_until,input_microusd_per_million,output_microusd_per_million,cached_input_microusd_per_million,cache_write_microusd_per_million,reasoning_microusd_per_million,version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, p.Provider, p.Model, p.ServiceTier, p.ValidFrom, p.ValidUntil, p.Input, p.Output, p.CachedInput, p.CacheWrite, p.Reasoning, p.Version); err != nil {
 		return err
 	}
 	if err = recordAudit(ctx, tx, actor, "usage_price.created", "usage_price", p.Version, map[string]string{"provider": p.Provider, "model": p.Model, "version": p.Version}); err != nil {

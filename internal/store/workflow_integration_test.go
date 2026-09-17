@@ -447,9 +447,13 @@ func TestWorkflowIntegrationAcceptedDeliveryCommitPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	development := columnByName(t, columns, "Entwicklung")
+	backlog := columnByName(t, columns, "Backlog")
 	task, err := s.CreateTask(ctx, board.ID, "Accepted commit persistence", "test", "normal", "", "", "mcp")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "mcp"); err != nil || !moved {
+		t.Fatalf("Inbox -> Backlog by ID: moved=%t err=%v", moved, err)
 	}
 	agent, err := s.CreateAgent(ctx, "Accepted commit agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 1)
 	if err != nil {
