@@ -648,8 +648,12 @@ func TestRequestedSelfReviewRejectsFailedChecklistResult(t *testing.T) {
 
 func TestRequestedSelfReviewRejectsUnconfirmedChecklistResult(t *testing.T) {
 	raw := `{"status":"passed","checklist":[{"check":"Scope/Akzeptanz","result":"maybe"},{"check":"Diff/Secrets","result":"ok"},{"check":"Tests/Fehler","result":"ok"},{"check":"Sicherheits-/Betriebsrisiken","result":"ok"},{"check":"Rückwärtskompatibilität","result":"ok"}],"tests":"go test","open_risks":"none"}`
-	if _, err := requestedSelfReview([]domain.RunLog{{Message: "```taskboard-self-review\n" + raw + "\n```"}}); err == nil {
+	_, err := requestedSelfReview([]domain.RunLog{{Message: "```taskboard-self-review\n" + raw + "\n```"}})
+	if err == nil {
 		t.Fatal("self-review with an unconfirmed checklist result must be rejected")
+	}
+	if !strings.Contains(err.Error(), `enthält den ungültigen Status "maybe"`) {
+		t.Fatalf("error must identify the invalid status safely: %v", err)
 	}
 }
 

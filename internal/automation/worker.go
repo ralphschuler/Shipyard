@@ -22,6 +22,7 @@ import (
 	"taskboard/internal/store"
 	"taskboard/internal/usage"
 	"time"
+	"unicode"
 )
 
 type Worker struct {
@@ -100,7 +101,7 @@ func requestedSelfReview(logs []domain.RunLog) (taskboardSelfReview, error) {
 		}
 		result := strings.ToLower(strings.TrimSpace(item.Result))
 		if !validSelfReviewResult(result) {
-			return review, fmt.Errorf("taskboard-self-review Checklistenpunkt %q enthält einen ungültigen Status (Länge %d); erwartet wird einer von: %s", item.Check, len(strings.TrimSpace(item.Result)), strings.Join(selfReviewResultValues, ", "))
+			return review, fmt.Errorf("taskboard-self-review Checklistenpunkt %q enthält den ungültigen Status %s (Länge %d); erwartet wird einer von: %s", item.Check, safeSelfReviewResultForError(item.Result), len(strings.TrimSpace(item.Result)), strings.Join(selfReviewResultValues, ", "))
 		}
 		if _, required := requiredChecks[check]; !required {
 			return review, fmt.Errorf("taskboard-self-review enthält keine gültige Pflichtkategorie %q", item.Check)
@@ -128,6 +129,23 @@ func validSelfReviewResult(result string) bool {
 		}
 	}
 	return false
+}
+
+func safeSelfReviewResultForError(result string) string {
+	trimmed := strings.TrimSpace(result)
+	if trimmed != "" && len([]rune(trimmed)) <= 32 {
+		safe := true
+		for _, r := range trimmed {
+			if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-' && r != '_' && r != '.' {
+				safe = false
+				break
+			}
+		}
+		if safe {
+			return fmt.Sprintf("%q", trimmed)
+		}
+	}
+	return "<redacted non-enum value>"
 }
 
 func structuredControlLogs(provider string, logs []domain.RunLog, structuredOutput string) []domain.RunLog {
