@@ -192,6 +192,23 @@
   font-size: 0.78rem;
   font-style: italic;
 }
+.shipyard-sidebar.is-collapsed .board-subnavigation {
+  margin-left: 0;
+  padding-left: 0.15rem;
+}
+.shipyard-sidebar.is-collapsed .board-nav-link {
+  justify-content: center;
+  padding-inline: 0.35rem;
+}
+.shipyard-sidebar.is-collapsed .board-nav-link span:last-child,
+.shipyard-sidebar.is-collapsed .board-nav-empty {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
 @media (max-width: 767px) {
   .shipyard-sidebar {
     box-shadow: 1.25rem 0 3rem oklch(0.1 0.02 250 / 22%);

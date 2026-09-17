@@ -13,6 +13,7 @@ const translations: Record<Language, Record<string, string>> = {
     language: "Sprache", german: "Deutsch", english: "English", languageDescription: "Wähle die Sprache der Shipyard-Oberfläche.",
     saved: "Einstellungen gespeichert.", navigation: "Hauptnavigation", navigationToggle: "Navigation öffnen oder schließen",
     navigationClose: "Navigation schließen", keyboardControl: "Tastatursteuerung",
+    availableBoards: "Verfügbare Boards", allBoards: "Alle Boards", noBoards: "Noch keine Boards",
   },
   en: {
     overview: "Overview", projects: "Projects", boards: "Boards", agents: "Agents",
@@ -26,6 +27,7 @@ const translations: Record<Language, Record<string, string>> = {
     language: "Language", german: "Deutsch", english: "English", languageDescription: "Choose the language of the Shipyard interface.",
     saved: "Settings saved.", navigation: "Main navigation", navigationToggle: "Open or close navigation",
     navigationClose: "Close navigation", keyboardControl: "Keyboard controls",
+    availableBoards: "Available boards", allBoards: "All boards", noBoards: "No boards yet",
   },
 };
 
