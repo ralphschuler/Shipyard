@@ -2667,6 +2667,37 @@ export function WorkflowEditor({ id }: { id: string }) {
     </>
   );
 }
+type BoardFilters = { search: string; column: string; priority: string; label: string; project: string };
+
+function emptyBoardFilters(): BoardFilters {
+  return { search: "", column: "", priority: "", label: "", project: "" };
+}
+
+function readBoardFilters(boardID: string): BoardFilters {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(`shipyard-board-filters:${boardID}`) || "null");
+    return { ...emptyBoardFilters(), ...(value && typeof value === "object" ? value : {}) };
+  } catch {
+    return emptyBoardFilters();
+  }
+}
+
+function normalized(value: unknown): string {
+  return String(value || "").toLocaleLowerCase();
+}
+
+function priorityLabel(priority: string): string {
+  return ({ urgent: "Dringend", high: "Hoch", normal: "Normal", low: "Niedrig" } as Record<string, string>)[priority] || priority;
+}
+
+function matchesBoardFilters(task: any, boardID: string, columns: any[], filters: BoardFilters, search: string): boolean {
+  const query = normalized(search);
+  const textMatches = !query || normalized(`${task.Title} ${task.Description}`).includes(query);
+  const labelMatches = !filters.label || task.Labels?.some((label: any) => label.ID === filters.label);
+  const projectMatches = !filters.project || task.TargetProjects?.some((project: any) => project.ID === filters.project);
+  return task.BoardID === boardID && textMatches && (!filters.column || task.ColumnID === filters.column) && (!filters.priority || task.Priority === filters.priority) && labelMatches && projectMatches && columns.some((column: any) => column.ID === task.ColumnID);
+}
+
 function BoardDetail({ id }: { id: string }) {
   const { data, error } = useAPI<any>("/api/v1/boards/" + id);
   const [open, setOpen] = useState(false);
@@ -2674,12 +2705,45 @@ function BoardDetail({ id }: { id: string }) {
   const [settings, setSettings] = useState(false);
   const [title, setTitle] = useState("");
   const [message, setMessage] = useState("");
+  const [filters, setFilters] = useState(() => readBoardFilters(id));
+  const [searchInput, setSearchInput] = useState(filters.search);
+  const [debouncedSearch, setDebouncedSearch] = useState(filters.search);
   const [draggedTask, setDraggedTask] = useState("");
   const touchDrag = useRef<{ taskID: string; startX: number; startY: number; active: boolean } | undefined>(undefined);
   const suppressTaskClick = useRef(false);
+  useEffect(() => {
+    const next = readBoardFilters(id);
+    setFilters(next);
+    setSearchInput(next.search);
+    setDebouncedSearch(next.search);
+  }, [id]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedSearch(searchInput.trim());
+      setFilters((current) => ({ ...current, search: searchInput.trim() }));
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [searchInput]);
+  useEffect(() => {
+    sessionStorage.setItem(`shipyard-board-filters:${id}`, JSON.stringify(filters));
+  }, [filters, id]);
   const refresh = () => refreshData();
   if (error) return <Failure />;
   if (!data) return <Loading />;
+  const visibleTasks = data.Tasks.filter((task: any) => matchesBoardFilters(task, data.Board.ID, data.Columns, filters, debouncedSearch));
+  const activeFilters = [
+    ["search", filters.search ? `Suche: ${filters.search}` : ""],
+    ["column", data.Columns.find((column: any) => column.ID === filters.column)?.Name || ""],
+    ["priority", filters.priority ? `Priorität: ${priorityLabel(filters.priority)}` : ""],
+    ["label", data.Labels?.find((label: any) => label.ID === filters.label)?.Name || ""],
+    ["project", data.Projects?.find((project: any) => project.ID === filters.project)?.Name || ""],
+  ].filter(([, label]) => label) as [keyof BoardFilters, string][];
+  const updateFilter = (key: keyof BoardFilters, value: string) => setFilters((current) => ({ ...current, [key]: value }));
+  const resetFilters = () => {
+    setSearchInput("");
+    setDebouncedSearch("");
+    setFilters(emptyBoardFilters());
+  };
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
     const form = new FormData(e.target as HTMLFormElement);
@@ -2729,6 +2793,7 @@ function BoardDetail({ id }: { id: string }) {
   };
   return (
     <>
+      <h1 className="mb-4 text-2xl font-semibold">{data.Board.Name}</h1>
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <a
           className="text-sm text-muted-foreground hover:text-foreground"
@@ -2839,6 +2904,55 @@ function BoardDetail({ id }: { id: string }) {
         </div>
       </div>
       {message && <p className="mb-3 text-sm text-destructive">{message}</p>}
+      <section className="mb-5 rounded-xl border bg-card p-4" aria-label="Board-Filter">
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="min-w-56 flex-1 text-sm font-medium">
+            Aufgaben suchen
+            <Input
+              className="mt-1"
+              type="search"
+              role="searchbox"
+              aria-label="Aufgaben suchen"
+              placeholder="Titel oder Beschreibung"
+              value={searchInput}
+              onChange={(event) => setSearchInput(event.target.value)}
+            />
+          </label>
+          <label className="grid gap-1 text-sm font-medium">
+            Spalte
+            <select aria-label="Spalte" value={filters.column} onChange={(event) => updateFilter("column", event.target.value)} className="h-9 rounded-md border bg-background px-2">
+              <option value="">Alle Spalten</option>
+              {data.Columns.map((column: any) => <option key={column.ID} value={column.ID}>{column.Name}</option>)}
+            </select>
+          </label>
+          <label className="grid gap-1 text-sm font-medium">
+            Priorität
+            <select aria-label="Priorität" value={filters.priority} onChange={(event) => updateFilter("priority", event.target.value)} className="h-9 rounded-md border bg-background px-2">
+              <option value="">Alle Prioritäten</option>
+              <option value="urgent">Dringend</option><option value="high">Hoch</option><option value="normal">Normal</option><option value="low">Niedrig</option>
+            </select>
+          </label>
+          <label className="grid gap-1 text-sm font-medium">
+            Tag
+            <select aria-label="Tag" value={filters.label} onChange={(event) => updateFilter("label", event.target.value)} className="h-9 rounded-md border bg-background px-2">
+              <option value="">Alle Tags</option>
+              {data.Labels?.map((label: any) => <option key={label.ID} value={label.ID}>{label.Name}</option>)}
+            </select>
+          </label>
+          <label className="grid gap-1 text-sm font-medium">
+            Projekt
+            <select aria-label="Projekt" value={filters.project} onChange={(event) => updateFilter("project", event.target.value)} className="h-9 rounded-md border bg-background px-2">
+              <option value="">Alle Projekte</option>
+              {data.Projects?.map((project: any) => <option key={project.ID} value={project.ID}>{project.Name}</option>)}
+            </select>
+          </label>
+          <Button type="button" variant="outline" onClick={resetFilters}>Alle Filter zurücksetzen</Button>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-sm" aria-live="polite">
+          <strong>{visibleTasks.length} {visibleTasks.length === 1 ? "Aufgabe" : "Aufgaben"} gefunden</strong>
+          {activeFilters.map(([key, label]) => <button key={key} type="button" className="rounded-full border px-2 py-1 text-xs hover:border-primary" onClick={() => { updateFilter(key, ""); if (key === "search") setSearchInput(""); }} aria-label={`${label} zurücksetzen`}>{label} ×</button>)}
+        </div>
+      </section>
       <div className="flex gap-4 overflow-x-auto pb-4">
         {data.Columns.map((column: any) => (
           <section
@@ -2854,17 +2968,10 @@ function BoardDetail({ id }: { id: string }) {
           >
             <div className="mb-3 flex justify-between">
               <strong className="text-sm">{column.Name}</strong>
-              <Badge variant="secondary">
-                {
-                  data.Tasks.filter((task: any) => task.ColumnID === column.ID)
-                    .length
-                }
-              </Badge>
+              <Badge variant="secondary">{visibleTasks.filter((task: any) => task.ColumnID === column.ID).length}</Badge>
             </div>
             <div className="space-y-2">
-              {data.Tasks.filter(
-                (task: any) => task.ColumnID === column.ID,
-              ).map((task: any) => (
+              {visibleTasks.filter((task: any) => task.ColumnID === column.ID).map((task: any) => (
                 <a
                   key={task.ID}
                   href={"#/tasks/" + task.ID}
@@ -2923,10 +3030,12 @@ function BoardDetail({ id }: { id: string }) {
                   )}
                 </a>
               ))}
+              {visibleTasks.filter((task: any) => task.ColumnID === column.ID).length === 0 && <p className="py-4 text-center text-xs text-muted-foreground">Keine passenden Aufgaben</p>}
             </div>
           </section>
         ))}
       </div>
+      {visibleTasks.length === 0 && <p className="rounded-xl border border-dashed p-8 text-center text-sm text-muted-foreground">Keine Aufgaben entsprechen den aktiven Filtern. Setze die Filter zurück oder suche nach einem anderen Begriff.</p>}
       <Dialog open={settings} onOpenChange={setSettings}>
         <DialogContent>
           <DialogHeader>

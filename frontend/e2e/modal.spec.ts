@@ -14,6 +14,22 @@ const apiFixtures: Record<string, unknown> = {
     Name: `Gruppe ${index}`,
     Projects: [],
   })),
+  "/api/v1/boards/board-filter": {
+    Board: { ID: "board-filter", Name: "Produkt" },
+    Columns: [
+      { ID: "todo", Name: "Offen" },
+      { ID: "done", Name: "Erledigt" },
+    ],
+    Labels: [{ ID: "bug", Name: "Fehler" }, { ID: "ux", Name: "UX" }],
+    Projects: [{ ID: "project-a", Name: "Website" }],
+    Tasks: [
+      { ID: "task-a", BoardID: "board-filter", ColumnID: "todo", Title: "Login reparieren", Description: "Fehler im Formular", Priority: "high", Labels: [{ ID: "bug", Name: "Fehler" }], TargetProjects: [{ ID: "project-a", Name: "Website" }] },
+      { ID: "task-b", BoardID: "board-filter", ColumnID: "done", Title: "UX prüfen", Description: "Mobile Navigation", Priority: "normal", Labels: [{ ID: "ux", Name: "UX" }], TargetProjects: [] },
+      { ID: "task-other", BoardID: "other-board", ColumnID: "todo", Title: "Login reparieren", Description: "Nicht dieses Board", Priority: "urgent", Labels: [], TargetProjects: [] },
+    ],
+    Transitions: [],
+    Groups: [],
+  },
 };
 
 async function mockReactBackend(page: Page) {
@@ -53,6 +69,29 @@ test("React project modal scrolls, focuses, closes on Escape, and restores focus
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   await expect(trigger).toBeFocused();
+});
+
+test("React board filters search and combine status, priority, label, and project", async ({ page }) => {
+  await mockReactBackend(page);
+  await page.goto("/app/#/boards/board-filter");
+
+  await expect(page.getByRole("heading", { name: "Produkt" })).toBeVisible();
+  const search = page.getByRole("searchbox", { name: "Aufgaben suchen" });
+  await search.fill("login");
+  await expect(page.getByText("1 Aufgabe gefunden")).toBeVisible();
+  await expect(page.getByText("Login reparieren")).toBeVisible();
+  await expect(page.getByText("UX prüfen")).toBeHidden();
+
+  await page.getByLabel("Priorität").selectOption("high");
+  await page.getByLabel("Spalte").selectOption("todo");
+  await page.getByLabel("Tag").selectOption("bug");
+  await page.getByLabel("Projekt").selectOption("project-a");
+  await expect(page.getByText("1 Aufgabe gefunden")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Fehler zurücksetzen/ })).toBeVisible();
+
+  await page.getByRole("button", { name: "Alle Filter zurücksetzen" }).click();
+  await expect(page.getByText("2 Aufgaben gefunden")).toBeVisible();
+  await expect(page.getByText("task-other")).toHaveCount(0);
 });
 
 test("legacy dialog enhancement keeps nested forms usable and restores focus", async ({ page }) => {
