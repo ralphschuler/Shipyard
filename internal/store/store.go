@@ -27,6 +27,7 @@ type Store struct {
 
 var ErrNoRunCreated = errors.New("agent run already exists for this event")
 var ErrWorkspaceBusy = errors.New("workspace is busy")
+var ErrTargetSelectionRequired = errors.New("an explicit repository target selection is required")
 
 var canonicalUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 
@@ -718,10 +719,51 @@ func (s *Store) SetTaskTargets(c context.Context, taskID string, projectIDs, gro
 		}
 	}
 	if _, err = tx.Exec(c, `UPDATE agent_interactions SET status='cancelled',answered_at=now()
-		WHERE task_id=$1 AND status='open' AND (decision_key ILIKE '%project%' OR decision_key ILIKE '%repository%' OR title ILIKE '%project%' OR title ILIKE '%repository%')`, taskID); err != nil {
+		WHERE task_id=$1 AND status='open' AND (decision_key ILIKE '%project%' OR decision_key ILIKE '%repository%' OR title ILIKE '%project%' OR title ILIKE '%repository%')
+		AND EXISTS (SELECT 1 FROM task_repository_targets WHERE task_id=$1)`, taskID); err != nil {
 		return err
 	}
 	return tx.Commit(c)
+}
+
+func requireRunTargets(targets []domain.RepositoryTarget) error {
+	if len(targets) == 0 {
+		return ErrTargetSelectionRequired
+	}
+	return nil
+}
+
+// runTargets resolves the durable snapshot first and permits board inheritance
+// only when the board has exactly one project. Ambiguous boards are surfaced as
+// a selection error instead of falling back to an agent workspace.
+func (s *Store) runTargets(c context.Context, taskID string) ([]domain.RepositoryTarget, error) {
+	targets, err := s.EffectiveTaskRepositoryTargets(c, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if len(targets) > 0 {
+		return targets, nil
+	}
+	task, err := s.GetTask(c, taskID)
+	if err != nil {
+		return nil, err
+	}
+	projects, err := s.BoardProjects(c, task.BoardID)
+	if err != nil {
+		return nil, err
+	}
+	if len(projects) != 1 {
+		if len(projects) == 0 {
+			return nil, fmt.Errorf("%w: board has no linked repository project", ErrTargetSelectionRequired)
+		}
+		choices := make([]string, 0, len(projects))
+		for _, project := range projects {
+			choices = append(choices, project.Name+" ("+project.RepositoryURL+")")
+		}
+		return nil, fmt.Errorf("%w: choose one repository target: %s", ErrTargetSelectionRequired, strings.Join(choices, ", "))
+	}
+	project := projects[0]
+	return []domain.RepositoryTarget{{TaskID: taskID, ProjectID: project.ID, ProjectName: project.Name, RepositoryURL: project.RepositoryURL, DefaultBranch: project.DefaultBranch, LocalPath: project.LocalPath, TargetSource: "inherited"}}, nil
 }
 
 func normalizeTargetIDs(kind string, rawIDs []string) ([]string, error) {
@@ -1920,12 +1962,12 @@ func (s *Store) ResolveInteractionAndMove(c context.Context, id, answerer, freef
 	if !a.Enabled {
 		return i, nil, errors.New("agent is disabled")
 	}
-	targets, err := s.EffectiveTaskRepositoryTargets(c, i.TaskID)
+	targets, err := s.runTargets(c, i.TaskID)
 	if err != nil {
 		return i, nil, err
 	}
 	if len(targets) == 0 {
-		targets = []domain.RepositoryTarget{{LocalPath: a.WorkspacePath}}
+		return i, nil, ErrTargetSelectionRequired
 	}
 	if _, err = tx.Exec(c, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", i.TaskID+"|manual|"+a.ID); err != nil {
 		return i, nil, err
@@ -2436,14 +2478,16 @@ func (s *Store) CreateRun(c context.Context, task, agent, rule string) (domain.A
 	if e != nil {
 		return domain.AgentRun{}, e
 	}
-	workspace, targetProject := a.WorkspacePath, ""
-	if targets, targetErr := s.EffectiveTaskRepositoryTargets(c, task); targetErr == nil && len(targets) == 1 && targets[0].RepositoryURL != "" {
-		targetProject = targets[0].ProjectID
-		if targets[0].LocalPath != "" {
-			workspace = targets[0].LocalPath
-		} else {
-			workspace = filepath.Join("/home/agent/.taskboard-projects", targetProject)
-		}
+	targets, err := s.runTargets(c, task)
+	if err != nil {
+		return domain.AgentRun{}, err
+	}
+	if err = requireRunTargets(targets); err != nil {
+		return domain.AgentRun{}, err
+	}
+	workspace, targetProject := targets[0].LocalPath, targets[0].ProjectID
+	if workspace == "" {
+		workspace = filepath.Join("/home/agent/.taskboard-projects", targetProject)
 	}
 	return s.createRunWithWorkspace(c, task, a, agent, rule, workspace, targetProject, "")
 }
@@ -2486,12 +2530,12 @@ func (s *Store) CreateManualRuns(c context.Context, task, agent string) ([]domai
 	if !a.Enabled {
 		return nil, errors.New("agent is disabled")
 	}
-	targets, err := s.EffectiveTaskRepositoryTargets(c, task)
+	targets, err := s.runTargets(c, task)
 	if err != nil {
 		return nil, err
 	}
 	if len(targets) == 0 {
-		targets = []domain.RepositoryTarget{{LocalPath: a.WorkspacePath}}
+		return nil, ErrTargetSelectionRequired
 	}
 	for _, target := range targets {
 		if target.ProjectID != "" && target.RepositoryURL == "" {
@@ -3121,12 +3165,12 @@ func (s *Store) CreateRunsForEvent(c context.Context, event domain.AutomationEve
 	if !a.Enabled {
 		return nil, errors.New("agent is disabled")
 	}
-	targets, e := s.EffectiveTaskRepositoryTargets(c, event.TaskID)
+	targets, e := s.runTargets(c, event.TaskID)
 	if e != nil {
 		return nil, e
 	}
 	if len(targets) == 0 {
-		targets = []domain.RepositoryTarget{{LocalPath: a.WorkspacePath}}
+		return nil, ErrTargetSelectionRequired
 	}
 	for _, target := range targets {
 		if target.ProjectID != "" && target.RepositoryURL == "" {

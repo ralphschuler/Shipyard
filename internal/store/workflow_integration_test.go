@@ -179,6 +179,37 @@ func TestWorkflowIntegrationOpenInteractionsIgnoreCompletedTasks(t *testing.T) {
 	}
 }
 
+func TestWorkflowIntegrationMissingTargetBlocksRunAndKeepsDecisionOpen(t *testing.T) {
+	s := integrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "Target selection required", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	task, err := s.CreateTask(ctx, board.ID, "Needs repository selection", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "Target selection agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.DB.Exec(ctx, `INSERT INTO agent_interactions(task_id,agent_id,decision_key,title,schema) VALUES($1,$2,'project_target','Choose repository','{}'::jsonb)`, task.ID, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetTaskTargets(ctx, task.ID, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	open, err := s.OpenInteractions(ctx, task.ID)
+	if err != nil || len(open) != 1 {
+		t.Fatalf("target decision = %#v err=%v, want one open decision", open, err)
+	}
+	if _, err = s.CreateManualRuns(ctx, task.ID, agent.ID); !errors.Is(err, ErrTargetSelectionRequired) {
+		t.Fatalf("run without board target = %v, want ErrTargetSelectionRequired", err)
+	}
+}
+
 func TestWorkflowIntegrationEnglishIDsRemainCompatible(t *testing.T) {
 	s := integrationStore(t)
 	ctx := context.Background()

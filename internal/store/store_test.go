@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"taskboard/internal/domain"
@@ -129,5 +130,11 @@ func TestBoardInheritanceEligibleColumn(t *testing.T) {
 		if boardInheritanceEligibleColumn(name) {
 			t.Errorf("%q should not trigger board target inheritance", name)
 		}
+	}
+}
+
+func TestRunTargetSelectionRejectsMissingTargets(t *testing.T) {
+	if err := requireRunTargets(nil); !errors.Is(err, ErrTargetSelectionRequired) {
+		t.Fatalf("missing targets error = %v, want ErrTargetSelectionRequired", err)
 	}
 }
