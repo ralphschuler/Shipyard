@@ -1389,10 +1389,6 @@ func (w *Worker) Process(ctx context.Context) {
 			if errors.Is(err, store.ErrNoRunCreated) || errors.Is(err, store.ErrAutomationActive) {
 				continue
 			}
-			if errors.Is(err, store.ErrWorkspaceBusy) {
-				deferWithReason(err.Error())
-				continue
-			}
 			if err != nil {
 				deferWithReason(err.Error())
 				continue

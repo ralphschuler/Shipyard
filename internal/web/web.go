@@ -88,6 +88,7 @@ type taskChangeView struct {
 
 type taskRunView struct {
 	ID, TaskID, AgentID, Status, Summary, ErrorMessage string
+	Queue                                              domain.RunQueueStatus
 	StartedAt, FinishedAt                              *time.Time
 	CreatedAt                                          time.Time
 }
@@ -197,6 +198,7 @@ type ruleView struct {
 type columnOption struct{ ID, Label, BoardID string }
 type runPage struct {
 	Run      domain.AgentRun
+	Queue    domain.RunQueueStatus
 	Logs     runLogView
 	Task     domain.Task
 	Delivery domain.RunDelivery
@@ -2061,7 +2063,12 @@ func (a *App) runAPI(w http.ResponseWriter, r *http.Request) {
 	for index := range logs {
 		logs[index].Message = automation.RedactSensitiveText(logs[index].Message)
 	}
-	writeAPI(w, map[string]any{"run": safeRunView(run), "task": task, "delivery": delivery, "usage": usage, "logs": logs, "logsTruncated": truncated}, err)
+	queue, queueErr := a.store.RunQueueStatus(r.Context(), run.ID)
+	if queueErr != nil {
+		writeAPI(w, nil, queueErr)
+		return
+	}
+	writeAPI(w, map[string]any{"run": safeRunView(run), "queue": queue, "task": task, "delivery": delivery, "usage": usage, "logs": logs, "logsTruncated": truncated}, err)
 }
 func safeRunView(run domain.AgentRun) map[string]any {
 	return map[string]any{"ID": run.ID, "TaskID": run.TaskID, "AgentID": run.AgentID, "RuleID": run.RuleID, "BatchID": run.BatchID, "Status": run.Status, "TargetProject": run.TargetProject, "Summary": automation.RedactSensitiveText(run.Summary), "ErrorMessage": automation.RedactSensitiveText(run.ErrorMessage), "StartedAt": run.StartedAt, "FinishedAt": run.FinishedAt, "CreatedAt": run.CreatedAt}
@@ -2359,7 +2366,11 @@ func (a *App) taskData(ctx context.Context, id string) (taskPage, error) {
 	publicRuns := make([]taskRunView, 0, len(runs))
 	changes := make([]taskChangeView, 0, len(runs))
 	for _, run := range runs {
-		publicRuns = append(publicRuns, taskRunView{ID: run.ID, TaskID: run.TaskID, AgentID: run.AgentID, Status: run.Status, Summary: automation.RedactSensitiveText(run.Summary), ErrorMessage: automation.RedactSensitiveText(run.ErrorMessage), StartedAt: run.StartedAt, FinishedAt: run.FinishedAt, CreatedAt: run.CreatedAt})
+		queue, queueErr := a.store.RunQueueStatus(ctx, run.ID)
+		if queueErr != nil {
+			return taskPage{}, queueErr
+		}
+		publicRuns = append(publicRuns, taskRunView{ID: run.ID, TaskID: run.TaskID, AgentID: run.AgentID, Status: run.Status, Queue: queue, Summary: automation.RedactSensitiveText(run.Summary), ErrorMessage: automation.RedactSensitiveText(run.ErrorMessage), StartedAt: run.StartedAt, FinishedAt: run.FinishedAt, CreatedAt: run.CreatedAt})
 		delivery, deliveryErr := a.store.RunDelivery(ctx, run.ID)
 		if deliveryErr != nil {
 			return taskPage{}, deliveryErr
@@ -2576,7 +2587,12 @@ func (a *App) run(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	a.render(r, w, "run.html", runPage{Run: run, Logs: newRunLogView(logs, truncated, run.ID), Task: task, Delivery: delivery, Usage: usage})
+	queue, e := a.store.RunQueueStatus(r.Context(), run.ID)
+	if e != nil {
+		http.Error(w, e.Error(), 500)
+		return
+	}
+	a.render(r, w, "run.html", runPage{Run: run, Queue: queue, Logs: newRunLogView(logs, truncated, run.ID), Task: task, Delivery: delivery, Usage: usage})
 }
 func (a *App) runLogs(w http.ResponseWriter, r *http.Request) {
 	run, err := a.store.Run(r.Context(), r.PathValue("id"))

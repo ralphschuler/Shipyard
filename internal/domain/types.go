@@ -176,6 +176,12 @@ type AgentRun struct {
 	StartedAt, FinishedAt                                                                                                 *time.Time
 	CreatedAt                                                                                                             time.Time
 }
+type RunQueueStatus struct {
+	Position      int
+	WaitingReason string
+	BlockingRunID string
+	NextAttemptAt time.Time
+}
 
 // WorktreeCleanupCandidate identifies an isolated checkout that no longer
 // carries a deliverable patch. The source repository itself is never a
@@ -185,6 +191,9 @@ type WorktreeCleanupCandidate struct {
 }
 type RunOverview struct {
 	ID, TaskID, TaskTitle, AgentID, AgentName, Status, Summary, ErrorMessage string
+	QueuePosition                                                            int
+	QueueReason, BlockingRunID                                               string
+	QueueNextAttemptAt                                                       *time.Time
 	StartedAt, FinishedAt                                                    *time.Time
 	CreatedAt                                                                time.Time
 	DurationSeconds                                                          int
