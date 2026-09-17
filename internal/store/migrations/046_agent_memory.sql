@@ -20,6 +20,8 @@ CREATE TABLE memory_facts (
   project_id UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
   agent_id UUID NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  -- dedupe_key is the stable (scope, subject, predicate) identity; object_json
+  -- belongs to the append-only version history below and may change.
   subject TEXT NOT NULL, predicate TEXT NOT NULL, object_json JSONB NOT NULL, dedupe_key TEXT NOT NULL,
   confidence NUMERIC(5,4) NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
   status TEXT NOT NULL CHECK (status IN ('pending','confirmed','revoked','superseded')) DEFAULT 'pending',

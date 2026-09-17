@@ -43,6 +43,21 @@ func (p Provenance) Valid(scope Scope) bool {
 	return p.MessageID != "" && p.RunID != "" && p.TaskID == scope.TaskID && p.AgentID == scope.AgentID && !p.OccurredAt.IsZero()
 }
 
+type RetentionPolicy struct {
+	ConversationAge time.Duration
+	FactAge         time.Duration
+}
+
+func (p RetentionPolicy) normalized() RetentionPolicy {
+	if p.ConversationAge <= 0 {
+		p.ConversationAge = 365 * 24 * time.Hour
+	}
+	if p.FactAge <= 0 {
+		p.FactAge = p.ConversationAge
+	}
+	return p
+}
+
 type ConversationMessage struct {
 	ID, ThreadID, MessageID, RunID, Role, Content string
 	OccurredAt                                    time.Time
@@ -103,6 +118,10 @@ func RedactObject(raw json.RawMessage) json.RawMessage {
 			}
 		case map[string]any:
 			for k, v := range y {
+				if secretKey(k) {
+					y[k] = Redacted
+					continue
+				}
 				y[k] = walk(v)
 			}
 		}
@@ -111,8 +130,18 @@ func RedactObject(raw json.RawMessage) json.RawMessage {
 	b, _ := json.Marshal(walk(v))
 	return b
 }
+
+func secretKey(key string) bool {
+	k := strings.ToLower(strings.TrimSpace(key))
+	return strings.Contains(k, "password") || strings.Contains(k, "secret") || strings.Contains(k, "token") || strings.Contains(k, "authorization") || strings.Contains(k, "api_key") || strings.Contains(k, "apikey") || strings.Contains(k, "private_key") || strings.Contains(k, "privatekey")
+}
+
 func DedupeKey(subject, predicate string, object json.RawMessage) string {
-	return Hash(strings.ToLower(strings.TrimSpace(subject)) + "\x00" + strings.ToLower(strings.TrimSpace(predicate)) + "\x00" + string(object))
+	// Object values are versions of one fact, not part of its identity.
+	// Keeping this function's signature preserves callers while making an
+	// changed object supersede the current version instead of creating a new
+	// unrelated fact.
+	return Hash(strings.ToLower(strings.TrimSpace(subject)) + "\x00" + strings.ToLower(strings.TrimSpace(predicate)))
 }
 func Tokens(s string) int { return len(strings.Fields(s)) }
 func Fit(items []RetrievalItem, budget int) ContextPack {

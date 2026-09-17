@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -11,6 +12,13 @@ func TestRedactSecretsBeforePersistenceAndOutput(t *testing.T) {
 	got := Redact(input)
 	if got == input || got != "Authorization: [REDACTED] [REDACTED] [REDACTED]" {
 		t.Fatalf("unexpected redaction: %q", got)
+	}
+}
+
+func TestRedactObjectFailsClosedForSensitiveKeys(t *testing.T) {
+	got := string(RedactObject(json.RawMessage(`{"token":"secret","nested":{"password":123},"safe":"hello"}`)))
+	if strings.Contains(got, "secret") || strings.Contains(got, "123") || !strings.Contains(got, `"token":"[REDACTED]"`) || !strings.Contains(got, `"safe":"hello"`) {
+		t.Fatalf("sensitive JSON fields were not redacted: %s", got)
 	}
 }
 
@@ -34,6 +42,12 @@ func TestDedupeKeyCanonicalizesObject(t *testing.T) {
 	b, _ := NormalizeObject(json.RawMessage(`{"a":1,"b":2}`))
 	if DedupeKey(" Name ", "PREDICATE", a) != DedupeKey("name", "predicate", b) {
 		t.Fatal("equivalent JSON must deduplicate")
+	}
+}
+
+func TestDedupeKeyKeepsFactIdentityAcrossObjectChanges(t *testing.T) {
+	if DedupeKey("name", "likes", json.RawMessage(`"tea"`)) != DedupeKey("name", "likes", json.RawMessage(`"coffee"`)) {
+		t.Fatal("object changes must create a new version of the same fact")
 	}
 }
 
