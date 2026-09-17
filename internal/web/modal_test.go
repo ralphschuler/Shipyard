@@ -63,6 +63,14 @@ func TestModalAccessibilityScriptContract(t *testing.T) {
 }
 
 func TestReactModalUsesDefinedOpaqueSurface(t *testing.T) {
+	styles, err := os.ReadFile("../../frontend/src/index.css")
+	if err != nil {
+		t.Fatalf("read React modal styles: %v", err)
+	}
+	if !strings.Contains(string(styles), `[data-slot="dialog-content"]{background-color:var(--card);color:var(--card-foreground)}`) {
+		t.Fatal("React modal must have an explicit opaque card surface fallback")
+	}
+
 	source, err := os.ReadFile("../../frontend/src/components/ui/dialog.tsx")
 	if err != nil {
 		t.Fatalf("read React modal source: %v", err)

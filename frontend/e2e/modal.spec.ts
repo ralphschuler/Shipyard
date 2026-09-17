@@ -67,6 +67,26 @@ test("React project modal scrolls, focuses, closes on Escape, and restores focus
   await expect(dialog).toBeVisible();
   await expect(dialog.getByLabel("Name")).toBeFocused();
 
+  const surface = await dialog.evaluate((element) => {
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return {
+      backgroundColor: style.backgroundColor,
+      color: style.color,
+      top: rect.top,
+      bottom: rect.bottom,
+      viewportHeight: window.innerHeight,
+    };
+  });
+  expect(surface.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+  expect(surface.color).not.toBe("rgba(0, 0, 0, 0)");
+  expect(surface.top).toBeGreaterThanOrEqual(0);
+  expect(surface.bottom).toBeLessThanOrEqual(surface.viewportHeight);
+
+  const overlay = page.locator('[data-slot="dialog-overlay"]');
+  await expect(overlay).toBeVisible();
+  expect(await overlay.evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
+
   const scrollState = await dialog.locator('[data-slot="dialog-body"]').evaluate((element) => ({
     overflowY: getComputedStyle(element).overflowY,
     scrollHeight: element.scrollHeight,
@@ -74,6 +94,9 @@ test("React project modal scrolls, focuses, closes on Escape, and restores focus
   }));
   expect(scrollState.overflowY).toBe("auto");
   expect(scrollState.scrollHeight).toBeGreaterThan(scrollState.clientHeight);
+
+  await page.keyboard.press("Tab");
+  await expect(dialog.getByLabel("Repository-URL")).toBeFocused();
 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
@@ -159,6 +182,24 @@ test("legacy dialog enhancement keeps nested forms usable and restores focus", a
   await expect(dialog.locator("input[autofocus]")).toBeFocused();
   await expect(dialog.locator(".dialog-body")).toHaveCount(1);
   await expect(dialog.locator("form.dialog-secondary-form")).toHaveCount(1);
+
+  const legacyLayout = await dialog.evaluate((element) => {
+    const body = element.querySelector<HTMLElement>(".dialog-body")!;
+    const header = element.querySelector<HTMLElement>("header")!;
+    const footer = element.querySelector<HTMLElement>("footer")!;
+    return {
+      backgroundColor: getComputedStyle(element).backgroundColor,
+      bodyOverflowY: getComputedStyle(body).overflowY,
+      bodyScrolls: body.scrollHeight > body.clientHeight,
+      headerVisible: header.getBoundingClientRect().top >= element.getBoundingClientRect().top,
+      footerVisible: footer.getBoundingClientRect().bottom <= element.getBoundingClientRect().bottom,
+    };
+  });
+  expect(legacyLayout.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+  expect(legacyLayout.bodyOverflowY).toBe("auto");
+  expect(legacyLayout.bodyScrolls).toBe(true);
+  expect(legacyLayout.headerVisible).toBe(true);
+  expect(legacyLayout.footerVisible).toBe(true);
 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
