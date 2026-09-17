@@ -2047,7 +2047,7 @@ func (a *App) resolveUpdates(r *http.Request) updates.Snapshot {
 	}
 	// Release metadata must always come from the configured GitHub API. Never
 	// accept operator- or UI-supplied version, commit, checksum, or trust flags.
-	return updates.Resolve(r.Context(), current, repository, branch, updates.Client{HTTP: http.DefaultClient, BaseURL: os.Getenv("TASKBOARD_GITHUB_API_URL"), Token: os.Getenv("TASKBOARD_GITHUB_TOKEN"), ApprovedTags: strings.Split(os.Getenv("TASKBOARD_GITHUB_RELEASE_ALLOWLIST"), ",")})
+	return updates.Resolve(r.Context(), current, repository, branch, updates.Client{HTTP: http.DefaultClient, BaseURL: os.Getenv("TASKBOARD_GITHUB_API_URL"), Token: os.Getenv("TASKBOARD_GITHUB_TOKEN"), ApprovedTags: strings.Split(os.Getenv("TASKBOARD_GITHUB_RELEASE_ALLOWLIST"), ","), LocalChangelogPath: os.Getenv("TASKBOARD_CHANGELOG_PATH")})
 }
 
 func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {

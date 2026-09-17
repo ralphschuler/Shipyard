@@ -7,10 +7,62 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestLoadLocalChangelogUsesConfiguredFileAndEnforcesSizeLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "release-notes.md")
+	if err := os.WriteFile(path, []byte("# Local notes\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	content, gotPath, err := LoadLocalChangelog(path)
+	if err != nil || content != "# Local notes\n" || gotPath != path {
+		t.Fatalf("LoadLocalChangelog() = %q, %q, %v", content, gotPath, err)
+	}
+	if err := os.WriteFile(path, make([]byte, maxLocalChangelogSize+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadLocalChangelog(path); err == nil {
+		t.Fatal("expected oversized changelog to be rejected")
+	}
+}
+
+func TestLoadLocalChangelogDiscoversConventionalNames(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "CHANGELOG.markdown")
+	if err := os.WriteFile(path, []byte("local"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+	content, gotPath, err := LoadLocalChangelog("")
+	if err != nil || content != "local" || gotPath != "CHANGELOG.markdown" {
+		t.Fatalf("LoadLocalChangelog() = %q, %q, %v", content, gotPath, err)
+	}
+}
+
+func TestResolveKeepsLocalChangelogWhenGitHubTokenIsMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "CHANGELOG.md")
+	if err := os.WriteFile(path, []byte("# Local release\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := Resolve(context.Background(), Current{Version: "1.2.0"}, "acme/shipyard", "master", Client{LocalChangelogPath: path, ApprovedTags: []string{"v1.3.*"}})
+	if snapshot.Release.Changelog != "# Local release\n" || snapshot.Release.ChangelogSource == "" {
+		t.Fatalf("snapshot = %#v, want local changelog", snapshot)
+	}
+}
 
 func TestClientDownloadsAndVerifiesReleaseArtifact(t *testing.T) {
 	body := "shipyard release binary"
