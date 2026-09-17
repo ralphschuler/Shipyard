@@ -491,11 +491,19 @@ func parseTemplates() (*template.Template, error) {
 }
 
 func New(s *store.Store, worker *automation.Worker) *App {
+	return NewWithUpdateOrchestrator(s, worker, nil)
+}
+
+// NewWithUpdateOrchestrator is the explicit production integration point for
+// a deployment's backup, signature verification, binary switch, restart,
+// healthcheck and rollback adapter. The default constructor intentionally
+// leaves it nil, so an incomplete deployment can never mutate itself.
+func NewWithUpdateOrchestrator(s *store.Store, worker *automation.Worker, orchestrator *updates.Orchestrator) *App {
 	templates, err := parseTemplates()
 	if err != nil {
 		panic("parse web templates: " + err.Error())
 	}
-	app := &App{store: s, worker: worker, live: &liveHub{clients: map[chan string]struct{}{}}, logins: newLoginThrottle(), templates: templates}
+	app := &App{store: s, worker: worker, update: orchestrator, live: &liveHub{clients: map[chan string]struct{}{}}, logins: newLoginThrottle(), templates: templates}
 	go s.ListenChanges(context.Background(), app.live.publish)
 	go app.syncProjectsLoop()
 	return app
@@ -2061,6 +2069,19 @@ func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if a.store != nil {
+		var locked bool
+		err := a.store.DB.QueryRow(r.Context(), `SELECT pg_try_advisory_lock(hashtextextended('shipyard:update-install', 0))`).Scan(&locked)
+		if err != nil {
+			http.Error(w, "Update-Sperre konnte nicht sicher geprüft werden.", http.StatusServiceUnavailable)
+			return
+		}
+		if !locked {
+			http.Error(w, "Eine andere Update-Installation läuft bereits.", http.StatusConflict)
+			return
+		}
+		defer func() {
+			_, _ = a.store.DB.Exec(r.Context(), `SELECT pg_advisory_unlock(hashtextextended('shipyard:update-install', 0))`)
+		}()
 		busy, err := a.activeUpdateRuns(r.Context())
 		if err != nil {
 			http.Error(w, "Aktive Runs konnten nicht sicher geprüft werden.", http.StatusServiceUnavailable)
@@ -2073,7 +2094,10 @@ func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	snapshot := a.resolveUpdates(r)
 	if !snapshot.Installable || snapshot.Status != "update_available" {
-		a.auditUpdate(r, "update.install_blocked", snapshot, "snapshot_not_installable")
+		if err := a.auditUpdate(r, "update.install_blocked", snapshot, "snapshot_not_installable"); err != nil {
+			http.Error(w, "Update-Audit konnte nicht sicher geschrieben werden.", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "Update ist nicht verifiziert und installierbar.", http.StatusConflict)
 		return
 	}
@@ -2082,18 +2106,38 @@ func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	progress := make([]updates.Progress, 0, 12)
-	if err := a.update.Install(r.Context(), snapshot, func(p updates.Progress) {
+	var auditErr error
+	installCtx, cancelInstall := context.WithCancel(r.Context())
+	defer cancelInstall()
+	if err := a.update.Install(installCtx, snapshot, func(p updates.Progress) {
 		progress = append(progress, p)
 		if p.Status == "running" {
-			a.auditUpdate(r, "update."+p.Phase, snapshot, "started")
+			if err := a.auditUpdate(r, "update."+p.Phase, snapshot, "started"); err != nil && auditErr == nil {
+				auditErr = err
+				cancelInstall()
+			}
 		} else if p.Status == "succeeded" {
-			a.auditUpdate(r, "update."+p.Phase, snapshot, "succeeded")
+			if err := a.auditUpdate(r, "update."+p.Phase, snapshot, "succeeded"); err != nil && auditErr == nil {
+				auditErr = err
+			}
 		} else if p.Status == "failed" {
-			a.auditUpdate(r, "update."+p.Phase, snapshot, "failed")
+			if err := a.auditUpdate(r, "update."+p.Phase, snapshot, "failed"); err != nil && auditErr == nil {
+				auditErr = err
+			}
 		}
 	}); err != nil {
-		a.auditUpdate(r, "update.install_failed", snapshot, "failed")
+		if auditErr != nil {
+			log.Printf("update audit failed during installation: %v", auditErr)
+		}
+		if auditFailure := a.auditUpdate(r, "update.install_failed", snapshot, "failed"); auditFailure != nil {
+			log.Printf("update failure audit failed: %v", auditFailure)
+		}
 		http.Error(w, updateInstallErrorMessage(err), http.StatusConflict)
+		return
+	}
+	if auditErr != nil {
+		log.Printf("update audit failed after installation: %v", auditErr)
+		http.Error(w, "Update wurde ausgeführt, aber nicht vollständig auditiert.", http.StatusServiceUnavailable)
 		return
 	}
 	if err := a.auditUpdate(r, "update.install_succeeded", snapshot, "succeeded"); err != nil {
@@ -2114,6 +2158,8 @@ func updateInstallErrorMessage(error) string {
 func (a *App) activeUpdateRuns(ctx context.Context) (bool, error) {
 	var busy bool
 	err := a.store.DB.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM user_sessions WHERE expires_at > now()
+	) OR EXISTS(
 		SELECT 1 FROM agent_runs WHERE status IN ('queued','running') AND workspace_snapshot <> ''
 	) OR EXISTS(
 		SELECT 1 FROM agent_run_batches WHERE status IN ('queued','running')

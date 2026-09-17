@@ -150,7 +150,7 @@ func TestInstallUpdateRunsOnlyAfterVerifiedSnapshot(t *testing.T) {
 	t.Cleanup(func() { http.DefaultClient = old })
 	called := false
 	noop := func(context.Context, updates.Snapshot) error { called = true; return nil }
-	app := &App{update: &updates.Orchestrator{Backup: noop, DownloadAndVerify: func(context.Context, string, string) ([]byte, error) { return []byte("artifact"), nil }, Verify: noop, Migrate: noop, Switch: func(context.Context, updates.Snapshot, []byte) error { called = true; return nil }, Restart: noop, Health: noop, Rollback: noop}}
+	app := &App{update: &updates.Orchestrator{Backup: noop, DownloadAndVerify: func(context.Context, string, string) ([]byte, error) { return []byte("artifact"), nil }, VerifyArtifact: func(context.Context, updates.Snapshot, []byte) error { return nil }, Verify: noop, Migrate: noop, Switch: func(context.Context, updates.Snapshot, []byte) error { called = true; return nil }, Restart: noop, Health: noop, Rollback: noop}}
 	res := httptest.NewRecorder()
 	app.installUpdateAPI(res, httptest.NewRequest(http.MethodPost, "/api/v1/settings/updates/install", bytes.NewBufferString(`{"confirm":true}`)))
 	if res.Code != http.StatusOK || !called {

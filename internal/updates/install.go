@@ -26,8 +26,11 @@ type Orchestrator struct {
 	// DownloadAndVerify must fetch the exact GitHub artifact selected by the
 	// trusted snapshot and compare its bytes with Release.Checksum.
 	DownloadAndVerify func(context.Context, string, string) ([]byte, error)
-	Verify            func(context.Context, Snapshot) error
-	Migrate           func(context.Context, Snapshot) error
+	// VerifyArtifact validates the downloaded bytes against the configured
+	// release signature/allowlist; a checksum alone never authorizes install.
+	VerifyArtifact func(context.Context, Snapshot, []byte) error
+	Verify         func(context.Context, Snapshot) error
+	Migrate        func(context.Context, Snapshot) error
 	// Switch receives the exact bytes returned by DownloadAndVerify. A
 	// deployment adapter must install these bytes, never re-download by URL.
 	Switch   func(context.Context, Snapshot, []byte) error
@@ -45,7 +48,7 @@ func (o Orchestrator) Install(ctx context.Context, snapshot Snapshot, report fun
 	}
 	// Rollback is part of the safety contract, not an optional enhancement. A
 	// missing recovery path must be detected before backup or any mutation.
-	if o.Backup == nil || o.DownloadAndVerify == nil || o.Verify == nil || o.Migrate == nil || o.Switch == nil || o.Restart == nil || o.Health == nil || o.Rollback == nil {
+	if o.Backup == nil || o.DownloadAndVerify == nil || o.VerifyArtifact == nil || o.Verify == nil || o.Migrate == nil || o.Switch == nil || o.Restart == nil || o.Health == nil || o.Rollback == nil {
 		return errors.New("update installation is not fully configured for recovery")
 	}
 	var artifact []byte
@@ -57,10 +60,16 @@ func (o Orchestrator) Install(ctx context.Context, snapshot Snapshot, report fun
 		{"switch", nil}, {"restart", o.Restart}, {"healthcheck", o.Health},
 	}
 	for _, step := range steps {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		reportProgress(report, Progress{Phase: step.phase, Status: "running", Message: "Update-Schritt läuft."})
 		if step.phase == "verify" {
 			var err error
 			artifact, err = o.DownloadAndVerify(ctx, snapshot.Release.ArtifactURL, snapshot.Release.Checksum)
+			if err == nil {
+				err = o.VerifyArtifact(ctx, snapshot, artifact)
+			}
 			if err != nil {
 				reportProgress(report, Progress{Phase: step.phase, Status: "failed", Message: "Update-Schritt fehlgeschlagen."})
 				reportProgress(report, Progress{Phase: "rollback", Status: "running", Message: "Wiederherstellung läuft."})
