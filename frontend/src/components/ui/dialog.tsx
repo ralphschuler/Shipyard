@@ -5,16 +5,40 @@ import { Dialog as DialogPrimitive } from "radix-ui"
 import { Button } from "@/components/ui/button"
 import { XIcon } from "lucide-react"
 
+let lastDialogTrigger: HTMLElement | null = null
+
 function Dialog({
+  onOpenChange,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Root>) {
-  return <DialogPrimitive.Root data-slot="dialog" {...props} />
+  return (
+    <DialogPrimitive.Root
+      data-slot="dialog"
+      onOpenChange={(open) => {
+        if (open && document.activeElement instanceof HTMLElement) {
+          lastDialogTrigger = document.activeElement
+        }
+        onOpenChange?.(open)
+      }}
+      {...props}
+    />
+  )
 }
 
 function DialogTrigger({
+  onClick,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Trigger>) {
-  return <DialogPrimitive.Trigger data-slot="dialog-trigger" {...props} />
+  return (
+    <DialogPrimitive.Trigger
+      data-slot="dialog-trigger"
+      onClick={(event) => {
+        lastDialogTrigger = event.currentTarget
+        onClick?.(event)
+      }}
+      {...props}
+    />
+  )
 }
 
 function DialogPortal({
@@ -37,7 +61,7 @@ function DialogOverlay({
     <DialogPrimitive.Overlay
       data-slot="dialog-overlay"
       className={cn(
-        "fixed inset-0 isolate z-50 bg-black/55 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
+        "fixed inset-0 isolate z-50 bg-black/70 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0",
         className
       )}
       {...props}
@@ -49,6 +73,9 @@ function DialogContent({
   className,
   children,
   showCloseButton = true,
+  onOpenAutoFocus,
+  onCloseAutoFocus,
+  onEscapeKeyDown,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean
@@ -67,6 +94,45 @@ function DialogContent({
   const body = dialogChildren.filter(
     (child) => !["dialog-header", "dialog-footer"].includes(slotOf(child) ?? "")
   )
+  const focusDialog: NonNullable<
+    React.ComponentProps<typeof DialogPrimitive.Content>["onOpenAutoFocus"]
+  > = (event) => {
+    onOpenAutoFocus?.(event)
+    if (event.defaultPrevented) return
+    event.preventDefault()
+    const dialog = event.currentTarget as HTMLElement
+    if (document.activeElement instanceof HTMLElement && !dialog.contains(document.activeElement)) {
+      lastDialogTrigger = document.activeElement
+    }
+    const target =
+      dialog.querySelector<HTMLElement>("[autofocus]") ??
+      dialog.querySelector<HTMLElement>(
+        "[data-slot=dialog-body] button:not([data-slot=dialog-close]), [data-slot=dialog-body] input, [data-slot=dialog-body] select, [data-slot=dialog-body] textarea, [data-slot=dialog-body] [tabindex]:not([tabindex='-1'])"
+      ) ??
+      dialog.querySelector<HTMLElement>("[data-slot=dialog-close]")
+    target?.focus()
+  }
+  const handleEscapeKeyDown: NonNullable<
+    React.ComponentProps<typeof DialogPrimitive.Content>["onEscapeKeyDown"]
+  > = (event) => {
+    onEscapeKeyDown?.(event)
+    if (event.defaultPrevented) return
+    const dialog = event.currentTarget as HTMLElement | null
+    if (!showCloseButton && !dialog?.querySelector("[data-slot=dialog-close]")) {
+      event.preventDefault()
+    }
+  }
+  const restoreDialogFocus: NonNullable<
+    React.ComponentProps<typeof DialogPrimitive.Content>["onCloseAutoFocus"]
+  > = (event) => {
+    onCloseAutoFocus?.(event)
+    if (event.defaultPrevented) return
+    const trigger = lastDialogTrigger
+    if (!trigger?.isConnected) return
+    event.preventDefault()
+    requestAnimationFrame(() => trigger.focus())
+    lastDialogTrigger = null
+  }
 
   return (
     <DialogPortal>
@@ -77,10 +143,16 @@ function DialogContent({
           "fixed top-1/2 left-1/2 z-50 flex max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-lg -translate-x-1/2 -translate-y-1/2 flex-col gap-4 overflow-hidden rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-100 outline-none data-open:animate-in data-open:fade-in-0 data-open:zoom-in-95 data-closed:animate-out data-closed:fade-out-0 data-closed:zoom-out-95",
           className
         )}
+        onOpenAutoFocus={focusDialog}
+        onCloseAutoFocus={restoreDialogFocus}
+        onEscapeKeyDown={handleEscapeKeyDown}
         {...props}
       >
         {header}
-        <div data-slot="dialog-body" className="min-h-0 overflow-y-auto overscroll-contain pr-1">
+        <div
+          data-slot="dialog-body"
+          className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain pr-1"
+        >
           {body}
         </div>
         {footer}
@@ -106,7 +178,7 @@ function DialogHeader({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       data-slot="dialog-header"
-      className={cn("flex flex-col gap-2", className)}
+      className={cn("flex shrink-0 flex-col gap-2", className)}
       {...props}
     />
   )
@@ -124,14 +196,14 @@ function DialogFooter({
     <div
       data-slot="dialog-footer"
       className={cn(
-        "-mx-4 -mb-4 flex flex-col-reverse gap-2 rounded-b-xl border-t bg-muted/50 p-4 sm:flex-row sm:justify-end",
+        "-mx-4 -mb-4 flex shrink-0 flex-col-reverse gap-2 rounded-b-xl border-t bg-muted/50 p-4 sm:flex-row sm:justify-end",
         className
       )}
       {...props}
     >
       {children}
       {showCloseButton && (
-        <DialogPrimitive.Close asChild>
+        <DialogPrimitive.Close data-slot="dialog-close" asChild>
           <Button variant="outline">Close</Button>
         </DialogPrimitive.Close>
       )}

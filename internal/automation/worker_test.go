@@ -2,6 +2,8 @@ package automation
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +16,27 @@ import (
 	"testing"
 	"time"
 )
+
+func TestMeasuredUsagePointerPreservesKnownZero(t *testing.T) {
+	if value := measuredUsagePointer(0, false); value != nil {
+		t.Fatalf("unknown usage must remain nil, got %v", *value)
+	}
+	value := measuredUsagePointer(0, true)
+	if value == nil || *value != 0 {
+		t.Fatalf("known zero usage was not preserved: %v", value)
+	}
+}
+
+func TestReportedCLIUsagePreservesExplicitZeroClasses(t *testing.T) {
+	logs := []domain.RunLog{{Message: `{"type":"usage","usage":{"api_calls":1,"input_tokens":0,"output_tokens":4,"total_tokens":4}}`}}
+	report, ok := reportedCLIUsage(logs)
+	if !ok || report.InputTokens == nil || *report.InputTokens != 0 {
+		t.Fatalf("explicit zero input usage was lost: %#v, %v", report, ok)
+	}
+	if report.OutputTokens == nil || *report.OutputTokens != 4 {
+		t.Fatalf("output usage was not parsed: %#v", report)
+	}
+}
 
 func runGit(t *testing.T, directory string, args ...string) {
 	t.Helper()
@@ -83,13 +106,336 @@ func TestRunCommitExistsProvidesIdempotentDeliveryMarker(t *testing.T) {
 	runGit(t, source, "add", "delivery.txt")
 	runID := "0a8f7a12-9fa9-4ec7-a6ad-accepted"
 	runGit(t, source, "commit", "-m", "taskboard: accept run "+runID)
-	found, err := runCommitExists(context.Background(), source, runID)
+	commitSHA, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, err := runCommitExists(context.Background(), source, commitSHA)
 	if err != nil || !found {
 		t.Fatalf("delivery commit marker = %t, %v", found, err)
 	}
 	found, err = runCommitExists(context.Background(), source, "other-run")
 	if err != nil || found {
 		t.Fatalf("unrelated delivery marker = %t, %v", found, err)
+	}
+}
+
+func TestRunCommitExistsIgnoresMarkerOnUnrelatedRef(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "main")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "switch", "-c", "abandoned")
+	if err := os.WriteFile(filepath.Join(source, "abandoned.txt"), []byte("not accepted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "abandoned.txt")
+	runID := "unrelated-ref"
+	runGit(t, source, "commit", "-m", "taskboard: accept run "+runID)
+	unrelatedSHA, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "switch", "main")
+	found, err := runCommitExists(context.Background(), source, unrelatedSHA)
+	if err != nil || found {
+		t.Fatalf("commit on unrelated ref = %t, %v", found, err)
+	}
+}
+
+func TestSyncManagedCheckoutKeepsAcceptedAheadCommit(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, t.TempDir(), "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+	if err := os.WriteFile(filepath.Join(source, "accepted.txt"), []byte("accepted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "accepted.txt")
+	runGit(t, source, "commit", "-m", "taskboard: accept run first")
+	acceptedSHA, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := acceptedSHA
+	if err := syncManagedCheckout(context.Background(), source, "master", acceptedSHA); err != nil {
+		t.Fatalf("follow-up synchronization: %v", err)
+	}
+	actual, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
+	if err != nil || actual != expected {
+		t.Fatalf("accepted HEAD changed during synchronization: got %s want %s (%v)", actual, expected, err)
+	}
+}
+
+func TestSyncManagedCheckoutKeepsMultipleAcceptedAheadCommits(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, t.TempDir(), "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+
+	for _, change := range []struct {
+		name string
+		body string
+	}{
+		{"first.txt", "first\n"},
+		{"second.txt", "second\n"},
+	} {
+		if err := os.WriteFile(filepath.Join(source, change.name), []byte(change.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, source, "add", change.name)
+		runGit(t, source, "commit", "-m", "taskboard: accept run "+change.name)
+	}
+	acceptedSHAs, err := gitOutput(context.Background(), source, "log", "--format=%H", "origin/master..HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shas := strings.Split(strings.TrimSpace(acceptedSHAs), "\n")
+	if len(shas) != 2 {
+		t.Fatalf("accepted commits = %q", acceptedSHAs)
+	}
+	if err := syncManagedCheckout(context.Background(), source, "master", shas...); err != nil {
+		t.Fatalf("follow-up synchronization with two accepted commits: %v", err)
+	}
+	actual, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
+	if err != nil || actual != shas[0] {
+		t.Fatalf("accepted HEAD changed during repeated synchronization: got %s want %s (%v)", actual, shas[0], err)
+	}
+}
+
+func TestSyncManagedCheckoutReportsDirtyFilesWithoutChangingThem(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "tracked.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	if err := os.WriteFile(filepath.Join(source, "tracked.txt"), []byte("manual\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := syncManagedCheckout(context.Background(), source, "master")
+	if err == nil || !strings.Contains(err.Error(), "tracked.txt") || !strings.Contains(err.Error(), "nichts zurückgesetzt") {
+		t.Fatalf("dirty checkout diagnosis = %v", err)
+	}
+	contents, readErr := os.ReadFile(filepath.Join(source, "tracked.txt"))
+	if readErr != nil || string(contents) != "manual\n" {
+		t.Fatalf("manual change was altered: %q, %v", contents, readErr)
+	}
+}
+
+func TestSyncManagedCheckoutBlocksUnacceptedLocalCommit(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, t.TempDir(), "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+	if err := os.WriteFile(filepath.Join(source, "manual.txt"), []byte("manual\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "manual.txt")
+	// A subject is forgeable; only a commit SHA recorded by MarkRunApplied is
+	// trusted. This must remain blocked even when the subject looks official.
+	runGit(t, source, "commit", "-m", "taskboard: accept run forged-by-hand")
+	err := syncManagedCheckout(context.Background(), source, "master")
+	if err == nil || !strings.Contains(err.Error(), "nicht als akzeptierte Delivery verifiziert") || !strings.Contains(err.Error(), "manual.txt") {
+		t.Fatalf("unaccepted local commit diagnosis = %v", err)
+	}
+}
+
+func TestApplyRunPatchAcceptsTwoSequentialRunWorktrees(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+
+	for index, change := range []struct {
+		name string
+		body string
+	}{
+		{"first.txt", "first\n"},
+		{"second.txt", "second\n"},
+	} {
+		runID := fmt.Sprintf("follow-up-%d", index+1)
+		worktree := filepath.Join(t.TempDir(), runID)
+		runGit(t, source, "worktree", "add", worktree, "HEAD")
+		if err := os.WriteFile(filepath.Join(worktree, change.name), []byte(change.body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, worktree, "add", change.name)
+		// Keep the run worktree uncommitted: Apply consumes its reviewable diff.
+		if _, err := applyRunPatch(context.Background(), source, worktree, runID); err != nil {
+			t.Fatalf("apply %s: %v", runID, err)
+		}
+		if err := removeRunWorktree(context.Background(), runID, source, worktree); err != nil {
+			t.Fatalf("cleanup %s: %v", runID, err)
+		}
+	}
+	for _, name := range []string{"first.txt", "second.txt"} {
+		if _, err := os.Stat(filepath.Join(source, name)); err != nil {
+			t.Fatalf("sequential delivery did not retain %s: %v", name, err)
+		}
+	}
+	commits, err := gitOutput(context.Background(), source, "log", "--format=%s", "-2")
+	if err != nil || !strings.Contains(commits, "taskboard: accept run follow-up-1") || !strings.Contains(commits, "taskboard: accept run follow-up-2") {
+		t.Fatalf("sequential delivery audit commits = %q, %v", commits, err)
+	}
+}
+
+func TestFindUnpersistedRunCommitRequiresExactRunDiff(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	worktree := filepath.Join(t.TempDir(), "recovery")
+	runGit(t, source, "worktree", "add", worktree, "HEAD")
+	if err := os.WriteFile(filepath.Join(worktree, "delivery.txt"), []byte("delivery\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, worktree, "add", "delivery.txt")
+	if _, err := applyRunPatch(context.Background(), source, worktree, "recoverable-run"); err != nil {
+		t.Fatalf("apply delivery: %v", err)
+	}
+	found, err := findUnpersistedRunCommit(context.Background(), source, worktree, "recoverable-run")
+	if err != nil || found == "" {
+		t.Fatalf("matching unpersisted commit = %q, %v", found, err)
+	}
+	if err := removeRunWorktree(context.Background(), "recoverable-run", source, worktree); err != nil {
+		t.Fatalf("cleanup recovery worktree: %v", err)
+	}
+
+	// A forgeable subject with a different patch must not be accepted as the
+	// recovery marker for this run.
+	worktree = filepath.Join(t.TempDir(), "forged")
+	runGit(t, source, "worktree", "add", worktree, "HEAD")
+	if err := os.WriteFile(filepath.Join(worktree, "different.txt"), []byte("different\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, worktree, "add", "different.txt")
+	runGit(t, source, "-c", "user.name=Taskboard", "-c", "user.email=taskboard@local", "commit", "--allow-empty", "-m", "taskboard: accept run forged-run")
+	found, err = findUnpersistedRunCommit(context.Background(), source, worktree, "forged-run")
+	if err != nil || found != "" {
+		t.Fatalf("forged subject was accepted: %q, %v", found, err)
+	}
+	if err := removeRunWorktree(context.Background(), "forged-run", source, worktree); err != nil {
+		t.Fatalf("cleanup forged worktree: %v", err)
+	}
+}
+
+func TestApplyRunPatchReportsThreeWayConflictAndPreservesDiff(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	file := filepath.Join(source, "shared.txt")
+	if err := os.WriteFile(file, []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "shared.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	worktree := filepath.Join(t.TempDir(), "conflict")
+	runGit(t, source, "worktree", "add", worktree, "HEAD")
+	if err := os.WriteFile(filepath.Join(worktree, "shared.txt"), []byte("run change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Advance the managed checkout independently on the same hunk.
+	if err := os.WriteFile(file, []byte("manual change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "shared.txt")
+	runGit(t, source, "commit", "-m", "unrelated accepted change")
+
+	err := func() error {
+		_, applyErr := applyRunPatch(context.Background(), source, worktree, "conflicting-run")
+		return applyErr
+	}()
+	if err == nil || !strings.Contains(err.Error(), "Drei-Wege-Konflikt") || !strings.Contains(err.Error(), "shared.txt") {
+		t.Fatalf("conflict diagnosis = %v", err)
+	}
+	contents, readErr := os.ReadFile(file)
+	if readErr != nil || string(contents) != "manual change\n" {
+		t.Fatalf("conflict altered managed checkout: %q, %v", contents, readErr)
+	}
+	if err := removeRunWorktree(context.Background(), "conflicting-run", source, worktree); err != nil {
+		t.Fatalf("conflict cleanup: %v", err)
+	}
+}
+
+func TestApplyRunPatchBlocksDirtyCheckoutWithoutChangingIt(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	file := filepath.Join(source, "manual.txt")
+	if err := os.WriteFile(file, []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "manual.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	worktree := filepath.Join(t.TempDir(), "dirty-run")
+	runGit(t, source, "worktree", "add", worktree, "HEAD")
+	if err := os.WriteFile(filepath.Join(worktree, "delivery.txt"), []byte("delivery\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("manual edit\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := func() error {
+		_, applyErr := applyRunPatch(context.Background(), source, worktree, "dirty-run")
+		return applyErr
+	}()
+	if err == nil || !strings.Contains(err.Error(), "manual.txt") || !strings.Contains(err.Error(), "nichts zurückgesetzt") {
+		t.Fatalf("dirty diagnosis = %v", err)
+	}
+	contents, readErr := os.ReadFile(file)
+	if readErr != nil || string(contents) != "manual edit\n" {
+		t.Fatalf("dirty checkout was altered: %q, %v", contents, readErr)
+	}
+	if err := removeRunWorktree(context.Background(), "dirty-run", source, worktree); err != nil {
+		t.Fatalf("dirty cleanup: %v", err)
 	}
 }
 
@@ -218,6 +564,107 @@ func TestRequestedInteractionsParsesButtons(t *testing.T) {
 	}
 }
 
+func TestRequestedSelfReviewAcceptsPassedStructuredReview(t *testing.T) {
+	logs := []domain.RunLog{{Message: "```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"Scope/Akzeptanz\",\"result\":\"ok\"},{\"check\":\"Diff/Secrets\",\"result\":\"ok\"},{\"check\":\"Tests/Fehler\",\"result\":\"ok\"},{\"check\":\"Sicherheits-/Betriebsrisiken\",\"result\":\"ok\"},{\"check\":\"Rückwärtskompatibilität\",\"result\":\"ok\"}],\"tests\":\"go test ./...\",\"open_risks\":\"none\"}\n```"}}
+	if review, err := requestedSelfReview(logs); err != nil || review.Status != "passed" {
+		t.Fatalf("passed self-review rejected: %#v, %v", review, err)
+	}
+}
+
+func TestRequestedSelfReviewRejectsMissingFailedAndIncompleteReviews(t *testing.T) {
+	cases := []string{
+		"",
+		"```taskboard-self-review\n{\"status\":\"failed\",\"checklist\":[],\"tests\":\"x\",\"open_risks\":\"x\"}\n```",
+		"```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[],\"tests\":\"x\",\"open_risks\":\"x\"}\n```",
+	}
+	for _, message := range cases {
+		if _, err := requestedSelfReview([]domain.RunLog{{Message: message}}); err == nil {
+			t.Fatalf("invalid self-review accepted: %q", message)
+		}
+	}
+}
+
+func TestRequestedSelfReviewRejectsUnknownOrDuplicateCategories(t *testing.T) {
+	base := `{"status":"passed","checklist":[{"check":"Scope/Akzeptanz","result":"ok"},{"check":"Diff/Secrets","result":"ok"},{"check":"Tests/Fehler","result":"ok"},{"check":"Sicherheits-/Betriebsrisiken","result":"ok"},{"check":"Rückwärtskompatibilität","result":"ok"}],"tests":"go test ./...","open_risks":"none"}`
+	unknown := strings.Replace(base, "Rückwärtskompatibilität", "Unbekannte Kategorie", 1)
+	duplicate := strings.Replace(base, "Rückwärtskompatibilität", "Scope/Akzeptanz", 1)
+	for _, raw := range []string{unknown, duplicate} {
+		if _, err := requestedSelfReview([]domain.RunLog{{Message: "```taskboard-self-review\n" + raw + "\n```"}}); err == nil {
+			t.Fatalf("invalid checklist categories accepted: %s", raw)
+		}
+	}
+}
+
+func TestRequestedSelfReviewRejectsFailedChecklistResult(t *testing.T) {
+	raw := `{"status":"passed","checklist":[{"check":"Scope/Akzeptanz","result":"ok"},{"check":"Diff/Secrets","result":"failed"},{"check":"Tests/Fehler","result":"ok"},{"check":"Sicherheits-/Betriebsrisiken","result":"ok"},{"check":"Rückwärtskompatibilität","result":"ok"}],"tests":"go test ./...","open_risks":"none"}`
+	if _, err := requestedSelfReview([]domain.RunLog{{Message: "```taskboard-self-review\n" + raw + "\n```"}}); err == nil {
+		t.Fatal("self-review with a failed checklist result must be rejected")
+	}
+}
+
+func TestRequestedSelfReviewRejectsUnconfirmedChecklistResult(t *testing.T) {
+	raw := `{"status":"passed","checklist":[{"check":"Scope/Akzeptanz","result":"maybe"},{"check":"Diff/Secrets","result":"ok"},{"check":"Tests/Fehler","result":"ok"},{"check":"Sicherheits-/Betriebsrisiken","result":"ok"},{"check":"Rückwärtskompatibilität","result":"ok"}],"tests":"go test","open_risks":"none"}`
+	if _, err := requestedSelfReview([]domain.RunLog{{Message: "```taskboard-self-review\n" + raw + "\n```"}}); err == nil {
+		t.Fatal("self-review with an unconfirmed checklist result must be rejected")
+	}
+}
+
+func TestNonCodexDeliveryUsesOnlyStructuredCompletionChannel(t *testing.T) {
+	terminal := []domain.RunLog{{Message: "```taskboard-self-review\n{\"status\":\"passed\"}\n```"}}
+	if _, err := requestedSelfReview(controlLogsForAgent("Delivery Agent", terminal, "")); err == nil {
+		t.Fatal("non-Codex terminal output must not satisfy the delivery self-review gate")
+	}
+	structured := "```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"Scope/Akzeptanz\",\"result\":\"ok\"},{\"check\":\"Diff/Secrets\",\"result\":\"ok\"},{\"check\":\"Tests/Fehler\",\"result\":\"ok\"},{\"check\":\"Sicherheits-/Betriebsrisiken\",\"result\":\"ok\"},{\"check\":\"Rückwärtskompatibilität\",\"result\":\"ok\"}],\"tests\":\"go test\",\"open_risks\":\"none\"}\n```"
+	if _, err := requestedSelfReview(controlLogsForAgent("Delivery Agent", terminal, structured)); err != nil {
+		t.Fatalf("structured completion output should satisfy the parser path: %v", err)
+	}
+}
+
+func TestCodexSelfReviewUsesOnlyTheStructuredCompletionChannel(t *testing.T) {
+	terminal := []domain.RunLog{{Message: "```taskboard-self-review\n{\"status\":\"passed\"}\n```"}}
+	if _, err := requestedSelfReview(structuredControlLogs("codex", terminal, "")); err == nil {
+		t.Fatal("terminal output must not satisfy the Codex self-review gate")
+	}
+	if _, err := requestedSelfReview(structuredControlLogs("codex", terminal, string(terminal[0].Message))); err == nil {
+		t.Fatal("malformed structured completion must remain rejected")
+	}
+}
+
+func TestSelfReviewGateFailsClosedWhenRunLogsCannotBeRead(t *testing.T) {
+	if err := validateSelfReview("Delivery Agent", nil, errors.New("store unavailable")); err == nil {
+		t.Fatal("delivery self-review must fail closed when run logs are unreadable")
+	}
+	if err := validateSelfReview("Triage Agent", nil, errors.New("store unavailable")); err != nil {
+		t.Fatalf("triage must remain compatible with the self-review gate: %v", err)
+	}
+}
+
+func TestAutomationEventNoopOnlySuppressesUnchangedReviewReturns(t *testing.T) {
+	if !automationEventIsNoop(domain.AutomationEvent{Payload: []byte(`{"qa_return":true,"change_available":false}`)}) {
+		t.Fatal("unchanged QA/review return must be a terminal no-op")
+	}
+	for _, event := range []domain.AutomationEvent{
+		{Payload: []byte(`{"qa_return":true,"change_available":true}`)},
+		{Payload: []byte(`{"qa_return":false,"change_available":false}`)},
+		{Payload: []byte(`not-json`)},
+	} {
+		if automationEventIsNoop(event) {
+			t.Fatalf("event must remain processable: %s", event.Payload)
+		}
+	}
+}
+
+func TestMaxAutomationEventAttemptsDefaultsToThreeAndIsConfigurable(t *testing.T) {
+	t.Setenv("SHIPYARD_MAX_AUTOMATION_EVENT_ATTEMPTS", "")
+	if got := maxAutomationEventAttempts(); got != 3 {
+		t.Fatalf("default attempts = %d, want 3", got)
+	}
+	t.Setenv("SHIPYARD_MAX_AUTOMATION_EVENT_ATTEMPTS", "7")
+	if got := maxAutomationEventAttempts(); got != 7 {
+		t.Fatalf("configured attempts = %d, want 7", got)
+	}
+}
+
 func TestRequestedTriageControlsAcceptOneBoundedRequest(t *testing.T) {
 	logs := []domain.RunLog{{Message: "```taskboard-update\n{\"title\":\"Klarer Titel\",\"description\":\"Konkrete Anforderungen\"}\n```\n```taskboard-targets\n{\"project_ids\":[\"project-1\"],\"group_ids\":[]}\n```"}}
 	update, ok := requestedTaskUpdate(logs)
@@ -317,6 +764,33 @@ func TestFormatAllowedTransitionsUsesIDsAndDisplayLabels(t *testing.T) {
 	}
 }
 
+func TestFormatRegisteredProjectsSeparatesUUIDFromRepositoryURL(t *testing.T) {
+	got := formatRegisteredProjects([]domain.Project{
+		{ID: "123e4567-e89b-12d3-a456-426614174000", Name: "Shipyard", RepositoryURL: "https://github.com/example/shipyard.git", DefaultBranch: "master", Boards: []domain.Board{{ID: "board-1", Name: "Shipyard"}}},
+	})
+	for _, expected := range []string{"\"project_id\":\"123e4567-e89b-12d3-a456-426614174000\"", "\"repository_url\":\"https://github.com/example/shipyard.git\"", "\"boards\":[{\"id\":\"board-1\",\"name\":\"Shipyard\"}]", "ausschließlich project_id-Werte"} {
+		if !strings.Contains(got, expected) {
+			t.Fatalf("registered project context missing %q: %s", expected, got)
+		}
+	}
+}
+
+func TestRequestedRouteCurrentColumnIsSilentNoOp(t *testing.T) {
+	task := domain.Task{ColumnID: "development-id", ColumnName: "Entwicklung"}
+	if !requestedRouteIsCurrent(task, transitionRequest{TargetColumnID: task.ColumnID}) || !requestedRouteIsCurrent(task, transitionRequest{Target: task.ColumnName}) {
+		t.Fatal("current column was not recognized")
+	}
+	if !requestedRouteIsCurrentAfterLiveReload(task, transitionRequest{TargetColumnID: task.ColumnID}, true) {
+		t.Fatal("verified live status was not recognized")
+	}
+	if requestedRouteIsCurrentAfterLiveReload(task, transitionRequest{TargetColumnID: task.ColumnID}, false) {
+		t.Fatal("unverified status must not suppress a transition")
+	}
+	if requestedRouteIsCurrent(task, transitionRequest{TargetColumnID: "review-id"}) {
+		t.Fatal("different target was treated as self-transition")
+	}
+}
+
 func TestRequestedTransitionIsUnambiguous(t *testing.T) {
 	logs := []domain.RunLog{{Message: "```taskboard-transition\n{\"target\":\"In Progress\",\"comment\":\"Bitte Schnittstelle nachziehen.\"}\n```"}}
 	route, ok := requestedTransition(logs)
@@ -391,6 +865,22 @@ func TestReportedCLITokenUsageUsesCodexSummaryInsteadOfTerminalBytes(t *testing.
 	}
 	if _, ok := reportedCLITokenUsage([]domain.RunLog{{Message: "terminal byte count 400000"}}); ok {
 		t.Fatal("terminal output without a Codex summary must not be treated as tokens")
+	}
+}
+
+func TestReportedCLIUsageReadsMachineReadableBreakdownAndNativeCost(t *testing.T) {
+	logs := []domain.RunLog{{Message: `{"type":"usage","usage":{"api_calls":2,"input_tokens":100,"output_tokens":25,"cached_input_tokens":40,"cache_write_tokens":5,"reasoning_tokens":10,"total_tokens":125,"cost_microusd":321,"service_tier":"flex"}}`}}
+	report, ok := reportedCLIUsage(logs)
+	if !ok || report.APICalls == nil || *report.APICalls != 2 || report.InputTokens == nil || *report.InputTokens != 100 || report.CachedInputTokens == nil || *report.CachedInputTokens != 40 || report.NativeCostMicrousd == nil || *report.NativeCostMicrousd != 321 || report.ServiceTier != "flex" {
+		t.Fatalf("report = %#v, %t; want complete machine-readable usage", report, ok)
+	}
+}
+
+func TestReportedCLIUsageKeepsIncompleteMachineReadableUsage(t *testing.T) {
+	logs := []domain.RunLog{{Message: `{"usage":{"input_tokens":17,"output_tokens":null}}`}}
+	report, ok := reportedCLIUsage(logs)
+	if !ok || report.InputTokens == nil || *report.InputTokens != 17 || report.OutputTokens != nil {
+		t.Fatalf("report = %#v, %t; want null output tokens and known input tokens", report, ok)
 	}
 }
 

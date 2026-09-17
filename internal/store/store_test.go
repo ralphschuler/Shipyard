@@ -2,6 +2,7 @@ package store
 
 import (
 	"reflect"
+	"strings"
 	"taskboard/internal/domain"
 	"testing"
 )
@@ -83,6 +84,37 @@ func TestPersonalDevelopmentTemplateDefinesRecoveryPaths(t *testing.T) {
 	for _, required := range []string{"Frontend", "Backend", "Infrastruktur", "Sonstiges"} {
 		if !labels[required] {
 			t.Fatalf("personal template is missing label %q", required)
+		}
+	}
+}
+
+func TestCanonicalUUIDRejectsRepositoryURL(t *testing.T) {
+	if canonicalUUID.MatchString("https://github.com/example/shipyard.git") {
+		t.Fatal("repository URL must not be accepted as a project UUID")
+	}
+	if !canonicalUUID.MatchString("123e4567-e89b-12d3-a456-426614174000") {
+		t.Fatal("canonical UUID example must be accepted")
+	}
+}
+
+func TestNormalizeTargetIDsTrimsValidUUIDs(t *testing.T) {
+	got, err := normalizeTargetIDs("project", []string{" 123e4567-e89b-12d3-a456-426614174000 "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "123e4567-e89b-12d3-a456-426614174000" {
+		t.Fatalf("normalized IDs = %#v", got)
+	}
+}
+
+func TestNormalizeTargetIDsRejectsRepositoryURLWithFormatDiagnostic(t *testing.T) {
+	_, err := normalizeTargetIDs("project", []string{"https://github.com/example/shipyard.git"})
+	if err == nil {
+		t.Fatal("expected repository URL to be rejected")
+	}
+	for _, expected := range []string{"ungültige project-ID", "kanonische UUID", "keine Repository-URL"} {
+		if !strings.Contains(err.Error(), expected) {
+			t.Fatalf("error %q does not contain %q", err, expected)
 		}
 	}
 }

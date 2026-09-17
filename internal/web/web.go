@@ -73,6 +73,11 @@ type taskPage struct {
 	Changes        []taskChangeView
 }
 
+type usagePricesPage struct {
+	Prices []domain.UsagePrice
+	Error  string
+}
+
 // taskChangeView deliberately excludes prompt and workspace snapshots: those
 // fields can contain provider details or environment values.
 type taskChangeView struct {
@@ -83,6 +88,7 @@ type taskChangeView struct {
 
 type taskRunView struct {
 	ID, TaskID, AgentID, Status, Summary, ErrorMessage string
+	Queue                                              domain.RunQueueStatus
 	StartedAt, FinishedAt                              *time.Time
 	CreatedAt                                          time.Time
 }
@@ -192,9 +198,11 @@ type ruleView struct {
 type columnOption struct{ ID, Label, BoardID string }
 type runPage struct {
 	Run      domain.AgentRun
+	Queue    domain.RunQueueStatus
 	Logs     runLogView
 	Task     domain.Task
 	Delivery domain.RunDelivery
+	Usage    domain.UsageReport
 }
 type integrationsPage struct {
 	Connections []domain.IntegrationConnection
@@ -325,7 +333,14 @@ func webTemplateFunctions() template.FuncMap {
 			}
 		}
 		return out
-	}, "auditAction": auditAction, "auditStatus": auditStatus, "auditStatusClass": auditStatusClass, "runStatus": runStatusLabel, "gateStatus": gateStatusLabel, "excerpt": excerpt, "taskCount": func(count int) string {
+	}, "hasAgent": func(id string, assigned []string) bool {
+		for _, assignedID := range assigned {
+			if id == assignedID {
+				return true
+			}
+		}
+		return false
+	}, "tr": translate, "auditAction": auditAction, "auditStatus": auditStatus, "auditStatusClass": auditStatusClass, "runStatus": runStatusLabel, "gateStatus": gateStatusLabel, "excerpt": excerpt, "taskCount": func(count int) string {
 		if count == 1 {
 			return "1 Aufgabe"
 		}
@@ -380,7 +395,20 @@ func webTemplateFunctions() template.FuncMap {
 		}
 		return string(runes[:limit]) + " …"
 	}, "usd": func(micros int64) string {
+		if micros == 0 {
+			return "nicht bestimmbar"
+		}
 		return fmt.Sprintf("$%.2f", float64(micros)/1_000_000)
+	}, "int64ptr": func(value *int64) any {
+		if value == nil {
+			return "unbekannt"
+		}
+		return *value
+	}, "deref": func(value *int64) int64 {
+		if value == nil {
+			return 0
+		}
+		return *value
 	}, "costPct": func(value, max int64) int {
 		if max < 1 {
 			return 0
@@ -483,6 +511,7 @@ func (a *App) Register(m *http.ServeMux) {
 		w.Header().Set("Cache-Control", "no-store")
 		http.FileServerFS(files).ServeHTTP(w, r)
 	}))
+	m.HandleFunc("GET /api/i18n", a.i18nAPI)
 	m.HandleFunc("GET /events", a.events)
 	m.HandleFunc("GET /api/v1/dashboard", a.dashboardAPI)
 	m.HandleFunc("GET /api/v1/boards", a.boardsAPI)
@@ -505,6 +534,8 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("GET /api/v1/runs", a.runsAPI)
 	m.HandleFunc("GET /api/v1/audit", a.auditAPI)
 	m.HandleFunc("GET /api/v1/settings/providers", a.providersAPI)
+	m.HandleFunc("GET /api/v1/settings/secrets", a.secretsAPI)
+	m.HandleFunc("POST /api/v1/settings/secrets", a.createSecretAPI)
 	m.HandleFunc("GET /api/v1/settings/agent-policy", a.agentPolicyAPI)
 	m.HandleFunc("GET /api/v1/settings/appearance", a.appearanceAPI)
 	m.HandleFunc("GET /api/v1/settings/integrations", a.integrationsAPI)
@@ -559,6 +590,16 @@ func (a *App) Register(m *http.ServeMux) {
 		http.Redirect(w, r, "/settings/providers", http.StatusSeeOther)
 	})
 	m.HandleFunc("GET /settings/providers", a.providerSettings)
+	m.HandleFunc("GET /settings/secrets", a.secrets)
+	m.HandleFunc("POST /settings/secrets", a.createSecret)
+	m.HandleFunc("POST /settings/secrets/{id}/replace", a.replaceSecret)
+	m.HandleFunc("POST /settings/secrets/{id}/revoke", a.revokeSecret)
+	m.HandleFunc("POST /settings/secrets/{id}/delete", a.deleteSecret)
+	m.HandleFunc("POST /settings/secrets/{id}/agents", a.assignSecretAgents)
+	m.HandleFunc("GET /settings/prices", a.usagePrices)
+	m.HandleFunc("POST /settings/prices", a.saveUsagePrice)
+	m.HandleFunc("POST /settings/prices/{id}", a.updateUsagePrice)
+	m.HandleFunc("POST /settings/prices/{id}/delete", a.deleteUsagePrice)
 	m.HandleFunc("GET /settings/agent-policy", a.agentPolicy)
 	m.HandleFunc("POST /settings/agent-policy", a.saveAgentPolicy)
 	m.HandleFunc("GET /settings/appearance", a.appearance)
@@ -677,7 +718,7 @@ func (a *App) skills(w http.ResponseWriter, r *http.Request) {
 			catalogError = "Der skills.sh-Katalog ist gerade nicht erreichbar. Bitte erneut versuchen."
 		}
 	}
-	a.render(w, "skills.html", map[string]any{"Installed": installed, "Catalog": catalog, "Query": query, "CatalogError": catalogError})
+	a.render(r, w, "skills.html", map[string]any{"Installed": installed, "Catalog": catalog, "Query": query, "CatalogError": catalogError})
 }
 func (a *App) installSkillsSH(w http.ResponseWriter, r *http.Request) {
 	if e := skillcatalog.InstallSkillsSH(r.Context(), a.store, r.FormValue("source"), r.FormValue("slug")); e != nil {
@@ -757,7 +798,7 @@ func (a *App) agents(w http.ResponseWriter, r *http.Request) {
 		}
 		views = append(views, agentView{Agent: agent, Skills: assigned})
 	}
-	a.render(w, "agents.html", map[string]any{"Agents": views, "Skills": skills})
+	a.render(r, w, "agents.html", map[string]any{"Agents": views, "Skills": skills})
 }
 func (a *App) createAgent(w http.ResponseWriter, r *http.Request) {
 	if e := r.ParseForm(); e != nil {
@@ -831,7 +872,7 @@ func validateAgentWorkspace(raw string) error {
 }
 func (a *App) deleteAgent(w http.ResponseWriter, r *http.Request) {
 	if e := a.store.DeleteAgent(r.Context(), r.PathValue("id")); e != nil {
-		http.Error(w, "Agent kann wegen vorhandener Run-Historie nicht gelöscht werden. Deaktiviere ihn stattdessen.", 409)
+		http.Error(w, "Agent konnte nicht ausgemustert werden: "+e.Error(), 409)
 		return
 	}
 	http.Redirect(w, r, "/agents", 303)
@@ -887,7 +928,7 @@ func (a *App) automations(w http.ResponseWriter, r *http.Request) {
 	for _, rule := range rules {
 		views = append(views, ruleView{AutomationRule: rule, BoardName: boardNames[rule.BoardID], ColumnName: columnNames[rule.TargetColumnID], LabelName: labelNames[rule.LabelID], AgentName: agentNames[rule.AgentID], SuccessColumnName: columnNames[rule.SuccessColumnID], FailureColumnName: columnNames[rule.FailureColumnID]})
 	}
-	a.render(w, "automations.html", map[string]any{"Rules": views, "Boards": boards, "Agents": agents, "Columns": options, "Labels": labels})
+	a.render(r, w, "automations.html", map[string]any{"Rules": views, "Boards": boards, "Agents": agents, "Columns": options, "Labels": labels})
 }
 func (a *App) automationPreview(w http.ResponseWriter, r *http.Request) {
 	boardID, columnID := strings.TrimSpace(r.URL.Query().Get("board_id")), strings.TrimSpace(r.URL.Query().Get("target_column_id"))
@@ -991,7 +1032,7 @@ func (a *App) schedules(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	a.render(w, "schedules.html", map[string]any{"Boards": boards, "Agents": agents, "Schedules": schedules})
+	a.render(r, w, "schedules.html", map[string]any{"Boards": boards, "Agents": agents, "Schedules": schedules})
 }
 func (a *App) createSchedule(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(r.FormValue("agent_id")) == "" {
@@ -1024,7 +1065,7 @@ func (a *App) webhooks(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	a.render(w, "webhooks.html", map[string]any{"Webhooks": hooks})
+	a.render(r, w, "webhooks.html", map[string]any{"Webhooks": hooks})
 }
 func (a *App) addWebhook(w http.ResponseWriter, r *http.Request) {
 	if err := validate.WebhookURL(r.FormValue("url")); err != nil {
@@ -1052,7 +1093,7 @@ func (a *App) setWebhookEnabled(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/webhooks", http.StatusSeeOther)
 }
 func (a *App) agentTemplates(w http.ResponseWriter, r *http.Request) {
-	a.render(w, "agent-templates.html", nil)
+	a.render(r, w, "agent-templates.html", nil)
 }
 func (a *App) createTemplateAgent(w http.ResponseWriter, r *http.Request) {
 	kind := r.FormValue("kind")
@@ -1079,7 +1120,134 @@ func (a *App) providerSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	a.render(w, "providers.html", map[string]any{"Providers": p})
+	a.render(r, w, "providers.html", map[string]any{"Providers": p})
+}
+
+func canManageSecrets(u domain.User) bool { return u.Role == "owner" || u.Role == "admin" }
+func (a *App) secrets(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok {
+		http.Redirect(w, r, "/login", 303)
+		return
+	}
+	if !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	items, err := a.store.Secrets(r.Context())
+	if err != nil {
+		http.Error(w, "secrets unavailable", 500)
+		return
+	}
+	agents, err := a.store.Agents(r.Context())
+	if err != nil {
+		http.Error(w, "agents unavailable", 500)
+		return
+	}
+	a.render(r, w, "secrets.html", map[string]any{"Secrets": items, "Agents": agents})
+}
+func (a *App) secretsAPI(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok {
+		http.Error(w, "not authenticated", 401)
+		return
+	}
+	if !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	items, err := a.store.Secrets(r.Context())
+	if err != nil {
+		http.Error(w, "secrets unavailable", 500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(items)
+}
+func (a *App) createSecretAPI(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok {
+		http.Error(w, "not authenticated", 401)
+		return
+	}
+	if !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	var input struct{ Name, Description, EnvName, Value string }
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&input); err != nil {
+		http.Error(w, "invalid request", 400)
+		return
+	}
+	secret, err := a.store.CreateSecret(r.Context(), u.ID, input.Name, input.Description, input.EnvName, input.Value)
+	if err != nil {
+		http.Error(w, "secret could not be saved", 400)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(secret)
+}
+func (a *App) createSecret(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok || !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	_, err := a.store.CreateSecret(r.Context(), u.ID, r.FormValue("name"), r.FormValue("description"), r.FormValue("env_name"), r.FormValue("value"))
+	if err != nil {
+		http.Error(w, "secret could not be saved", 400)
+		return
+	}
+	http.Redirect(w, r, "/settings/secrets", 303)
+}
+func (a *App) replaceSecret(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok || !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	if err := a.store.ReplaceSecret(r.Context(), u.ID, r.PathValue("id"), r.FormValue("value")); err != nil {
+		http.Error(w, "secret could not be replaced", 400)
+		return
+	}
+	http.Redirect(w, r, "/settings/secrets", 303)
+}
+func (a *App) revokeSecret(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok || !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	if err := a.store.RevokeSecret(r.Context(), u.ID, r.PathValue("id")); err != nil {
+		http.Error(w, "secret could not be revoked", 400)
+		return
+	}
+	http.Redirect(w, r, "/settings/secrets", 303)
+}
+func (a *App) deleteSecret(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok || !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	if err := a.store.DeleteSecret(r.Context(), u.ID, r.PathValue("id")); err != nil {
+		http.Error(w, "secret could not be deleted", 400)
+		return
+	}
+	http.Redirect(w, r, "/settings/secrets", 303)
+}
+func (a *App) assignSecretAgents(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok || !canManageSecrets(u) {
+		http.Error(w, "forbidden", 403)
+		return
+	}
+	if err := a.store.SetSecretAgents(r.Context(), u.ID, r.PathValue("id"), r.Form["agent_id"]); err != nil {
+		http.Error(w, "secret assignment could not be saved", 400)
+		return
+	}
+	http.Redirect(w, r, "/settings/secrets", 303)
 }
 func (a *App) agentPolicy(w http.ResponseWriter, r *http.Request) {
 	prefix, suffix, err := a.store.AgentPromptPolicy(r.Context())
@@ -1087,7 +1255,7 @@ func (a *App) agentPolicy(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	a.render(w, "agent-policy.html", agentPolicyPage{Prefix: prefix, Suffix: suffix})
+	a.render(r, w, "agent-policy.html", agentPolicyPage{Prefix: prefix, Suffix: suffix})
 }
 func (a *App) saveAgentPolicy(w http.ResponseWriter, r *http.Request) {
 	if err := a.store.UpdateAgentPromptPolicy(r.Context(), r.FormValue("prompt_prefix"), r.FormValue("prompt_suffix")); err != nil {
@@ -1107,7 +1275,7 @@ func (a *App) appearance(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	a.render(w, "appearance.html", appearancePage{Preferences: prefs})
+	a.render(r, w, "appearance.html", appearancePage{Preferences: prefs})
 }
 func (a *App) saveAppearance(w http.ResponseWriter, r *http.Request) {
 	user, ok := currentUser(r.Context())
@@ -1129,13 +1297,13 @@ func (a *App) saveAppearance(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: "shipyard_theme", Value: theme, Path: "/", MaxAge: 31536000, Secure: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "shipyard_theme", Value: theme, Path: "/", MaxAge: 31536000, Secure: secureCookie(r), SameSite: http.SameSiteLaxMode})
 	hintValue := "false"
 	if hints {
 		hintValue = "true"
 	}
-	http.SetCookie(w, &http.Cookie{Name: "shipyard_shortcut_hints", Value: hintValue, Path: "/", MaxAge: 31536000, Secure: true, SameSite: http.SameSiteLaxMode})
-	http.SetCookie(w, &http.Cookie{Name: "shipyard_language", Value: language, Path: "/", MaxAge: 31536000, Secure: true, SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "shipyard_shortcut_hints", Value: hintValue, Path: "/", MaxAge: 31536000, Secure: secureCookie(r), SameSite: http.SameSiteLaxMode})
+	http.SetCookie(w, &http.Cookie{Name: "shipyard_language", Value: language, Path: "/", MaxAge: 31536000, Secure: secureCookie(r), SameSite: http.SameSiteLaxMode})
 	http.Redirect(w, r, "/settings/appearance", http.StatusSeeOther)
 }
 func (a *App) saveProvider(w http.ResponseWriter, r *http.Request) {
@@ -1151,8 +1319,109 @@ func (a *App) saveProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, "/settings/providers", 303)
 }
+
+func parseMicrousd(value string) (*int64, error) {
+	if strings.TrimSpace(value) == "" {
+		return nil, nil
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+	if err != nil || n < 0 {
+		return nil, errors.New("Preis muss eine positive Ganzzahl in Micro-USD pro Million sein")
+	}
+	return &n, nil
+}
+
+func (a *App) usagePrices(w http.ResponseWriter, r *http.Request) {
+	prices, err := a.store.UsagePrices(r.Context())
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	a.render(r, w, "prices.html", usagePricesPage{Prices: prices})
+}
+
+func (a *App) saveUsagePrice(w http.ResponseWriter, r *http.Request) {
+	a.persistUsagePrice(w, r, "")
+}
+
+func (a *App) updateUsagePrice(w http.ResponseWriter, r *http.Request) {
+	a.persistUsagePrice(w, r, r.PathValue("id"))
+}
+
+func (a *App) persistUsagePrice(w http.ResponseWriter, r *http.Request, id string) {
+	from, err := time.Parse("2006-01-02", strings.TrimSpace(r.FormValue("valid_from")))
+	if err != nil {
+		http.Error(w, "Gültig ab muss ein Datum sein.", 400)
+		return
+	}
+	var until *time.Time
+	if value := strings.TrimSpace(r.FormValue("valid_until")); value != "" {
+		parsed, parseErr := time.Parse("2006-01-02", value)
+		if parseErr != nil || !parsed.After(from) {
+			http.Error(w, "Gültig bis muss nach Gültig ab liegen.", 400)
+			return
+		}
+		until = &parsed
+	}
+	p := domain.UsagePrice{ID: id, Provider: strings.TrimSpace(r.FormValue("provider")), Model: strings.TrimSpace(r.FormValue("model")), ServiceTier: strings.TrimSpace(r.FormValue("service_tier")), Version: strings.TrimSpace(r.FormValue("version")), ValidFrom: from}
+	p.ValidUntil = until
+	if p.Provider == "" || p.Model == "" || p.Version == "" {
+		http.Error(w, "Provider, Modell und Version sind Pflichtfelder.", 400)
+		return
+	}
+	fields := []**int64{&p.Input, &p.Output, &p.CachedInput, &p.CacheWrite, &p.Reasoning}
+	values := []string{"input", "output", "cached_input", "cache_write", "reasoning"}
+	known := 0
+	for i, field := range fields {
+		value, parseErr := parseMicrousd(r.FormValue(values[i]))
+		if parseErr != nil {
+			http.Error(w, parseErr.Error(), 400)
+			return
+		}
+		*field = value
+		if value != nil {
+			known++
+		}
+	}
+	if known == 0 {
+		http.Error(w, "Mindestens eine Tokenrate ist erforderlich.", 400)
+		return
+	}
+	var saveErr error
+	if user, ok := currentUser(r.Context()); ok {
+		if id == "" {
+			saveErr = a.store.SaveUsagePriceWithAudit(r.Context(), p, user.ID)
+		} else {
+			saveErr = a.store.UpdateUsagePriceWithAudit(r.Context(), p, user.ID)
+		}
+	} else if id == "" {
+		saveErr = a.store.SaveUsagePrice(r.Context(), p)
+	} else {
+		saveErr = a.store.UpdateUsagePrice(r.Context(), p)
+	}
+	if saveErr != nil {
+		http.Error(w, "Preis konnte nicht gespeichert werden: "+saveErr.Error(), 400)
+		return
+	}
+	http.Redirect(w, r, "/settings/prices", 303)
+}
+
+func (a *App) deleteUsagePrice(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var deleteErr error
+	if user, ok := currentUser(r.Context()); ok {
+		deleteErr = a.store.DeleteUsagePriceWithAudit(r.Context(), id, user.ID)
+	} else {
+		deleteErr = a.store.DeleteUsagePrice(r.Context(), id)
+	}
+	if deleteErr != nil {
+		http.Error(w, "Preis konnte nicht gelöscht werden: "+deleteErr.Error(), 400)
+		return
+	}
+	http.Redirect(w, r, "/settings/prices", 303)
+}
 func (a *App) testProvider(w http.ResponseWriter, r *http.Request) {
-	result, err := a.worker.CheckProvider(r.Context(), r.PathValue("provider"))
+	result, err := a.worker.CheckProviderForAgent(r.Context(), r.PathValue("provider"), r.URL.Query().Get("agent_id"))
 	if err != nil {
 		http.Error(w, "Provider-Test fehlgeschlagen: "+err.Error(), http.StatusBadRequest)
 		return
@@ -1171,7 +1440,7 @@ func (a *App) integrations(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Integrationen konnten nicht geladen werden.", http.StatusInternalServerError)
 		return
 	}
-	a.render(w, "integrations.html", integrationsPage{Connections: connections})
+	a.render(r, w, "integrations.html", integrationsPage{Connections: connections})
 }
 func (a *App) createIntegration(w http.ResponseWriter, r *http.Request) {
 	u, ok := currentUser(r.Context())
@@ -1245,18 +1514,48 @@ func language(r *http.Request) string {
 	}
 	return "de"
 }
-func (a *App) render(w http.ResponseWriter, name string, data any) {
+
+func (a *App) accountLanguage(r *http.Request) string {
+	if user, ok := currentUser(r.Context()); ok {
+		if prefs, err := a.store.UserPreferences(r.Context(), user.ID); err == nil {
+			return resolveLanguage(prefs.Language, r)
+		}
+	}
+	return language(r)
+}
+
+func (a *App) render(r *http.Request, w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	var page bytes.Buffer
 	if e := a.templates.ExecuteTemplate(&page, name, data); e != nil {
 		http.Error(w, e.Error(), 500)
 		return
 	}
+	// Account preferences are authoritative for every server-rendered view.
+	// This also covers templates that do not carry a page-specific Lang field.
+	lang := a.accountLanguage(r)
+	html := page.String()
+	// Templates from before the i18n layer used a fixed language attribute.
+	// Normalize every document here so a newly localized page cannot announce
+	// German while the account is using English.
+	if start := strings.Index(html, `<html lang="`); start >= 0 {
+		valueStart := start + len(`<html lang="`)
+		if end := strings.Index(html[valueStart:], `"`); end >= 0 {
+			html = html[:valueStart] + lang + html[valueStart+end:]
+		}
+	}
+	html = localizeHTML(html, lang)
 	// Every server-rendered view exposes one stable swap boundary. HTMX uses
 	// it for mutations today and for fragment navigation in the next layer.
-	html := strings.Replace(page.String(), "<main ", `<main id="app-main" `, 1)
+	html = strings.Replace(html, "<main ", `<main id="app-main" `, 1)
 	html = strings.Replace(html, "<main>", `<main id="app-main">`, 1)
 	_, _ = io.WriteString(w, html)
+}
+
+func (a *App) i18nAPI(w http.ResponseWriter, r *http.Request) {
+	// Keep the original flat English field for API consumers while exposing
+	// the bidirectional dictionaries used by the browser.
+	writeAPI(w, map[string]any{"language": a.accountLanguage(r), "translations": legacyDictionary(languageEnglish), "languages": legacyDictionaries()}, nil)
 }
 func (a *App) account(w http.ResponseWriter, r *http.Request) {
 	u, ok := currentUser(r.Context())
@@ -1269,7 +1568,7 @@ func (a *App) account(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	a.render(w, "account.html", map[string]any{"User": u, "Tokens": tokens})
+	a.render(r, w, "account.html", map[string]any{"User": u, "Tokens": tokens})
 }
 func (a *App) createAccountToken(w http.ResponseWriter, r *http.Request) {
 	u, ok := currentUser(r.Context())
@@ -1289,7 +1588,7 @@ func (a *App) createAccountToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tokens, _ := a.store.APITokens(r.Context(), u.ID)
-	a.render(w, "account.html", map[string]any{"User": u, "Tokens": tokens, "NewToken": raw, "Created": token})
+	a.render(r, w, "account.html", map[string]any{"User": u, "Tokens": tokens, "NewToken": raw, "Created": token})
 }
 func (a *App) revokeAccountToken(w http.ResponseWriter, r *http.Request) {
 	u, ok := currentUser(r.Context())
@@ -1309,7 +1608,7 @@ func (a *App) boards(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	a.render(w, "boards.html", map[string]any{"Boards": bs, "Templates": store.BoardTemplates(), "Lang": language(r)})
+	a.render(r, w, "boards.html", map[string]any{"Boards": bs, "Templates": store.BoardTemplates(), "Lang": a.accountLanguage(r)})
 }
 func (a *App) projects(w http.ResponseWriter, r *http.Request) {
 	projects, err := a.store.Projects(r.Context())
@@ -1327,7 +1626,7 @@ func (a *App) projects(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	a.render(w, "projects.html", map[string]any{"Projects": projects, "Boards": boards, "Groups": groups})
+	a.render(r, w, "projects.html", map[string]any{"Projects": projects, "Boards": boards, "Groups": groups})
 }
 func (a *App) createProjectGroup(w http.ResponseWriter, r *http.Request) {
 	_, err := a.store.CreateProjectGroup(r.Context(), r.FormValue("name"), r.FormValue("description"), r.FormValue("color"), r.Form["project_ids"])
@@ -1507,7 +1806,12 @@ func (a *App) syncProjectsLoop() {
 	}
 }
 func (a *App) dashboard(w http.ResponseWriter, r *http.Request) {
-	d, e := a.store.Dashboard(r.Context())
+	from, to, e := dashboardRange(r)
+	if e != nil {
+		http.Error(w, e.Error(), http.StatusBadRequest)
+		return
+	}
+	d, e := a.store.DashboardFiltered(r.Context(), from, to, r.URL.Query().Get("provider"), r.URL.Query().Get("model"), r.URL.Query().Get("agent"), r.URL.Query().Get("board"))
 	if e != nil {
 		http.Error(w, e.Error(), 500)
 		return
@@ -1518,20 +1822,56 @@ func (a *App) dashboard(w http.ResponseWriter, r *http.Request) {
 			max = m.Count
 		}
 	}
-	a.render(w, "dashboard.html", map[string]any{"Dashboard": d, "Max": max})
+	a.render(r, w, "dashboard.html", map[string]any{"Dashboard": d, "Max": max})
 }
 
 // dashboardAPI is the first stable UI API used by the React/shadcn client.
 // It deliberately returns the same domain projection as the legacy view so
 // the migration does not duplicate business or metric logic in JavaScript.
 func (a *App) dashboardAPI(w http.ResponseWriter, r *http.Request) {
-	dashboard, err := a.store.Dashboard(r.Context())
+	from, to, err := dashboardRange(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	dashboard, err := a.store.DashboardFiltered(r.Context(), from, to, r.URL.Query().Get("provider"), r.URL.Query().Get("model"), r.URL.Query().Get("agent"), r.URL.Query().Get("board"))
 	if err != nil {
 		http.Error(w, "Dashboard-Daten sind momentan nicht verfügbar.", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(dashboard)
+}
+
+func dashboardRange(r *http.Request) (*time.Time, *time.Time, error) {
+	value := r.URL.Query().Get("range")
+	if value == "" || value == "all" {
+		return nil, nil, nil
+	}
+	now := time.Now()
+	to := now
+	if value == "today" {
+		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		return &start, &to, nil
+	}
+	if value == "7d" || value == "30d" {
+		days := 7
+		if value == "30d" {
+			days = 30
+		}
+		start := now.AddDate(0, 0, -days)
+		return &start, &to, nil
+	}
+	if value == "custom" {
+		start, startErr := time.Parse("2006-01-02", r.URL.Query().Get("from"))
+		end, endErr := time.Parse("2006-01-02", r.URL.Query().Get("to"))
+		if startErr != nil || endErr != nil || !end.After(start) {
+			return nil, nil, errors.New("Benutzerdefinierter Zeitraum ist ungültig")
+		}
+		end = end.AddDate(0, 0, 1)
+		return &start, &end, nil
+	}
+	return nil, nil, errors.New("Unbekannter Dashboard-Zeitraum")
 }
 
 func writeAPI(w http.ResponseWriter, value any, err error) {
@@ -1691,7 +2031,7 @@ func (a *App) createAccountTokenAPI(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, map[string]any{"token": raw, "record": token}, err)
 }
 func (a *App) boardAPI(w http.ResponseWriter, r *http.Request) {
-	value, err := a.page(r.Context(), r.PathValue("id"), "", language(r))
+	value, err := a.page(r.Context(), r.PathValue("id"), "", a.accountLanguage(r))
 	writeAPI(w, value, err)
 }
 func (a *App) taskAPI(w http.ResponseWriter, r *http.Request) {
@@ -1715,10 +2055,20 @@ func (a *App) runAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	delivery, err := a.store.RunDelivery(r.Context(), run.ID)
+	usage, usageErr := a.store.RunUsage(r.Context(), run.ID)
+	if usageErr != nil {
+		writeAPI(w, nil, usageErr)
+		return
+	}
 	for index := range logs {
 		logs[index].Message = automation.RedactSensitiveText(logs[index].Message)
 	}
-	writeAPI(w, map[string]any{"run": safeRunView(run), "task": task, "delivery": delivery, "logs": logs, "logsTruncated": truncated}, err)
+	queue, queueErr := a.store.RunQueueStatus(r.Context(), run.ID)
+	if queueErr != nil {
+		writeAPI(w, nil, queueErr)
+		return
+	}
+	writeAPI(w, map[string]any{"run": safeRunView(run), "queue": queue, "task": task, "delivery": delivery, "usage": usage, "logs": logs, "logsTruncated": truncated}, err)
 }
 func safeRunView(run domain.AgentRun) map[string]any {
 	return map[string]any{"ID": run.ID, "TaskID": run.TaskID, "AgentID": run.AgentID, "RuleID": run.RuleID, "BatchID": run.BatchID, "Status": run.Status, "TargetProject": run.TargetProject, "Summary": automation.RedactSensitiveText(run.Summary), "ErrorMessage": automation.RedactSensitiveText(run.ErrorMessage), "StartedAt": run.StartedAt, "FinishedAt": run.FinishedAt, "CreatedAt": run.CreatedAt}
@@ -1808,12 +2158,12 @@ func (a *App) page(c context.Context, id, errText string, lang string) (boardPag
 	return boardPage{Board: b, Columns: cols, Tasks: tasks, Transitions: tr, Error: errText, Lang: lang, Labels: labels, Projects: projects, Groups: groups}, e
 }
 func (a *App) board(w http.ResponseWriter, r *http.Request) {
-	p, e := a.page(r.Context(), r.PathValue("id"), "", language(r))
+	p, e := a.page(r.Context(), r.PathValue("id"), "", a.accountLanguage(r))
 	if e != nil {
 		http.NotFound(w, r)
 		return
 	}
-	a.render(w, "board.html", p)
+	a.render(r, w, "board.html", p)
 }
 func (a *App) updateBoard(w http.ResponseWriter, r *http.Request) {
 	if err := a.store.UpdateBoard(r.Context(), r.PathValue("id"), r.FormValue("name")); err != nil {
@@ -1836,8 +2186,8 @@ func (a *App) createTask(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, e.Error(), http.StatusBadRequest)
 			return
 		}
-		p, _ := a.page(r.Context(), r.PathValue("id"), e.Error(), language(r))
-		a.render(w, "board.html", p)
+		p, _ := a.page(r.Context(), r.PathValue("id"), e.Error(), a.accountLanguage(r))
+		a.render(r, w, "board.html", p)
 		return
 	}
 	if e = a.store.SetLabels(r.Context(), task.ID, r.Form["label_ids"]); e != nil {
@@ -1871,12 +2221,12 @@ func (a *App) addColumn(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/boards/"+r.PathValue("id")+"/workflow", 303)
 }
 func (a *App) workflow(w http.ResponseWriter, r *http.Request) {
-	p, e := a.page(r.Context(), r.PathValue("id"), "", language(r))
+	p, e := a.page(r.Context(), r.PathValue("id"), "", a.accountLanguage(r))
 	if e != nil {
 		http.NotFound(w, r)
 		return
 	}
-	a.render(w, "workflow.html", p)
+	a.render(r, w, "workflow.html", p)
 }
 func (a *App) addTransition(w http.ResponseWriter, r *http.Request) {
 	_, e := a.store.AddTransition(r.Context(), r.PathValue("id"), r.FormValue("from"), r.FormValue("to"), r.FormValue("action_name"))
@@ -1953,7 +2303,7 @@ func (a *App) task(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	a.render(w, "task.html", p)
+	a.render(r, w, "task.html", p)
 }
 func (a *App) taskPanel(w http.ResponseWriter, r *http.Request) {
 	p, err := a.taskData(r.Context(), r.PathValue("id"))
@@ -1962,7 +2312,7 @@ func (a *App) taskPanel(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	a.render(w, "task-panel.html", p)
+	a.render(r, w, "task-panel.html", p)
 }
 func (a *App) taskData(ctx context.Context, id string) (taskPage, error) {
 	t, e := a.store.GetTask(ctx, id)
@@ -2016,7 +2366,11 @@ func (a *App) taskData(ctx context.Context, id string) (taskPage, error) {
 	publicRuns := make([]taskRunView, 0, len(runs))
 	changes := make([]taskChangeView, 0, len(runs))
 	for _, run := range runs {
-		publicRuns = append(publicRuns, taskRunView{ID: run.ID, TaskID: run.TaskID, AgentID: run.AgentID, Status: run.Status, Summary: automation.RedactSensitiveText(run.Summary), ErrorMessage: automation.RedactSensitiveText(run.ErrorMessage), StartedAt: run.StartedAt, FinishedAt: run.FinishedAt, CreatedAt: run.CreatedAt})
+		queue, queueErr := a.store.RunQueueStatus(ctx, run.ID)
+		if queueErr != nil {
+			return taskPage{}, queueErr
+		}
+		publicRuns = append(publicRuns, taskRunView{ID: run.ID, TaskID: run.TaskID, AgentID: run.AgentID, Status: run.Status, Queue: queue, Summary: automation.RedactSensitiveText(run.Summary), ErrorMessage: automation.RedactSensitiveText(run.ErrorMessage), StartedAt: run.StartedAt, FinishedAt: run.FinishedAt, CreatedAt: run.CreatedAt})
 		delivery, deliveryErr := a.store.RunDelivery(ctx, run.ID)
 		if deliveryErr != nil {
 			return taskPage{}, deliveryErr
@@ -2161,7 +2515,7 @@ func (a *App) runs(w http.ResponseWriter, r *http.Request) {
 	if hasOlder && len(runs) > 0 {
 		page.OlderCursor = encodeListCursor(runs[len(runs)-1].CreatedAt, runs[len(runs)-1].ID)
 	}
-	a.render(w, "runs.html", page)
+	a.render(r, w, "runs.html", page)
 }
 func (a *App) audit(w http.ResponseWriter, r *http.Request) {
 	before, beforeID, isOlderPage, err := listCursor(r.URL.Query().Get("before"))
@@ -2182,7 +2536,7 @@ func (a *App) audit(w http.ResponseWriter, r *http.Request) {
 	if hasOlder && len(events) > 0 {
 		page.OlderCursor = encodeListCursor(events[len(events)-1].CreatedAt, events[len(events)-1].ID)
 	}
-	a.render(w, "audit.html", page)
+	a.render(r, w, "audit.html", page)
 }
 
 func encodeListCursor(createdAt time.Time, id string) string {
@@ -2228,7 +2582,17 @@ func (a *App) run(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	a.render(w, "run.html", runPage{Run: run, Logs: newRunLogView(logs, truncated, run.ID), Task: task, Delivery: delivery})
+	usage, e := a.store.RunUsage(r.Context(), run.ID)
+	if e != nil {
+		http.Error(w, e.Error(), 500)
+		return
+	}
+	queue, e := a.store.RunQueueStatus(r.Context(), run.ID)
+	if e != nil {
+		http.Error(w, e.Error(), 500)
+		return
+	}
+	a.render(r, w, "run.html", runPage{Run: run, Queue: queue, Logs: newRunLogView(logs, truncated, run.ID), Task: task, Delivery: delivery, Usage: usage})
 }
 func (a *App) runLogs(w http.ResponseWriter, r *http.Request) {
 	run, err := a.store.Run(r.Context(), r.PathValue("id"))
@@ -2253,7 +2617,7 @@ func (a *App) runLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("X-Run-Status", run.Status)
-	a.render(w, "run-log.html", newRunLogView(logs, truncated, run.ID))
+	a.render(r, w, "run-log.html", newRunLogView(logs, truncated, run.ID))
 }
 
 func newRunLogView(entries []domain.RunLog, truncated bool, runID string) runLogView {
@@ -2454,7 +2818,7 @@ func (a *App) moveTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Header.Get("HX-Request") == "true" {
-		a.render(w, "task-card.html", t)
+		a.render(r, w, "task-card.html", t)
 		return
 	}
 	http.Redirect(w, r, "/boards/"+t.BoardID, 303)

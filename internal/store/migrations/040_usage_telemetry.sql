@@ -36,4 +36,18 @@ CREATE TABLE IF NOT EXISTS usage_price_catalog (
   CHECK (valid_until IS NULL OR valid_until > valid_from),
   UNIQUE(provider, model, service_tier, valid_from, version)
 );
+-- A model/tier may have only one applicable price at a point in time. The
+-- constraint is database-enforced so admin/API clients cannot create
+-- ambiguous historical resolutions through a race.
+CREATE EXTENSION IF NOT EXISTS btree_gist;
+ALTER TABLE usage_price_catalog
+  DROP CONSTRAINT IF EXISTS usage_price_catalog_no_overlap;
+ALTER TABLE usage_price_catalog
+  ADD CONSTRAINT usage_price_catalog_no_overlap
+  EXCLUDE USING gist (
+    provider WITH =,
+    model WITH =,
+    service_tier WITH =,
+    tstzrange(valid_from, COALESCE(valid_until, 'infinity'::timestamptz), '[)') WITH &&
+  );
 CREATE INDEX IF NOT EXISTS usage_price_catalog_lookup ON usage_price_catalog(provider, model, service_tier, valid_from, valid_until);

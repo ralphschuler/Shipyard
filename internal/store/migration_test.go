@@ -18,6 +18,19 @@ func TestActiveBatchMigrationsProtectManualAndAutomationRuns(t *testing.T) {
 	}
 }
 
+func TestPersistentRunQueueMigrationStoresWakeAndWaitState(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/047_persistent_run_queue.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"queue_wait_started_at", "queue_wait_reason", "queue_next_attempt_at", "agent_runs_queue_ready", "WHERE status = 'queued'"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("persistent queue migration is missing %q", required)
+		}
+	}
+}
+
 func TestAgentTransitionSourceMigrationAdmitsWorkerSources(t *testing.T) {
 	body, err := migrationFiles.ReadFile("migrations/034_agent_transition_sources.sql")
 	if err != nil {
@@ -74,6 +87,76 @@ func TestSessionHygieneMigrationSupportsBoundedCleanup(t *testing.T) {
 	for _, required := range []string{"user_sessions_expires_at_idx", "user_sessions_user_created_idx", "created_at DESC"} {
 		if !strings.Contains(string(body), required) {
 			t.Fatalf("session hygiene migration is missing %q", required)
+		}
+	}
+}
+
+func TestAcceptedDeliveryCommitMigrationStoresGitObjectIdentity(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/041_accepted_delivery_commits.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"accepted_commit_sha TEXT", "source_workspace, accepted_commit_sha", "user-controlled"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("accepted delivery migration is missing %q", required)
+		}
+	}
+}
+
+func TestAutomationFingerprintMigrationHasAtomicDurableClaim(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/042_automation_event_fingerprints.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"automation_event_claims", "fingerprint TEXT NOT NULL UNIQUE", "status TEXT NOT NULL", "attempts INTEGER", "batch_id UUID", "canonical_automation_payload", "legacy:' || b.id::text", "legacy:run:' || r.id::text", "agent_runs", "ON CONFLICT (fingerprint) DO NOTHING"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("fingerprint migration is missing %q", required)
+		}
+	}
+}
+
+func TestAutomationPayloadRepairMigrationRecreatesCanonicalFunction(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/044_repair_automation_payload_function.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"CREATE OR REPLACE FUNCTION canonical_automation_payload", "jsonb_object_agg", "jsonb_array_elements", "transport_id"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("repair migration is missing %q", required)
+		}
+	}
+}
+
+func TestRetireAgentsMigrationPreservesHistoricalIdentities(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/045_retire_agents.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"retired_at TIMESTAMPTZ", "DROP CONSTRAINT IF EXISTS agents_name_key", "agents_active_name_key", "WHERE retired_at IS NULL"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("retired-agent migration is missing %q", required)
+		}
+	}
+}
+
+func TestAgentMemoryMigrationEnforcesScopeHistoryAndActiveVersion(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/046_agent_memory.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{
+		"memory_conversations", "memory_audit_events", "provenance_json", "search_vector",
+		"UNIQUE(tenant_id,user_id,project_id,task_id,agent_id,dedupe_key)",
+		"CREATE UNIQUE INDEX memory_one_active_version ON memory_fact_versions(fact_id) WHERE active",
+		"current_version_id UUID", "high_impact BOOLEAN",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("memory migration missing %q", required)
 		}
 	}
 }

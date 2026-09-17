@@ -2,13 +2,16 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"taskboard/internal/domain"
 	"time"
@@ -24,6 +27,8 @@ type Store struct {
 
 var ErrNoRunCreated = errors.New("agent run already exists for this event")
 var ErrWorkspaceBusy = errors.New("workspace is busy")
+
+var canonicalUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 
 // Keep every positional AutomationRule query in one canonical order. pgx's
 // RowToStructByPos deliberately rejects a partial row; centralising this list
@@ -44,6 +49,68 @@ var automationRuleSelect = strings.Join(automationRuleColumns, ",")
 // marked processed without creating a second coding run.
 var ErrAutomationActive = errors.New("automation already has an active run for this task")
 var ErrTaskAgentActive = errors.New("agent already has an active run for this task")
+
+// AutomationEventFingerprint is the durable semantic identity used by the
+// automation claim table. All payload fields are relevant unless they are
+// transport metadata (event_id, delivery_id, transport_id, occurred_at, or
+// received_at). JSON object key order is insignificant, while array order is
+// preserved: arrays can represent ordered transitions or requested targets.
+func AutomationEventFingerprint(event domain.AutomationEvent, rule domain.AutomationRule) (string, error) {
+	var payload any
+	if len(event.Payload) == 0 {
+		payload = map[string]any{}
+	} else if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		return "", fmt.Errorf("automation payload is invalid JSON: %w", err)
+	}
+	canonical := canonicalAutomationPayload(payload)
+	object := map[string]any{
+		"version": 1, "task_id": event.TaskID, "rule_id": rule.ID,
+		"trigger_type": event.Type, "target_column_id": rule.TargetColumnID,
+		"return_generation": automationReturnGeneration(canonical), "payload": canonical,
+	}
+	raw, err := json.Marshal(object)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(raw)
+	return fmt.Sprintf("%x", sum[:]), nil
+}
+
+func canonicalAutomationPayload(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		result := make(map[string]any, len(v))
+		for key, child := range v {
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "event_id", "delivery_id", "transport_id", "occurred_at", "received_at":
+				continue
+			}
+			result[key] = canonicalAutomationPayload(child)
+		}
+		return result
+	case []any:
+		items := make([]any, len(v))
+		for i, child := range v {
+			items[i] = canonicalAutomationPayload(child)
+		}
+		return items
+	default:
+		return value
+	}
+}
+
+func automationReturnGeneration(payload any) string {
+	object, ok := payload.(map[string]any)
+	if !ok {
+		return ""
+	}
+	for _, key := range []string{"return_generation", "qa_return_generation", "rollback_generation", "generation"} {
+		if value, ok := object[key]; ok {
+			return fmt.Sprint(value)
+		}
+	}
+	return ""
+}
 
 func Open(ctx context.Context, url string) (*Store, error) {
 	p, e := pgxpool.New(ctx, url)
@@ -186,12 +253,108 @@ func (s *Store) UserAndAPITokenForHash(ctx context.Context, hash string) (domain
 }
 
 func (s *Store) RecordAudit(ctx context.Context, userID, kind, resourceType, resourceID string, metadata map[string]string) error {
+	return recordAudit(ctx, s.DB, userID, kind, resourceType, resourceID, metadata)
+}
+
+type auditExecutor interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
+func recordAudit(ctx context.Context, exec auditExecutor, userID, kind, resourceType, resourceID string, metadata map[string]string) error {
 	raw, err := json.Marshal(metadata)
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.Exec(ctx, `INSERT INTO audit_events(user_id,kind,resource_type,resource_id,metadata) VALUES(NULLIF($1,'')::uuid,$2,$3,$4,$5)`, userID, kind, resourceType, resourceID, raw)
+	_, err = exec.Exec(ctx, `INSERT INTO audit_events(user_id,kind,resource_type,resource_id,metadata) VALUES(NULLIF($1,'')::uuid,$2,$3,$4,$5)`, userID, kind, resourceType, resourceID, raw)
 	return err
+}
+
+func (s *Store) UsagePrices(ctx context.Context) ([]domain.UsagePrice, error) {
+	rows, err := s.DB.Query(ctx, `SELECT id::text,provider,model,service_tier,version,valid_from,valid_until,input_microusd_per_million,output_microusd_per_million,cached_input_microusd_per_million,cache_write_microusd_per_million,reasoning_microusd_per_million,created_at FROM usage_price_catalog ORDER BY provider,model,service_tier,valid_from DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return pgx.CollectRows(rows, pgx.RowToStructByPos[domain.UsagePrice])
+}
+
+func (s *Store) SaveUsagePrice(ctx context.Context, p domain.UsagePrice) error {
+	_, err := s.DB.Exec(ctx, `INSERT INTO usage_price_catalog(provider,model,service_tier,valid_from,valid_until,input_microusd_per_million,output_microusd_per_million,cached_input_microusd_per_million,cache_write_microusd_per_million,reasoning_microusd_per_million,version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, p.Provider, p.Model, p.ServiceTier, p.ValidFrom, p.ValidUntil, p.Input, p.Output, p.CachedInput, p.CacheWrite, p.Reasoning, p.Version)
+	return err
+}
+
+// SaveUsagePriceWithAudit keeps the catalog mutation and its audit record in
+// one transaction. A price must never become visible without its history.
+func (s *Store) SaveUsagePriceWithAudit(ctx context.Context, p domain.UsagePrice, actor string) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `INSERT INTO usage_price_catalog(provider,model,service_tier,valid_from,valid_until,input_microusd_per_million,output_microusd_per_million,cached_input_microusd_per_million,cache_write_microusd_per_million,reasoning_microusd_per_million,version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, p.Provider, p.Model, p.ServiceTier, p.ValidFrom, p.ValidUntil, p.Input, p.Output, p.CachedInput, p.CacheWrite, p.Reasoning, p.Version); err != nil {
+		return err
+	}
+	if err = recordAudit(ctx, tx, actor, "usage_price.created", "usage_price", p.Version, map[string]string{"provider": p.Provider, "model": p.Model, "version": p.Version}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) UpdateUsagePrice(ctx context.Context, p domain.UsagePrice) error {
+	_, err := s.DB.Exec(ctx, `UPDATE usage_price_catalog SET provider=$2,model=$3,service_tier=$4,valid_from=$5,valid_until=$6,input_microusd_per_million=$7,output_microusd_per_million=$8,cached_input_microusd_per_million=$9,cache_write_microusd_per_million=$10,reasoning_microusd_per_million=$11,version=$12 WHERE id=$1`, p.ID, p.Provider, p.Model, p.ServiceTier, p.ValidFrom, p.ValidUntil, p.Input, p.Output, p.CachedInput, p.CacheWrite, p.Reasoning, p.Version)
+	return err
+}
+
+// UpdateUsagePriceWithAudit rolls back the catalog update if its audit insert
+// or the final commit fails.
+func (s *Store) UpdateUsagePriceWithAudit(ctx context.Context, p domain.UsagePrice, actor string) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	result, err := tx.Exec(ctx, `UPDATE usage_price_catalog SET provider=$2,model=$3,service_tier=$4,valid_from=$5,valid_until=$6,input_microusd_per_million=$7,output_microusd_per_million=$8,cached_input_microusd_per_million=$9,cache_write_microusd_per_million=$10,reasoning_microusd_per_million=$11,version=$12 WHERE id=$1`, p.ID, p.Provider, p.Model, p.ServiceTier, p.ValidFrom, p.ValidUntil, p.Input, p.Output, p.CachedInput, p.CacheWrite, p.Reasoning, p.Version)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return pgx.ErrNoRows
+	}
+	if err = recordAudit(ctx, tx, actor, "usage_price.updated", "usage_price", p.ID, map[string]string{"provider": p.Provider, "model": p.Model, "version": p.Version}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) DeleteUsagePrice(ctx context.Context, id string) error {
+	_, err := s.DB.Exec(ctx, `DELETE FROM usage_price_catalog WHERE id=$1`, id)
+	return err
+}
+
+// DeleteUsagePriceWithAudit makes deletion and its audit trail atomic.
+func (s *Store) DeleteUsagePriceWithAudit(ctx context.Context, id, actor string) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = recordAudit(ctx, tx, actor, "usage_price.deleted", "usage_price", id, nil); err != nil {
+		return err
+	}
+	result, err := tx.Exec(ctx, `DELETE FROM usage_price_catalog WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return pgx.ErrNoRows
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *Store) ResolveUsagePrice(ctx context.Context, provider, model, tier string, at time.Time) (domain.UsagePrice, error) {
+	var p domain.UsagePrice
+	err := s.DB.QueryRow(ctx, `SELECT id::text,provider,model,service_tier,version,valid_from,valid_until,input_microusd_per_million,output_microusd_per_million,cached_input_microusd_per_million,cache_write_microusd_per_million,reasoning_microusd_per_million,created_at FROM usage_price_catalog WHERE provider=$1 AND model=$2 AND service_tier=$3 AND valid_from <= $4 AND (valid_until IS NULL OR valid_until > $4) ORDER BY valid_from DESC LIMIT 1`, provider, model, tier, at).Scan(&p.ID, &p.Provider, &p.Model, &p.ServiceTier, &p.Version, &p.ValidFrom, &p.ValidUntil, &p.Input, &p.Output, &p.CachedInput, &p.CacheWrite, &p.Reasoning, &p.CreatedAt)
+	return p, err
 }
 
 func (s *Store) AuditEvents(ctx context.Context, limit int) ([]domain.AuditEvent, error) {
@@ -228,7 +391,18 @@ func (s *Store) AllRunsBefore(ctx context.Context, limit int, before *time.Time,
 	if limit < 1 || limit > 500 {
 		limit = 50
 	}
-	rows, err := s.DB.Query(ctx, `SELECT r.id,r.task_id,t.title,r.agent_id,a.name,r.status,r.summary,r.error_message,r.started_at,r.finished_at,r.created_at,r.duration_seconds
+	if err := s.RefreshQueueState(ctx); err != nil {
+		return nil, err
+	}
+	rows, err := s.DB.Query(ctx, `SELECT r.id,r.task_id,t.title,r.agent_id,a.name,r.status,r.summary,r.error_message,
+		CASE WHEN r.status='queued' THEN 1+(SELECT count(*) FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id))) ELSE 0 END,
+		CASE WHEN r.status='queued' THEN r.queue_wait_reason ELSE '' END,
+		COALESCE((SELECT active.id::text FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running' ORDER BY active.started_at,active.created_at,active.id LIMIT 1),''),
+		COALESCE((SELECT activeAgent.name FROM agents activeAgent JOIN agent_runs active ON active.agent_id=activeAgent.id WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running' ORDER BY active.started_at,active.created_at,active.id LIMIT 1),''),
+		CASE WHEN r.status='queued' THEN r.workspace_snapshot ELSE '' END,
+		CASE WHEN r.status='queued' AND r.queue_wait_reason <> '' THEN r.queue_wait_started_at ELSE NULL END,
+		CASE WHEN r.status='queued' THEN r.queue_next_attempt_at ELSE NULL END,
+		r.started_at,r.finished_at,r.created_at,r.duration_seconds
 		FROM agent_runs r JOIN tasks t ON t.id=r.task_id JOIN agents a ON a.id=r.agent_id
 		WHERE ($2::timestamptz IS NULL OR r.created_at<$2 OR (r.created_at=$2 AND r.id::text<$3))
 		ORDER BY r.created_at DESC,r.id DESC LIMIT $1`, limit, before, beforeID)
@@ -310,12 +484,23 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err = s.DB.Exec(ctx, "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"); err != nil {
 		return err
 	}
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	// Package-level Go tests run concurrently. Serialize migrations so two
+	// fresh test connections cannot both observe a missing version and execute
+	// CREATE EXTENSION/DDL at the same time.
+	if _, err = tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext('taskboard schema migrations'))"); err != nil {
+		return err
+	}
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
 		var applied bool
-		if err = s.DB.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)", entry.Name()).Scan(&applied); err != nil {
+		if err = tx.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version=$1)", entry.Name()).Scan(&applied); err != nil {
 			return err
 		}
 		if applied {
@@ -325,22 +510,14 @@ func (s *Store) Migrate(ctx context.Context) error {
 		if readErr != nil {
 			return readErr
 		}
-		tx, beginErr := s.DB.Begin(ctx)
-		if beginErr != nil {
-			return beginErr
-		}
 		if _, err = tx.Exec(ctx, string(body)); err == nil {
 			_, err = tx.Exec(ctx, "INSERT INTO schema_migrations(version) VALUES($1)", entry.Name())
 		}
 		if err != nil {
-			_ = tx.Rollback(ctx)
-			return err
-		}
-		if err = tx.Commit(ctx); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 func (s *Store) ListBoards(c context.Context) ([]domain.Board, error) {
 	rows, e := s.DB.Query(c, "SELECT id,name,created_at FROM boards ORDER BY created_at")
@@ -471,6 +648,13 @@ func (s *Store) EnsureProjectGroup(c context.Context, name, color string) (domai
 	return group, err
 }
 func (s *Store) SetTaskTargets(c context.Context, taskID string, projectIDs, groupIDs []string) error {
+	var err error
+	if projectIDs, err = normalizeTargetIDs("project", projectIDs); err != nil {
+		return err
+	}
+	if groupIDs, err = normalizeTargetIDs("group", groupIDs); err != nil {
+		return err
+	}
 	tx, err := s.DB.Begin(c)
 	if err != nil {
 		return err
@@ -513,6 +697,18 @@ func (s *Store) SetTaskTargets(c context.Context, taskID string, projectIDs, gro
 		return err
 	}
 	return tx.Commit(c)
+}
+
+func normalizeTargetIDs(kind string, rawIDs []string) ([]string, error) {
+	ids := make([]string, len(rawIDs))
+	for i, rawID := range rawIDs {
+		id := strings.TrimSpace(rawID)
+		if !canonicalUUID.MatchString(id) {
+			return nil, fmt.Errorf("ungültige %s-ID %q: erwartet wird eine kanonische UUID (z. B. 123e4567-e89b-12d3-a456-426614174000), keine Repository-URL", kind, rawID)
+		}
+		ids[i] = id
+	}
+	return ids, nil
 }
 func (s *Store) TaskRepositoryTargets(c context.Context, taskID string) ([]domain.RepositoryTarget, error) {
 	rows, err := s.DB.Query(c, `SELECT id,task_id,COALESCE(project_id::text,''),project_name,repository_url,default_branch,local_path,source_groups,created_at FROM task_repository_targets WHERE task_id=$1 ORDER BY project_name`, taskID)
@@ -651,7 +847,10 @@ func (s *Store) Dashboard(c context.Context) (domain.Dashboard, error) {
 	if err != nil {
 		return d, err
 	}
-	if err = s.DB.QueryRow(c, `SELECT count(*) FILTER (WHERE status='queued'),count(*) FILTER (WHERE status='running'),count(*) FILTER (WHERE status='succeeded'),count(*) FILTER (WHERE status='failed') FROM agent_runs`).Scan(&d.Runs.Queued, &d.Runs.Running, &d.Runs.Succeeded, &d.Runs.Failed); err != nil {
+	if err = s.RefreshQueueState(c); err != nil {
+		return d, err
+	}
+	if err = s.DB.QueryRow(c, `SELECT count(*) FILTER (WHERE status='queued'),count(*) FILTER (WHERE status='queued' AND queue_wait_reason <> ''),count(*) FILTER (WHERE status='running'),count(*) FILTER (WHERE status='succeeded'),count(*) FILTER (WHERE status='failed') FROM agent_runs`).Scan(&d.Runs.Queued, &d.Runs.ResourceWaiting, &d.Runs.Running, &d.Runs.Succeeded, &d.Runs.Failed); err != nil {
 		return d, err
 	}
 	if err = s.DB.QueryRow(c, `SELECT COALESCE(sum(estimated_cost_microusd),0) FROM agent_runs`).Scan(&d.EstimatedCostMicrousd); err != nil {
@@ -660,7 +859,10 @@ func (s *Store) Dashboard(c context.Context) (domain.Dashboard, error) {
 	if err = s.DB.QueryRow(c, `SELECT COALESCE(sum(calculated_cost_microusd) FILTER (WHERE cost_source='reported'),0), COALESCE(sum(calculated_cost_microusd) FILTER (WHERE cost_source='estimated'),0), count(*) FILTER (WHERE cost_source IN ('included','unknown')), COALESCE(sum(COALESCE(usage_total_tokens, token_usage)) FILTER (WHERE cost_source IN ('included','unknown')),0) FROM agent_runs`).Scan(&d.KnownActualCostMicrousd, &d.EstimatedCostMicrousdV2, &d.IncludedOrUnknownRuns, &d.IncludedOrUnknownTokens); err != nil {
 		return d, err
 	}
-	costs, err := s.DB.Query(c, `SELECT a.name,COALESCE(sum(r.estimated_cost_microusd),0) FROM agent_runs r JOIN agents a ON a.id=r.agent_id GROUP BY a.id,a.name HAVING COALESCE(sum(r.estimated_cost_microusd),0)>0 ORDER BY 2 DESC,1`)
+	if err = s.DB.QueryRow(c, `SELECT sum(usage_input_tokens),sum(usage_output_tokens),sum(usage_cached_input_tokens),sum(usage_cache_write_tokens),sum(usage_reasoning_tokens),sum(COALESCE(usage_total_tokens,token_usage)) FROM agent_runs`).Scan(&d.UsageTokenBreakdown.InputTokens, &d.UsageTokenBreakdown.OutputTokens, &d.UsageTokenBreakdown.CachedInputTokens, &d.UsageTokenBreakdown.CacheWriteTokens, &d.UsageTokenBreakdown.ReasoningTokens, &d.UsageTokenBreakdown.TotalTokens); err != nil {
+		return d, err
+	}
+	costs, err := s.DB.Query(c, `SELECT a.name,COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source IN ('reported','estimated')),0) FROM agent_runs r JOIN agents a ON a.id=r.agent_id GROUP BY a.id,a.name HAVING COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source IN ('reported','estimated')),0)>0 ORDER BY 2 DESC,1`)
 	if err != nil {
 		return d, err
 	}
@@ -703,6 +905,150 @@ func (s *Store) Dashboard(c context.Context) (domain.Dashboard, error) {
 	defer completed.Close()
 	d.CompletedSeries, err = pgx.CollectRows(completed, pgx.RowToStructByPos[domain.Metric])
 	return d, err
+}
+
+// DashboardFiltered keeps the operational dashboard stable while allowing
+// telemetry consumers to request a reproducible historical slice.
+func (s *Store) DashboardFiltered(c context.Context, from, to *time.Time, provider, model, agent, board string) (domain.Dashboard, error) {
+	d, err := s.Dashboard(c)
+	if err != nil {
+		return d, err
+	}
+	// The legacy dashboard contains operational task metrics as well as
+	// telemetry. Keep those metrics on the same filtered run/task population
+	// when a telemetry filter is active. For an entirely unfiltered request,
+	// preserve the operational population, including tasks without agent runs.
+	taskConditions, taskArgs := dashboardTaskFilter(from, to, provider, model, agent, board)
+	taskWhere := `WHERE ` + taskConditions
+	where := `WHERE ($1::timestamptz IS NULL OR r.created_at >= $1) AND ($2::timestamptz IS NULL OR r.created_at < $2) AND ($3='' OR r.usage_provider=$3) AND ($4='' OR r.usage_model=$4) AND (NULLIF($5,'')::uuid IS NULL OR r.agent_id=NULLIF($5,'')::uuid) AND (NULLIF($6,'')::uuid IS NULL OR r.task_id IN (SELECT id FROM tasks WHERE board_id=NULLIF($6,'')::uuid))`
+	args := []any{from, to, provider, model, agent, board}
+	if err = s.DB.QueryRow(c, `SELECT count(*),count(*) FILTER (WHERE t.completed_at IS NULL),count(*) FILTER (WHERE t.completed_at IS NOT NULL) FROM tasks t `+taskWhere, taskArgs...).Scan(&d.Total, &d.Active, &d.Completed); err != nil {
+		return d, err
+	}
+	columns, err := s.DB.Query(c, `SELECT b.name || ' / ' || c.name,count(t.id) FROM workflow_columns c JOIN boards b ON b.id=c.board_id LEFT JOIN tasks t ON t.column_id=c.id `+taskWhere+` GROUP BY b.name,c.id,c.name,c.position HAVING count(t.id)>0 ORDER BY b.name,c.position`, taskArgs...)
+	if err != nil {
+		return d, err
+	}
+	d.ByColumn, err = pgx.CollectRows(columns, pgx.RowToStructByPos[domain.Metric])
+	columns.Close()
+	if err != nil {
+		return d, err
+	}
+	priorities, err := s.DB.Query(c, `SELECT t.priority,count(*) FROM tasks t `+taskWhere+` GROUP BY t.priority ORDER BY t.priority`, taskArgs...)
+	if err != nil {
+		return d, err
+	}
+	d.ByPriority, err = pgx.CollectRows(priorities, pgx.RowToStructByPos[domain.Metric])
+	priorities.Close()
+	if err != nil {
+		return d, err
+	}
+	if err = s.DB.QueryRow(c, `SELECT count(*) FILTER (WHERE r.status='queued'),count(*) FILTER (WHERE r.status='running'),count(*) FILTER (WHERE r.status='succeeded'),count(*) FILTER (WHERE r.status='failed') FROM agent_runs r `+where, args...).Scan(&d.Runs.Queued, &d.Runs.Running, &d.Runs.Succeeded, &d.Runs.Failed); err != nil {
+		return d, err
+	}
+	if err = s.DB.QueryRow(c, `SELECT COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='reported'),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='estimated'),0),count(*) FILTER (WHERE r.cost_source IN ('included','unknown')),COALESCE(sum(COALESCE(r.usage_total_tokens,r.token_usage)) FILTER (WHERE r.cost_source IN ('included','unknown')),0) FROM agent_runs r `+where, args...).Scan(&d.KnownActualCostMicrousd, &d.EstimatedCostMicrousdV2, &d.IncludedOrUnknownRuns, &d.IncludedOrUnknownTokens); err != nil {
+		return d, err
+	}
+	if err = s.DB.QueryRow(c, `SELECT sum(r.usage_input_tokens),sum(r.usage_output_tokens),sum(r.usage_cached_input_tokens),sum(r.usage_cache_write_tokens),sum(r.usage_reasoning_tokens),sum(COALESCE(r.usage_total_tokens,r.token_usage)) FROM agent_runs r `+where, args...).Scan(&d.UsageTokenBreakdown.InputTokens, &d.UsageTokenBreakdown.OutputTokens, &d.UsageTokenBreakdown.CachedInputTokens, &d.UsageTokenBreakdown.CacheWriteTokens, &d.UsageTokenBreakdown.ReasoningTokens, &d.UsageTokenBreakdown.TotalTokens); err != nil {
+		return d, err
+	}
+	rows, err := s.DB.Query(c, `SELECT 'provider',COALESCE(NULLIF(r.usage_provider,''),'unknown'),COALESCE(sum(COALESCE(r.usage_total_tokens,r.token_usage)),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='reported'),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='estimated'),0) FROM agent_runs r `+where+` GROUP BY r.usage_provider UNION ALL SELECT 'model',COALESCE(NULLIF(r.usage_model,''),'unknown'),COALESCE(sum(COALESCE(r.usage_total_tokens,r.token_usage)),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='reported'),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='estimated'),0) FROM agent_runs r `+where+` GROUP BY r.usage_model UNION ALL SELECT 'agent',a.name,COALESCE(sum(COALESCE(r.usage_total_tokens,r.token_usage)),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='reported'),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='estimated'),0) FROM agent_runs r JOIN agents a ON a.id=r.agent_id `+where+` GROUP BY a.name UNION ALL SELECT 'board',b.name,COALESCE(sum(COALESCE(r.usage_total_tokens,r.token_usage)),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='reported'),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='estimated'),0) FROM agent_runs r JOIN tasks t ON t.id=r.task_id JOIN boards b ON b.id=t.board_id `+where+` GROUP BY b.name ORDER BY 1,2`, args...)
+	if err != nil {
+		return d, err
+	}
+	defer rows.Close()
+	d.UsageByDimension, err = pgx.CollectRows(rows, pgx.RowToStructByPos[domain.UsageMetric])
+	if err != nil {
+		return d, err
+	}
+	costRows, err := s.DB.Query(c, `SELECT a.name,COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source IN ('reported','estimated')),0) FROM agent_runs r JOIN agents a ON a.id=r.agent_id `+where+` GROUP BY a.id,a.name HAVING COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source IN ('reported','estimated')),0)>0 ORDER BY 2 DESC,1`, args...)
+	if err != nil {
+		return d, err
+	}
+	defer costRows.Close()
+	d.CostByAgent, err = pgx.CollectRows(costRows, pgx.RowToStructByPos[domain.CostMetric])
+	if err != nil {
+		return d, err
+	}
+	seriesFrom, seriesTo := from, to
+	if seriesFrom == nil {
+		var start time.Time
+		if err = s.DB.QueryRow(c, `SELECT COALESCE(min(r.created_at), current_date) FROM agent_runs r `+where, args...).Scan(&start); err != nil {
+			return d, err
+		}
+		seriesFrom = &start
+	}
+	if seriesTo == nil {
+		end := time.Now().AddDate(0, 0, 1)
+		seriesTo = &end
+	}
+	series, err := s.DB.Query(c, `SELECT to_char(day,'YYYY-MM-DD'),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='reported'),0),COALESCE(sum(r.calculated_cost_microusd) FILTER (WHERE r.cost_source='estimated'),0),COALESCE(sum(COALESCE(r.usage_total_tokens,r.token_usage)),0) FROM generate_series($1::timestamptz,$2::timestamptz-interval '1 day',interval '1 day') day LEFT JOIN agent_runs r ON r.created_at >= day AND r.created_at < day + interval '1 day' AND r.created_at >= $1 AND r.created_at < $2 AND ($3='' OR r.usage_provider=$3) AND ($4='' OR r.usage_model=$4) AND (NULLIF($5,'')::uuid IS NULL OR r.agent_id=NULLIF($5,'')::uuid) AND (NULLIF($6,'')::uuid IS NULL OR r.task_id IN (SELECT id FROM tasks WHERE board_id=NULLIF($6,'')::uuid)) GROUP BY day ORDER BY day`, seriesFrom, seriesTo, provider, model, agent, board)
+	if err != nil {
+		return d, err
+	}
+	defer series.Close()
+	d.TelemetrySeries, err = pgx.CollectRows(series, pgx.RowToStructByPos[domain.TelemetryPoint])
+	if err != nil {
+		return d, err
+	}
+	// Task throughput follows the same selected interval and dimensions. For
+	// an unbounded request retain the legacy 14-day chart window.
+	taskSeriesFrom, taskSeriesTo := from, to
+	if taskSeriesFrom == nil {
+		start := time.Now().AddDate(0, 0, -13)
+		taskSeriesFrom = &start
+	}
+	if taskSeriesTo == nil {
+		end := time.Now().AddDate(0, 0, 1)
+		taskSeriesTo = &end
+	}
+	taskSeriesConditions := "TRUE"
+	seriesArgs := []any{taskSeriesFrom, taskSeriesTo}
+	if from != nil || to != nil || provider != "" || model != "" || agent != "" {
+		taskSeriesConditions = `EXISTS (SELECT 1 FROM agent_runs ar WHERE ar.task_id=t.id AND ($3::timestamptz IS NULL OR ar.created_at >= $3) AND ($4::timestamptz IS NULL OR ar.created_at < $4) AND ($5='' OR ar.usage_provider=$5) AND ($6='' OR ar.usage_model=$6) AND (NULLIF($7,'')::uuid IS NULL OR ar.agent_id=NULLIF($7,'')::uuid))`
+		seriesArgs = append(seriesArgs, from, to, provider, model, agent)
+	}
+	if board != "" {
+		placeholder := len(seriesArgs) + 1
+		taskSeriesConditions += fmt.Sprintf(` AND (NULLIF($%d,'')::uuid IS NULL OR t.board_id=NULLIF($%d,'')::uuid)`, placeholder, placeholder)
+		seriesArgs = append(seriesArgs, board)
+	}
+	createdTasks, err := s.DB.Query(c, `SELECT to_char(day,'DD.MM'),count(t.id)::int FROM generate_series($1::timestamptz,$2::timestamptz-interval '1 day',interval '1 day') day LEFT JOIN tasks t ON t.created_at >= day AND t.created_at < day + interval '1 day' AND `+taskSeriesConditions+` GROUP BY day ORDER BY day`, seriesArgs...)
+	if err != nil {
+		return d, err
+	}
+	d.CreatedSeries, err = pgx.CollectRows(createdTasks, pgx.RowToStructByPos[domain.Metric])
+	createdTasks.Close()
+	if err != nil {
+		return d, err
+	}
+	completedTasks, err := s.DB.Query(c, `SELECT to_char(day,'DD.MM'),count(t.id)::int FROM generate_series($1::timestamptz,$2::timestamptz-interval '1 day',interval '1 day') day LEFT JOIN tasks t ON t.completed_at >= day AND t.completed_at < day + interval '1 day' AND `+taskSeriesConditions+` GROUP BY day ORDER BY day`, seriesArgs...)
+	if err != nil {
+		return d, err
+	}
+	d.CompletedSeries, err = pgx.CollectRows(completedTasks, pgx.RowToStructByPos[domain.Metric])
+	completedTasks.Close()
+	return d, err
+}
+
+func dashboardTaskFilter(from, to *time.Time, provider, model, agent, board string) (string, []any) {
+	conditions := "TRUE"
+	args := make([]any, 0, 6)
+	if from != nil || to != nil || provider != "" || model != "" || agent != "" {
+		conditions = `EXISTS (SELECT 1 FROM agent_runs ar WHERE ar.task_id=t.id
+			AND ($1::timestamptz IS NULL OR ar.created_at >= $1)
+			AND ($2::timestamptz IS NULL OR ar.created_at < $2)
+			AND ($3='' OR ar.usage_provider=$3)
+			AND ($4='' OR ar.usage_model=$4)
+			AND (NULLIF($5,'')::uuid IS NULL OR ar.agent_id=NULLIF($5,'')::uuid))`
+		args = append(args, from, to, provider, model, agent)
+	}
+	if board != "" {
+		placeholder := len(args) + 1
+		conditions += fmt.Sprintf(` AND (NULLIF($%d,'')::uuid IS NULL OR t.board_id=NULLIF($%d,'')::uuid)`, placeholder, placeholder)
+		args = append(args, board)
+	}
+	return conditions, args
 }
 
 func (s *Store) DashboardAttention(c context.Context) (domain.DashboardAttention, error) {
@@ -1095,8 +1441,9 @@ func (s *Store) DeleteTask(c context.Context, id string) error {
 // inside a larger transaction lets an interaction answer, its continuation
 // run and an optional user-selected next step become one atomic hand-off.
 func moveTaskTx(c context.Context, tx pgx.Tx, id, target, source string) error {
-	var current, board, transition string
-	err := tx.QueryRow(c, "SELECT column_id,board_id FROM tasks WHERE id=$1 FOR UPDATE", id).Scan(&current, &board)
+	var current, board, currentName, currentType, transition string
+	err := tx.QueryRow(c, `SELECT t.column_id,t.board_id,c.name,c.column_type
+		FROM tasks t JOIN workflow_columns c ON c.id=t.column_id WHERE t.id=$1 FOR UPDATE`, id).Scan(&current, &board, &currentName, &currentType)
 	if err != nil {
 		return err
 	}
@@ -1105,15 +1452,19 @@ func moveTaskTx(c context.Context, tx pgx.Tx, id, target, source string) error {
 		return errors.New("transition is not allowed")
 	}
 	var terminal bool
-	err = tx.QueryRow(c, "SELECT column_type='done' FROM workflow_columns WHERE id=$1 AND board_id=$2", target, board).Scan(&terminal)
+	var targetType string
+	err = tx.QueryRow(c, "SELECT column_type FROM workflow_columns WHERE id=$1 AND board_id=$2", target, board).Scan(&targetType)
 	if err != nil {
 		return err
 	}
+	terminal = targetType == "done"
 	_, err = tx.Exec(c, "UPDATE tasks SET column_id=$2,completed_at=CASE WHEN $3 THEN now() ELSE NULL END,updated_at=now() WHERE id=$1", id, target, terminal)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(c, "INSERT INTO task_transitions(task_id,from_column_id,to_column_id,transition_id,source) VALUES($1,$2,$3,$4,$5)", id, current, target, transition, source)
+	var taskTransitionID string
+	err = tx.QueryRow(c, `INSERT INTO task_transitions(task_id,from_column_id,to_column_id,transition_id,source)
+		VALUES($1,$2,$3,$4,$5) RETURNING id`, id, current, target, transition, source).Scan(&taskTransitionID)
 	if err != nil {
 		return err
 	}
@@ -1121,7 +1472,36 @@ func moveTaskTx(c context.Context, tx pgx.Tx, id, target, source string) error {
 	if terminal {
 		eventType = "task.completed"
 	}
-	_, err = tx.Exec(c, "INSERT INTO automation_events(type,task_id,board_id,payload) VALUES($1,$2,$3,jsonb_build_object('target_column_id',$4::text))", eventType, id, board, target)
+	// A QA/review return is only automation-eligible when a previous delivery
+	// really changed the repository and was applied. This flag is written in
+	// the same transaction as the transition, making concurrent/replayed
+	// deliveries deterministic and preventing no-op return loops.
+	changeAvailable := false
+	returnColumn := strings.EqualFold(strings.TrimSpace(currentName), "qa") || strings.EqualFold(strings.TrimSpace(currentName), "review")
+	if returnColumn && targetType != "done" {
+		// Bind the evidence to this concrete return generation. A task-wide
+		// EXISTS check would let an old applied run resurrect later unchanged
+		// QA/review returns indefinitely.
+		err = tx.QueryRow(c, `SELECT EXISTS(
+			SELECT 1 FROM agent_runs r
+			WHERE r.task_id=$1 AND r.applied_at IS NOT NULL
+			  AND r.applied_at > COALESCE((
+				SELECT MAX(previous.occurred_at)
+				FROM task_transitions previous
+				JOIN workflow_columns previous_from ON previous_from.id=previous.from_column_id
+				JOIN workflow_columns previous_to ON previous_to.id=previous.to_column_id
+				WHERE previous.task_id=$1
+				  AND previous.id<>$2
+				  AND lower(trim(previous_from.name)) IN ('qa','review')
+				  AND previous_to.column_type<>'done'
+			  ), '-infinity'::timestamptz)
+		)`, id, taskTransitionID).Scan(&changeAvailable)
+		if err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(c, `INSERT INTO automation_events(type,task_id,board_id,payload)
+		VALUES($1,$2,$3,jsonb_build_object('target_column_id',$4::text,'qa_return',$5::boolean,'change_available',$6::boolean,'return_generation',$7::text))`, eventType, id, board, target, returnColumn, changeAvailable, taskTransitionID)
 	return err
 }
 
@@ -1389,13 +1769,6 @@ func (s *Store) ResolveInteractionAndMove(c context.Context, id, answerer, freef
 		if err = lockWorkspaceTx(c, tx, workspace); err != nil {
 			return i, nil, err
 		}
-		var count int
-		if err = tx.QueryRow(c, "SELECT count(*) FROM agent_runs WHERE workspace_snapshot=$1 AND status IN('queued','running')", workspace).Scan(&count); err != nil {
-			return i, nil, err
-		}
-		if count >= a.MaxParallelRuns {
-			return i, nil, ErrWorkspaceBusy
-		}
 		run, created, createErr := createRunTx(c, tx, i.TaskID, a, a.ID, "", "", batch.ID, workspace, target.ProjectID)
 		if createErr != nil {
 			return i, nil, createErr
@@ -1588,7 +1961,7 @@ func defaultString(v, d string) string {
 	return v
 }
 func (s *Store) Agents(c context.Context) ([]domain.Agent, error) {
-	r, e := s.DB.Query(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,workspace_path,enabled,max_parallel_runs,created_at FROM agents ORDER BY name")
+	r, e := s.DB.Query(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,workspace_path,enabled,max_parallel_runs,created_at FROM agents WHERE retired_at IS NULL ORDER BY name")
 	if e != nil {
 		return nil, e
 	}
@@ -1612,7 +1985,7 @@ func (s *Store) UpdateAgent(c context.Context, id, name, desc, prefix, prompt, s
 	if max < 1 {
 		max = 1
 	}
-	_, err := s.DB.Exec(c, "UPDATE agents SET name=$2,description=$3,prompt_prefix=$4,prompt=$5,prompt_suffix=$6,workspace_path=$7,max_parallel_runs=$8,enabled=$9 WHERE id=$1", id, strings.TrimSpace(name), desc, prefix, prompt, suffix, strings.TrimSpace(workspace), max, enabled)
+	_, err := s.DB.Exec(c, "UPDATE agents SET name=$2,description=$3,prompt_prefix=$4,prompt=$5,prompt_suffix=$6,workspace_path=$7,max_parallel_runs=$8,enabled=$9 WHERE id=$1 AND retired_at IS NULL", id, strings.TrimSpace(name), desc, prefix, prompt, suffix, strings.TrimSpace(workspace), max, enabled)
 	return err
 }
 
@@ -1654,8 +2027,32 @@ func (s *Store) RecordTaskDecision(c context.Context, interaction domain.AgentIn
 	return err
 }
 func (s *Store) DeleteAgent(c context.Context, id string) error {
-	_, err := s.DB.Exec(c, "DELETE FROM agents WHERE id=$1", id)
-	return err
+	tx, err := s.DB.Begin(c)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(c)
+	// Retire instead of physically deleting: agent_runs intentionally retain
+	// their agent FK so historical traces and cost attribution remain intact.
+	var retired bool
+	if err = tx.QueryRow(c, "UPDATE agents SET enabled=false,retired_at=COALESCE(retired_at,now()) WHERE id=$1 RETURNING true", id).Scan(&retired); err != nil {
+		return err
+	}
+	// A retired profile must not retain secret access or skill assignments.
+	// Older installations may not have the optional secrets schema yet.
+	var secretTable *string
+	if err = tx.QueryRow(c, "SELECT to_regclass('public.secret_agents')").Scan(&secretTable); err != nil {
+		return err
+	}
+	if secretTable != nil {
+		if _, err = tx.Exec(c, "DELETE FROM secret_agents WHERE agent_id=$1", id); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(c, "DELETE FROM agent_skills WHERE agent_id=$1", id); err != nil {
+		return err
+	}
+	return tx.Commit(c)
 }
 func (s *Store) SetAgentSkills(c context.Context, agentID string, installedSkillIDs []string) error {
 	tx, err := s.DB.Begin(c)
@@ -1861,7 +2258,16 @@ func (s *Store) CreateRun(c context.Context, task, agent, rule string) (domain.A
 func (s *Store) createRunWithWorkspace(c context.Context, task string, a domain.Agent, agent, rule, workspace, targetProject, batchID string) (domain.AgentRun, error) {
 	var r domain.AgentRun
 	e := s.DB.QueryRow(c, "INSERT INTO agent_runs(task_id,agent_id,rule_id,batch_id,prompt_snapshot,workspace_snapshot,source_workspace,target_project_id,skill_snapshot) VALUES($1,$2,NULLIF($3,'')::uuid,NULLIF($4,'')::uuid,$5,$6,$6,NULLIF($7,'')::uuid,COALESCE((SELECT jsonb_agg(jsonb_build_object('name',s.name,'path',i.install_path)) FROM agent_skills x JOIN installed_skills i ON i.id=x.installed_skill_id JOIN skills s ON s.id=i.skill_id WHERE x.agent_id=$2),'[]'::jsonb)) RETURNING id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at", task, agent, rule, batchID, a.Prompt, workspace, targetProject).Scan(&r.ID, &r.TaskID, &r.AgentID, &r.RuleID, &r.BatchID, &r.Status, &r.PromptSnapshot, &r.WorkspaceSnapshot, &r.TargetProject, &r.Summary, &r.ErrorMessage, &r.StartedAt, &r.FinishedAt, &r.CreatedAt)
-	return r, e
+	if e != nil {
+		return r, e
+	}
+	if e = s.RecordAudit(c, "", "agent_run.queued", "agent_run", r.ID, map[string]string{
+		"workspace": workspace,
+		"source":    "manual",
+	}); e != nil {
+		return domain.AgentRun{}, e
+	}
+	return r, nil
 }
 func (s *Store) TaskWorkspace(c context.Context, taskID, fallback string) string {
 	targets, err := s.TaskRepositoryTargets(c, taskID)
@@ -1933,13 +2339,6 @@ func (s *Store) CreateManualRuns(c context.Context, task, agent string) ([]domai
 		if err = lockWorkspaceTx(c, tx, workspace); err != nil {
 			return nil, err
 		}
-		var active int
-		if err = tx.QueryRow(c, "SELECT count(*) FROM agent_runs WHERE workspace_snapshot=$1 AND status IN('queued','running')", workspace).Scan(&active); err != nil {
-			return nil, err
-		}
-		if active >= a.MaxParallelRuns {
-			return nil, ErrWorkspaceBusy
-		}
 		run, created, createErr := createRunTx(c, tx, task, a, agent, "", "", batch.ID, workspace, target.ProjectID)
 		if createErr != nil {
 			return nil, createErr
@@ -1993,6 +2392,12 @@ func createRunTx(c context.Context, tx pgx.Tx, task string, a domain.Agent, agen
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.AgentRun{}, false, nil
 	}
+	if err == nil {
+		metadata, _ := json.Marshal(map[string]string{"workspace": workspace, "source": map[bool]string{true: "automation", false: "manual"}[event != ""]})
+		if _, auditErr := tx.Exec(c, `INSERT INTO audit_events(kind,resource_type,resource_id,metadata) VALUES('agent_run.queued','agent_run',$1,$2)`, run.ID, metadata); auditErr != nil {
+			return domain.AgentRun{}, false, auditErr
+		}
+	}
 	return run, err == nil, err
 }
 func (s *Store) RefreshRunBatch(c context.Context, id string) (domain.AgentRunBatch, error) {
@@ -2005,6 +2410,9 @@ func (s *Store) RefreshRunBatch(c context.Context, id string) (domain.AgentRunBa
 		status=CASE WHEN counts.queued+counts.running>0 THEN 'running' WHEN counts.failed>0 AND (counts.succeeded>0 OR counts.cancelled>0) THEN 'partial' WHEN counts.failed>0 THEN 'failed' WHEN counts.cancelled>0 AND counts.succeeded>0 THEN 'partial' WHEN counts.cancelled>0 THEN 'cancelled' ELSE 'succeeded' END,updated_at=now()
 		FROM counts WHERE b.id=$1 RETURNING b.id,b.task_id,b.agent_id,COALESCE(b.rule_id::text,''),COALESCE(b.event_id::text,''),b.status,b.total_targets,b.succeeded_targets,b.failed_targets,b.cancelled_targets,b.created_at,b.updated_at)
 		SELECT * FROM updated`, id).Scan(&batch.ID, &batch.TaskID, &batch.AgentID, &batch.RuleID, &batch.EventID, &batch.Status, &batch.TotalTargets, &batch.SucceededTargets, &batch.FailedTargets, &batch.CancelledTargets, &batch.CreatedAt, &batch.UpdatedAt)
+	if err == nil {
+		_, err = s.DB.Exec(c, `UPDATE automation_event_claims SET status=CASE WHEN $2='partial' THEN 'failed' WHEN $2='cancelled' THEN 'blocked' ELSE $2 END,updated_at=now() WHERE batch_id=$1`, id, batch.Status)
+	}
 	return batch, err
 }
 func (s *Store) ConsumeBatchOutcome(c context.Context, id string) (bool, error) {
@@ -2034,15 +2442,63 @@ func (s *Store) Run(c context.Context, id string) (domain.AgentRun, error) {
 	err := s.DB.QueryRow(c, "SELECT id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at FROM agent_runs WHERE id=$1", id).Scan(&r.ID, &r.TaskID, &r.AgentID, &r.RuleID, &r.BatchID, &r.Status, &r.PromptSnapshot, &r.WorkspaceSnapshot, &r.TargetProject, &r.Summary, &r.ErrorMessage, &r.StartedAt, &r.FinishedAt, &r.CreatedAt)
 	return r, err
 }
+
+// RunQueueStatus derives operator-facing queue state from durable run rows.
+// Queue position is FIFO within a workspace and the next worker poll is the
+// retry point; no in-memory queue is required to recover after a restart.
+func (s *Store) RunQueueStatus(c context.Context, id string) (domain.RunQueueStatus, error) {
+	var status domain.RunQueueStatus
+	if err := s.RefreshQueueState(c); err != nil {
+		return status, err
+	}
+	err := s.DB.QueryRow(c, `SELECT
+		CASE WHEN r.status='queued' THEN 1+(SELECT count(*) FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id))) ELSE 0 END,
+		CASE WHEN r.status<>'queued' THEN '' WHEN EXISTS(SELECT 1 FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id))) THEN 'Wartet auf vorherige Runs im Workspace' WHEN (SELECT count(*) FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running') >= a.max_parallel_runs THEN 'Workspace ist ausgelastet' ELSE '' END,
+		COALESCE((SELECT active.id::text FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running' ORDER BY active.started_at,active.created_at,active.id LIMIT 1),''),
+		COALESCE((SELECT activeAgent.name FROM agents activeAgent JOIN agent_runs active ON active.agent_id=activeAgent.id WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running' ORDER BY active.started_at,active.created_at,active.id LIMIT 1),''),
+		r.workspace_snapshot, COALESCE(r.queue_wait_started_at,r.created_at), r.queue_next_attempt_at
+		FROM agent_runs r JOIN agents a ON a.id=r.agent_id WHERE r.id=$1`, id).Scan(&status.Position, &status.WaitingReason, &status.BlockingRunID, &status.BlockingAgent, &status.Workspace, &status.WaitingSince, &status.NextAttemptAt)
+	return status, err
+}
 func (s *Store) RunDelivery(c context.Context, id string) (domain.RunDelivery, error) {
 	var d domain.RunDelivery
-	err := s.DB.QueryRow(c, "SELECT diff_summary,gate_status,gate_output,input_tokens,output_tokens,token_usage,estimated_cost_microusd,duration_seconds,applied_at FROM agent_runs WHERE id=$1", id).Scan(&d.DiffSummary, &d.GateStatus, &d.GateOutput, &d.InputTokens, &d.OutputTokens, &d.TokenUsage, &d.EstimatedCostMicrousd, &d.DurationSeconds, &d.AppliedAt)
+	err := s.DB.QueryRow(c, "SELECT diff_summary,gate_status,gate_output,input_tokens,output_tokens,token_usage,estimated_cost_microusd,duration_seconds,COALESCE(accepted_commit_sha,''),applied_at FROM agent_runs WHERE id=$1", id).Scan(&d.DiffSummary, &d.GateStatus, &d.GateOutput, &d.InputTokens, &d.OutputTokens, &d.TokenUsage, &d.EstimatedCostMicrousd, &d.DurationSeconds, &d.AcceptedCommitSHA, &d.AppliedAt)
 	return d, err
+}
+
+// AcceptedRunCommitSHAs is the trust boundary for follow-up delivery runs.
+// Only commits recorded by a successful acceptance for this exact managed
+// checkout are allowed to remain ahead of origin.
+func (s *Store) AcceptedRunCommitSHAs(c context.Context, source string) ([]string, error) {
+	rows, err := s.DB.Query(c, `SELECT accepted_commit_sha FROM agent_runs
+		WHERE source_workspace=$1 AND accepted_commit_sha IS NOT NULL AND accepted_commit_sha <> ''`, source)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var shas []string
+	for rows.Next() {
+		var sha string
+		if err := rows.Scan(&sha); err != nil {
+			return nil, err
+		}
+		shas = append(shas, sha)
+	}
+	return shas, rows.Err()
 }
 
 func (s *Store) RunUsage(c context.Context, id string) (domain.UsageReport, error) {
 	var u domain.UsageReport
-	err := s.DB.QueryRow(c, `SELECT usage_provider,usage_model,usage_service_tier,usage_status,cost_source,COALESCE(price_version,''),usage_api_calls,usage_input_tokens,usage_output_tokens,usage_cached_input_tokens,usage_cache_write_tokens,usage_reasoning_tokens,usage_total_tokens,native_cost_microusd,calculated_cost_microusd,COALESCE(raw_usage,'{}'::jsonb),cost_calculated_at FROM agent_runs WHERE id=$1`, id).Scan(&u.Provider, &u.Model, &u.ServiceTier, &u.Status, &u.CostSource, &u.PriceVersion, &u.APICalls, &u.InputTokens, &u.OutputTokens, &u.CachedInputTokens, &u.CacheWriteTokens, &u.ReasoningTokens, &u.TotalTokens, &u.NativeCostMicrousd, &u.CalculatedCostMicrousd, &u.RawUsage, &u.CostCalculatedAt)
+	// token_usage is the pre-telemetry column. Keep it visible for legacy
+	// runs, but mark the report incomplete: it contains no reliable token
+	// class breakdown and must not become a synthetic cost estimate.
+	err := s.DB.QueryRow(c, `SELECT usage_provider,usage_model,usage_service_tier,
+		CASE WHEN usage_total_tokens IS NULL AND token_usage > 0 THEN 'incomplete' ELSE usage_status END,
+		cost_source,COALESCE(price_version,''),usage_api_calls,usage_input_tokens,usage_output_tokens,
+		usage_cached_input_tokens,usage_cache_write_tokens,usage_reasoning_tokens,
+		COALESCE(usage_total_tokens,NULLIF(token_usage,0)),native_cost_microusd,calculated_cost_microusd,
+		COALESCE(raw_usage,'{}'::jsonb),cost_calculated_at
+		FROM agent_runs WHERE id=$1`, id).Scan(&u.Provider, &u.Model, &u.ServiceTier, &u.Status, &u.CostSource, &u.PriceVersion, &u.APICalls, &u.InputTokens, &u.OutputTokens, &u.CachedInputTokens, &u.CacheWriteTokens, &u.ReasoningTokens, &u.TotalTokens, &u.NativeCostMicrousd, &u.CalculatedCostMicrousd, &u.RawUsage, &u.CostCalculatedAt)
 	return u, err
 }
 
@@ -2083,8 +2539,8 @@ func (s *Store) ReclaimableRunWorktrees(c context.Context, before time.Time, lim
 	defer rows.Close()
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[domain.WorktreeCleanupCandidate])
 }
-func (s *Store) MarkRunApplied(c context.Context, id string) (bool, error) {
-	tag, err := s.DB.Exec(c, "UPDATE agent_runs SET applied_at=now(),summary='Änderungen übernommen' WHERE id=$1 AND applied_at IS NULL", id)
+func (s *Store) MarkRunApplied(c context.Context, id, commitSHA string) (bool, error) {
+	tag, err := s.DB.Exec(c, "UPDATE agent_runs SET accepted_commit_sha=$2,applied_at=now(),summary='Änderungen übernommen' WHERE id=$1 AND applied_at IS NULL AND $2 <> ''", id, commitSHA)
 	return tag.RowsAffected() == 1, err
 }
 func (s *Store) MarkRunDiscarded(c context.Context, id string) error {
@@ -2175,6 +2631,11 @@ func (s *Store) RunTrace(c context.Context, id string) (domain.RunTrace, error) 
 		return trace, err
 	}
 	trace.Items = append(trace.Items, domain.RunTraceItem{At: created, Kind: "Run eingeplant", Detail: "Agent-Run wurde in die Warteschlange gelegt."})
+	var waitStarted *time.Time
+	var waitReason string
+	if queueErr := s.DB.QueryRow(c, "SELECT queue_wait_started_at,queue_wait_reason FROM agent_runs WHERE id=$1", id).Scan(&waitStarted, &waitReason); queueErr == nil && waitStarted != nil && waitReason != "" {
+		trace.Items = append(trace.Items, domain.RunTraceItem{At: *waitStarted, Kind: "Warten auf Workspace", Detail: waitReason})
+	}
 	if trace.EventID != "" {
 		var eventType string
 		var occurred time.Time
@@ -2206,12 +2667,33 @@ func (s *Store) RunTrace(c context.Context, id string) (domain.RunTrace, error) 
 	return trace, nil
 }
 func (s *Store) QueuedRuns(c context.Context) ([]domain.AgentRun, error) {
+	if err := s.RefreshQueueState(c); err != nil {
+		return nil, err
+	}
 	rows, err := s.DB.Query(c, "SELECT id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at FROM agent_runs WHERE status='queued' ORDER BY created_at LIMIT 20")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[domain.AgentRun])
+}
+
+// RefreshQueueState persists the current resource explanation and a bounded
+// retry point. It is safe to call from every worker cycle and after restart.
+func (s *Store) RefreshQueueState(c context.Context) error {
+	_, err := s.DB.Exec(c, `WITH state AS (
+		SELECT r.id,
+			(EXISTS (SELECT 1 FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id)))
+			 OR (SELECT count(*) FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running') >= (SELECT max_parallel_runs FROM agents WHERE id=r.agent_id)) AS blocked,
+			EXISTS (SELECT 1 FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id))) AS has_prior
+		FROM agent_runs r WHERE r.status='queued'
+	)
+	UPDATE agent_runs r SET
+		queue_wait_started_at=CASE WHEN state.blocked THEN COALESCE(r.queue_wait_started_at,r.created_at) ELSE NULL END,
+		queue_wait_reason=CASE WHEN NOT state.blocked THEN '' WHEN state.has_prior THEN 'Wartet auf vorherige Runs im Workspace' ELSE 'Workspace ist ausgelastet' END,
+		queue_next_attempt_at=CASE WHEN state.blocked THEN CASE WHEN r.queue_wait_started_at IS NULL THEN now()+interval '3 seconds' WHEN r.queue_next_attempt_at > now() THEN r.queue_next_attempt_at ELSE now() END ELSE now() END
+	FROM state WHERE r.id=state.id`)
+	return err
 }
 
 // RecoverInterruptedRuns releases workspaces after a service restart. A running
@@ -2230,12 +2712,31 @@ func (s *Store) RecoverInterruptedRuns(c context.Context) ([]domain.AgentRun, er
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[domain.AgentRun])
 }
 func (s *Store) ClaimRun(c context.Context, id string) (bool, error) {
-	tag, err := s.DB.Exec(c, "UPDATE agent_runs SET status='running',started_at=now() WHERE id=$1 AND status='queued'", id)
+	tag, err := s.DB.Exec(c, `UPDATE agent_runs r SET status='running',started_at=now(),queue_wait_reason=''
+		WHERE r.id=$1 AND r.status='queued'
+		AND r.queue_next_attempt_at <= now()
+		AND NOT EXISTS (SELECT 1 FROM agent_runs prior WHERE prior.workspace_snapshot=r.workspace_snapshot AND prior.status='queued' AND (prior.created_at<r.created_at OR (prior.created_at=r.created_at AND prior.id<r.id)))
+		AND (SELECT count(*) FROM agent_runs active WHERE active.workspace_snapshot=r.workspace_snapshot AND active.status='running') < (SELECT max_parallel_runs FROM agents WHERE id=r.agent_id)`, id)
 	return tag.RowsAffected() == 1, err
 }
 func (s *Store) CancelRun(c context.Context, id string) (bool, error) {
-	tag, err := s.DB.Exec(c, "UPDATE agent_runs SET status='cancelled',finished_at=now(),summary='Run durch Nutzer abgebrochen' WHERE id=$1 AND status IN('queued','running')", id)
+	tag, err := s.DB.Exec(c, "UPDATE agent_runs SET status='cancelled',finished_at=now(),summary='Run durch Nutzer abgebrochen',queue_wait_reason='' WHERE id=$1 AND status IN('queued','running')", id)
+	if err == nil && tag.RowsAffected() == 1 {
+		_ = s.RecordAudit(c, "", "agent_run.cancelled", "agent_run", id, map[string]string{"reason": "user requested"})
+	}
 	return tag.RowsAffected() == 1, err
+}
+
+// WakeWorkspace makes queued runs immediately eligible after a terminal run
+// releases a repository. ClaimRun remains the single atomic start gate.
+func (s *Store) WakeWorkspace(c context.Context, runID string) error {
+	_, err := s.DB.Exec(c, `WITH released AS (SELECT workspace_snapshot FROM agent_runs WHERE id=$1)
+		UPDATE agent_runs r SET queue_next_attempt_at=now(),queue_wait_reason=''
+		FROM released WHERE r.status='queued' AND r.workspace_snapshot=released.workspace_snapshot`, runID)
+	if err == nil {
+		_ = s.RecordAudit(c, "", "agent_run.queue_wakeup", "agent_run", runID, map[string]string{"reason": "workspace released"})
+	}
+	return err
 }
 func (s *Store) CreateNotification(c context.Context, task, run, kind, message string) error {
 	_, err := s.DB.Exec(c, "INSERT INTO notifications(task_id,agent_run_id,kind,message) VALUES(NULLIF($1,'')::uuid,NULLIF($2,'')::uuid,$3,$4)", task, run, kind, message)
@@ -2350,7 +2851,7 @@ func (s *Store) Provider(c context.Context, provider string) (domain.ProviderSet
 	return p, err
 }
 func (s *Store) PendingEvents(c context.Context) ([]domain.AutomationEvent, error) {
-	r, e := s.DB.Query(c, "SELECT id,type,COALESCE(task_id::text,''),COALESCE(board_id::text,''),occurred_at FROM automation_events WHERE processed_at IS NULL ORDER BY occurred_at LIMIT 20")
+	r, e := s.DB.Query(c, "SELECT id,type,COALESCE(task_id::text,''),COALESCE(board_id::text,''),payload,occurred_at FROM automation_events WHERE processed_at IS NULL ORDER BY occurred_at LIMIT 20")
 	if e != nil {
 		return nil, e
 	}
@@ -2417,6 +2918,49 @@ func (s *Store) CreateRunsForEvent(c context.Context, event domain.AutomationEve
 		return nil, e
 	}
 	defer tx.Rollback(c)
+	fingerprint, e := AutomationEventFingerprint(event, rule)
+	if e != nil {
+		return nil, e
+	}
+	var claimID string
+	canonicalPayload := canonicalAutomationPayloadValue(event.Payload)
+	returnGeneration := automationReturnGeneration(canonicalPayload)
+	// Claims backfilled from pre-fingerprint batches use a namespaced legacy
+	// fingerprint. Match them semantically before inserting the new SHA claim
+	// so a changed transport ID cannot start a second run after migration.
+	var existingStatus string
+	legacyErr := tx.QueryRow(c, `SELECT status FROM automation_event_claims
+		WHERE task_id=$1 AND rule_id=NULLIF($2,'')::uuid
+		  AND target_column_id IS NOT DISTINCT FROM NULLIF($3,'')::uuid
+		  AND return_generation=$4
+		  AND canonical_automation_payload(payload)=canonical_automation_payload($5::jsonb)
+		ORDER BY created_at LIMIT 1`, event.TaskID, rule.ID, rule.TargetColumnID, returnGeneration, event.Payload).Scan(&existingStatus)
+	if legacyErr == nil {
+		if existingStatus == "queued" || existingStatus == "running" {
+			return nil, ErrAutomationActive
+		}
+		return nil, ErrNoRunCreated
+	}
+	if !errors.Is(legacyErr, pgx.ErrNoRows) {
+		return nil, legacyErr
+	}
+	e = tx.QueryRow(c, `INSERT INTO automation_event_claims(fingerprint,event_id,task_id,rule_id,target_column_id,return_generation,payload)
+		VALUES($1,NULLIF($2,'')::uuid,$3,NULLIF($4,'')::uuid,NULLIF($5,'')::uuid,$6,$7)
+		ON CONFLICT (fingerprint) DO NOTHING RETURNING id`, fingerprint, event.ID, event.TaskID, rule.ID, rule.TargetColumnID,
+		returnGeneration, canonicalPayload).Scan(&claimID)
+	if errors.Is(e, pgx.ErrNoRows) {
+		var claimStatus string
+		if statusErr := tx.QueryRow(c, "SELECT status FROM automation_event_claims WHERE fingerprint=$1", fingerprint).Scan(&claimStatus); statusErr != nil {
+			return nil, statusErr
+		}
+		if claimStatus == "queued" || claimStatus == "running" {
+			return nil, ErrAutomationActive
+		}
+		return nil, ErrNoRunCreated
+	}
+	if e != nil {
+		return nil, e
+	}
 	var cooldown int
 	if e = tx.QueryRow(c, "SELECT cooldown_minutes FROM automation_rules WHERE id=$1", rule.ID).Scan(&cooldown); e != nil {
 		return nil, e
@@ -2458,13 +3002,6 @@ func (s *Store) CreateRunsForEvent(c context.Context, event domain.AutomationEve
 		if e = lockWorkspaceTx(c, tx, workspace); e != nil {
 			return nil, e
 		}
-		var active int
-		if e = tx.QueryRow(c, "SELECT count(*) FROM agent_runs WHERE workspace_snapshot=$1 AND status IN('queued','running')", workspace).Scan(&active); e != nil {
-			return nil, e
-		}
-		if active >= a.MaxParallelRuns {
-			return nil, ErrWorkspaceBusy
-		}
 		run, created, createErr := createRunTx(c, tx, event.TaskID, a, rule.AgentID, rule.ID, event.ID, batch.ID, workspace, target.ProjectID)
 		if createErr != nil {
 			return nil, createErr
@@ -2477,22 +3014,48 @@ func (s *Store) CreateRunsForEvent(c context.Context, event domain.AutomationEve
 	if len(runs) == 0 {
 		return nil, ErrNoRunCreated
 	}
+	if _, e = tx.Exec(c, "UPDATE automation_event_claims SET batch_id=$2,updated_at=now() WHERE id=$1", claimID, batch.ID); e != nil {
+		return nil, e
+	}
 	if e = tx.Commit(c); e != nil {
 		return nil, e
 	}
 	return runs, nil
 }
+
+func canonicalAutomationPayloadValue(raw json.RawMessage) any {
+	var value any
+	if json.Unmarshal(raw, &value) != nil {
+		return map[string]any{}
+	}
+	return canonicalAutomationPayload(value)
+}
+
 func (s *Store) MarkEventProcessed(c context.Context, id string) error {
 	_, e := s.DB.Exec(c, "UPDATE automation_events SET processed_at=now() WHERE id=$1", id)
 	return e
 }
 func (s *Store) RecordEventFailure(c context.Context, id, message string) (int, error) {
+	tx, err := s.DB.Begin(c)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(c)
 	var attempts int
-	err := s.DB.QueryRow(c, "UPDATE automation_events SET attempts=attempts+1,last_error=$2 WHERE id=$1 AND processed_at IS NULL RETURNING attempts", id, message).Scan(&attempts)
+	err = tx.QueryRow(c, "UPDATE automation_events SET attempts=attempts+1,last_error=$2 WHERE id=$1 AND processed_at IS NULL RETURNING attempts", id, message).Scan(&attempts)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
 	}
-	return attempts, err
+	if err != nil {
+		return 0, err
+	}
+	if _, err = tx.Exec(c, `UPDATE automation_event_claims
+		SET status=CASE WHEN status IN ('queued','running') THEN 'failed' ELSE status END,
+			attempts=attempts+1,last_error=$2,updated_at=now()
+		WHERE event_id=$1 AND status NOT IN ('succeeded','blocked')`, id, message); err != nil {
+		return 0, err
+	}
+	return attempts, tx.Commit(c)
 }
 
 // AbandonEvent terminates an unrecoverable event so a broken integration
@@ -2506,6 +3069,10 @@ func (s *Store) AbandonEvent(c context.Context, event domain.AutomationEvent, me
 	defer tx.Rollback(c)
 	tag, err := tx.Exec(c, "UPDATE automation_events SET processed_at=now(),last_error=$2 WHERE id=$1 AND processed_at IS NULL", event.ID, message)
 	if err != nil || tag.RowsAffected() == 0 {
+		return false, err
+	}
+	if _, err = tx.Exec(c, `UPDATE automation_event_claims SET status='blocked',attempts=GREATEST(attempts,(SELECT attempts FROM automation_events WHERE id=$1)),last_error=$2,updated_at=now()
+		WHERE event_id=$1 AND status IN ('queued','running','failed')`, event.ID, message); err != nil {
 		return false, err
 	}
 	if event.TaskID != "" {

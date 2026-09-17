@@ -19,6 +19,9 @@ require() {
 for command in curl psql pg_restore systemctl stat date awk mktemp sha256sum cmp; do
 	require "$command"
 done
+if [[ "${TASKBOARD_VERIFY_BWRAP:-1}" == "1" ]]; then
+  "$(dirname "$0")/bubblewrap-healthcheck.sh"
+fi
 
 # The repository owns the hardened unit template, while activation under /etc
 # is an explicit host-administration step. Report drift on every verification

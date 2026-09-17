@@ -1510,7 +1510,14 @@ function Appearance() {
             <legend className="font-medium">{appearanceText("language")}</legend>
             <label className="grid gap-1 text-sm">
               {appearanceText("languageDescription")}
-              <select name="language" value={currentLanguage} onChange={(event) => setSelectedLanguage(normalizeLanguage(event.target.value))}>
+              <select name="language" value={currentLanguage} onChange={(event) => {
+                const next = normalizeLanguage(event.target.value);
+                setSelectedLanguage(next);
+                // Keep the entire React shell in sync before the preference
+                // request completes. The server remains authoritative after
+                // reload/login, while this event makes the switch immediate.
+                window.dispatchEvent(new CustomEvent("shipyard:language-change", { detail: next }));
+              }}>
                 <option value="de">{appearanceText("german")}</option>
                 <option value="en">{appearanceText("english")}</option>
               </select>
@@ -4279,12 +4286,63 @@ function RunConsole({ runID }: { runID: string }) {
   const [olderLogs, setOlderLogs] = useState<any[]>([]);
   const [olderAvailable, setOlderAvailable] = useState<boolean | undefined>();
   const [message, setMessage] = useState("");
+  const [newLogsAvailable, setNewLogsAvailable] = useState(false);
+  const logRef = useRef<HTMLPreElement>(null);
+  const followLogs = useRef(true);
+  const latestSequence = useRef<number | undefined>(undefined);
+  const olderScrollHeight = useRef<number | undefined>(undefined);
   const logs = data?.entries || [];
   const visibleLogs = [...olderLogs, ...logs];
   const canLoadOlder = olderAvailable ?? Boolean(data?.truncated);
+
+  const isNearEnd = () => {
+    const log = logRef.current;
+    return !!log && log.scrollHeight - log.scrollTop - log.clientHeight <= 48;
+  };
+  const scrollToLatest = () => {
+    const log = logRef.current;
+    if (!log) return;
+    followLogs.current = true;
+    setNewLogsAvailable(false);
+    log.scrollTo({ top: log.scrollHeight, behavior: "auto" });
+  };
+
+  useEffect(() => {
+    if (!data) return;
+    const latest = Number(data.entries?.at(-1)?.Sequence ?? 0);
+    const log = logRef.current;
+    const shouldFollow = followLogs.current || !log || latestSequence.current === undefined;
+    const receivedNewLogs = latestSequence.current !== undefined && latest > latestSequence.current;
+
+    latestSequence.current = latest;
+    if (receivedNewLogs && !shouldFollow) setNewLogsAvailable(true);
+    if (shouldFollow) {
+      requestAnimationFrame(() => {
+        const current = logRef.current;
+        if (current) current.scrollTop = current.scrollHeight;
+      });
+    }
+  }, [data]);
+
+  useEffect(() => {
+    const log = logRef.current;
+    const previousHeight = olderScrollHeight.current;
+    if (!log || previousHeight === undefined) return;
+    log.scrollTop += log.scrollHeight - previousHeight;
+    olderScrollHeight.current = undefined;
+  }, [olderLogs]);
+
+  const handleLogScroll = () => {
+    const nearEnd = isNearEnd();
+    followLogs.current = nearEnd;
+    if (nearEnd) setNewLogsAvailable(false);
+  };
+
   const loadOlderLogs = async () => {
     const before = visibleLogs[0]?.Sequence;
     if (!before) return;
+    const log = logRef.current;
+    olderScrollHeight.current = log?.scrollHeight ?? 0;
     try {
       const response = await fetch(`/api/v1/runs/${runID}/logs?before=${encodeURIComponent(before)}`, { credentials: "same-origin" });
       if (!response.ok) throw new Error(await response.text());
@@ -4292,6 +4350,7 @@ function RunConsole({ runID }: { runID: string }) {
       setOlderLogs((entries) => [...(page.entries || []), ...entries]);
       setOlderAvailable(Boolean(page.truncated));
     } catch (err) {
+      olderScrollHeight.current = undefined;
       setMessage(String(err));
     }
   };
@@ -4305,9 +4364,25 @@ function RunConsole({ runID }: { runID: string }) {
         {error ? (
           <p className="text-sm text-destructive">Protokoll konnte nicht geladen werden.</p>
         ) : (
-          <pre className="max-h-[34rem] overflow-auto whitespace-pre-wrap rounded-lg bg-muted p-3 text-xs">
+          <div className="relative">
+            <pre
+              ref={logRef}
+              onScroll={handleLogScroll}
+              aria-label="Run-Protokoll"
+              className="max-h-[34rem] overflow-auto whitespace-pre-wrap rounded-lg bg-muted p-3 text-xs"
+            >
             {visibleLogs.map((log: any) => `[${log.Sequence}] ${log.Level}: ${log.Message}`).join("\n") || "Noch keine Protokolleinträge."}
-          </pre>
+            </pre>
+            {newLogsAvailable && (
+              <Button
+                className="absolute bottom-3 left-1/2 -translate-x-1/2 shadow-md"
+                size="sm"
+                onClick={scrollToLatest}
+              >
+                Neue Einträge anzeigen
+              </Button>
+            )}
+          </div>
         )}
         {message && <p className="mt-3 text-sm text-destructive">{message}</p>}
         {canLoadOlder && visibleLogs.length > 0 && (
@@ -4331,6 +4406,7 @@ function RunDetail({ id }: { id: string }) {
   if (error) return <Failure />;
   if (!data) return <Loading />;
   const terminal = !["running", "queued"].includes(data.run.Status);
+  const money = (microusd: number) => new Intl.NumberFormat("de-DE", { style: "currency", currency: "USD" }).format(microusd / 1e6);
   const action = async (path: string, body?: FormData) => {
     setBusy(true);
     try {
@@ -4416,6 +4492,18 @@ function RunDetail({ id }: { id: string }) {
             </CardContent>
           </Card>
         </section>
+        <Card className="mt-6">
+          <CardHeader>
+            <CardTitle>Usage & Kosten</CardTitle>
+            <CardDescription>{data.usage?.Provider || "unbekannter Provider"} · {data.usage?.Model || "unbekanntes Modell"}</CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-2 text-sm sm:grid-cols-2">
+            {([['Input', data.usage?.InputTokens], ['Output', data.usage?.OutputTokens], ['Cache-Input', data.usage?.CachedInputTokens], ['Cache-Schreiben', data.usage?.CacheWriteTokens], ['Reasoning', data.usage?.ReasoningTokens], ['Gesamt', data.usage?.TotalTokens]] as [string, number | null | undefined][]).map(([label, value]) => <p key={label}><span className="text-muted-foreground">{label}: </span>{value == null ? 'unbekannt' : value.toLocaleString('de-DE')}</p>)}
+            <p><span className="text-muted-foreground">Kostenquelle: </span>{data.usage?.CostSource === 'reported' ? 'Provider gemeldet' : data.usage?.CostSource === 'estimated' ? 'Geschätzt' : data.usage?.CostSource === 'included' ? 'Inklusive' : 'Unbekannt'}</p>
+            <p><span className="text-muted-foreground">Kosten: </span>{data.usage?.CalculatedCostMicrousd == null ? 'nicht bestimmbar' : money(data.usage.CalculatedCostMicrousd)}</p>
+            <p className="sm:col-span-2 text-xs text-muted-foreground">Status: {data.usage?.Status || 'unknown'} · Preisversion: {data.usage?.PriceVersion || 'keine'}{data.usage?.CostCalculatedAt ? ` · ${new Date(data.usage.CostCalculatedAt).toLocaleString('de-DE')}` : ''}</p>
+          </CardContent>
+        </Card>
         {diff && (
           <Card className="mt-6">
             <CardHeader>

@@ -1,24 +1,54 @@
 // Templates intentionally remain server-rendered, but this canonical list
 // keeps legacy pages and newer pages on the exact same navigation contract.
 const navigationEntries=[['/','▦','Übersicht'],['/projects','◫','Projekte'],['/boards','▤','Boards'],['/agents','◉','Agents'],['/automations','↯','Automationen',['/automations','/schedules','/webhooks']],['/skills','◇','Skills'],['/runs','▶','Runs'],['/audit','◷','Audit'],['/settings/providers','⚙','Einstellungen']];
+// The server owns the translation vocabulary. Fetching it keeps legacy pages
+// and dynamically inserted controls on one source of truth.
+let shipyardTranslations={de:{},en:{}};
+const cookieValue=name=>document.cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`))?.[1];
+let activeShipyardLanguage=cookieValue('shipyard_language')==='en'?'en':'de';
+const shipyardLanguage=()=>activeShipyardLanguage;
+// Dynamic controls use the same source phrases as server-rendered legacy
+// views. The English dictionary is also the intentional fallback when a new
+// phrase has not been added to the selected language yet.
+const trText=source=>shipyardTranslations[shipyardLanguage()]?.[source]||shipyardTranslations.en?.[source]||source;
+const translationOriginals=new WeakMap();
+const applyLanguage=()=>{const lang=shipyardLanguage();document.documentElement.lang=lang;const dictionary=shipyardTranslations[lang]||{};const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);const nodes=[];while(walker.nextNode())nodes.push(walker.currentNode);nodes.forEach(node=>{const original=translationOriginals.get(node)||node.nodeValue;translationOriginals.set(node,original);const value=original.trim();if(dictionary[value])node.nodeValue=original.replace(value,dictionary[value]);});document.querySelectorAll('[title],[aria-label],[placeholder]').forEach(node=>['title','aria-label','placeholder'].forEach(attribute=>{const originalKey=`${attribute}`;const original=translationOriginals.get(node)?.[originalKey]||node.getAttribute(attribute);const values=translationOriginals.get(node)||{};values[originalKey]=original;translationOriginals.set(node,values);if(original&&dictionary[original])node.setAttribute(attribute,dictionary[original]);}));document.querySelectorAll('[data-i18n-key]').forEach(node=>{const key=node.dataset.i18nKey;const visible=dictionary[key]||key;node.querySelector('span')?.replaceChildren(document.createTextNode(visible));node.title=visible;});};
+let languageApplyTimer;
+const observeLanguageChanges=()=>{new MutationObserver(()=>{clearTimeout(languageApplyTimer);languageApplyTimer=setTimeout(applyLanguage,0)}).observe(document.body,{childList:true,subtree:true})};
 // Local preferences are deliberately progressive enhancement: the server UI
 // remains fully usable when storage is unavailable.
-const cookieValue=name=>document.cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`))?.[1];
 const shipyardPrefs=(()=>{try{const saved=JSON.parse(localStorage.getItem('shipyard.preferences')||'{"theme":"system","shortcutHints":true}');return {theme:cookieValue('shipyard_theme')||saved.theme||'system',shortcutHints:(cookieValue('shipyard_shortcut_hints')||String(saved.shortcutHints))!=='false'}}catch(_){return {theme:cookieValue('shipyard_theme')||'system',shortcutHints:cookieValue('shipyard_shortcut_hints')!=='false'}}})();
 const systemDark=matchMedia('(prefers-color-scheme:dark)');
 const applyTheme=()=>{const selected=shipyardPrefs.theme||'system';document.documentElement.dataset.theme=selected==='system'?(systemDark.matches?'dark':'light'):selected};
 applyTheme();
 systemDark.addEventListener?.('change',()=>{if((shipyardPrefs.theme||'system')==='system')applyTheme()});
 document.title=document.title.replace(/Taskboard/g,'Shipyard');
+const loadTranslations=fetch('/api/i18n',{credentials:'same-origin'}).then(response=>response.ok?response.json():null).then(data=>{const dictionaries=data?.languages||{};if(data?.translations&&!dictionaries.en)dictionaries.en=data.translations;shipyardTranslations.de=dictionaries.de||{};shipyardTranslations.en=dictionaries.en||{};if(data?.language==='de'||data?.language==='en')activeShipyardLanguage=data.language;applyLanguage();observeLanguageChanges();return data}).catch(()=>{applyLanguage();observeLanguageChanges();return null});
+document.addEventListener('change',event=>{if(!(event.target instanceof HTMLSelectElement)||event.target.name!=='language')return;activeShipyardLanguage=event.target.value==='en'?'en':'de';const value=activeShipyardLanguage;document.cookie=`shipyard_language=${value}; path=/; max-age=31536000; SameSite=Lax`;try{localStorage.setItem('shipyard.language',value)}catch(_){}if(value==='de'||Object.keys(shipyardTranslations.en).length)applyLanguage();else loadTranslations.then(applyLanguage);});
 // Keep focus on the invoking control and make Escape opt-in for closable
 // dialogs. Native showModal() supplies the remaining focus containment.
 const modalReturnFocus=new WeakMap();
 const nativeShowModal=HTMLDialogElement.prototype.showModal;
-const openModal=(dialog,trigger=document.activeElement)=>{if(!dialog)return;if(trigger instanceof HTMLElement)modalReturnFocus.set(dialog,trigger);if(!dialog.open)nativeShowModal.call(dialog);requestAnimationFrame(()=>dialog.querySelector('[autofocus],button,input,select,textarea,[tabindex]:not([tabindex="-1"])')?.focus())};
+const isClosableDialog=dialog=>dialog.hasAttribute('data-closable')||!!dialog.querySelector('.close,[data-close-modal]');
+const enhanceLegacyDialog=dialog=>{
+ const article=dialog.querySelector(':scope > article');if(!article||article.querySelector(':scope > .dialog-body'))return;
+ const header=article.querySelector(':scope > header'),footer=article.querySelector(':scope > footer');
+ const body=[...article.children].filter(child=>child!==header&&child!==footer);
+ if(!body.length)return;
+ const wrapper=document.createElement('div');wrapper.className='dialog-body';body[0].before(wrapper);body.forEach(child=>wrapper.append(child));
+ // Forms stay semantically intact, but their boxes must not become a second
+ // scroll container after they have been moved into the shared body. A
+ // second form (usually a destructive action) is marked as the dialog's
+ // sticky action area so it remains available beside a long primary form.
+ const forms=[...wrapper.querySelectorAll(':scope > form')];
+ forms.forEach((form,index)=>form.classList.toggle('dialog-secondary-form',index>0));
+};
+const dialogFocusTarget=dialog=>dialog.querySelector('[autofocus]')||dialog.querySelector('.dialog-body button:not(.close):not([data-close-modal]),.dialog-body input,.dialog-body select,.dialog-body textarea,.dialog-body [tabindex]:not([tabindex="-1"])')||dialog.querySelector('.close,[data-close-modal]');
+const openModal=(dialog,trigger=document.activeElement)=>{if(!dialog)return;if(trigger instanceof HTMLElement)modalReturnFocus.set(dialog,trigger);enhanceLegacyDialog(dialog);if(!dialog.open)nativeShowModal.call(dialog);requestAnimationFrame(()=>dialogFocusTarget(dialog)?.focus())};
 HTMLDialogElement.prototype.showModal=function(){openModal(this)};
-document.addEventListener('cancel',event=>{const dialog=event.target.closest?.('dialog');if(dialog&&!dialog.querySelector('.close,[data-close-modal],button[type="button"]'))event.preventDefault()},true);
+document.addEventListener('cancel',event=>{const dialog=event.target.closest?.('dialog');if(dialog&&!isClosableDialog(dialog))event.preventDefault()},true);
 document.addEventListener('close',event=>{const dialog=event.target;if(!(dialog instanceof HTMLDialogElement))return;const trigger=modalReturnFocus.get(dialog);modalReturnFocus.delete(dialog);if(trigger?.isConnected)requestAnimationFrame(()=>trigger.focus())},true);
-document.querySelectorAll('.brand-mark').forEach(mark=>{mark.textContent='SY';mark.title='Shipyard'});
+document.querySelectorAll('.brand-mark').forEach(mark=>{mark.textContent='SY';mark.title=trText('Shipyard')});
 // Older server-rendered views predate the Shipyard favicon. Keep branding a
 // shell responsibility so newly added extension pages cannot accidentally
 // fall back to the browser default icon just because their template is small.
@@ -55,7 +85,8 @@ document.querySelectorAll('.app-sidebar nav').forEach(nav=>{
    const link=document.createElement('a');
    const routes=ownedRoutes||[href];
    const active=routes.some(route=>route==='/'?location.pathname==='/' : location.pathname===route||location.pathname.startsWith(`${route}/`));
-   link.href=href;link.title=label;link.innerHTML=`<b>${icon}</b><span>${label}</span>`;
+   const visibleLabel=shipyardTranslations[shipyardLanguage()]?.[label]||label;
+   link.dataset.i18nKey=label;link.href=href;link.title=visibleLabel;link.innerHTML=`<b>${icon}</b><span>${visibleLabel}</span>`;
    link.classList.toggle('active',active);
    if(active)link.setAttribute('aria-current','page');
    links.append(link);
@@ -75,8 +106,8 @@ document.querySelectorAll('.app-sidebar nav').forEach(nav=>{
 // question offers a human override while old bookmarked pages keep working.
 document.querySelectorAll('.agent-interaction form[action^="/interactions/"]').forEach(form=>{
  if(form.querySelector('[name="freeform_answer"]'))return;
- const label=document.createElement('label');label.textContent='Eigene oder ergänzende Antwort';
- const input=document.createElement('textarea');input.name='freeform_answer';input.placeholder='Überschreibt oder ergänzt die Auswahl.';label.append(input);
+ const label=document.createElement('label');label.textContent=trText('Eigene oder ergänzende Antwort');
+ const input=document.createElement('textarea');input.name='freeform_answer';input.placeholder=trText('Überschreibt oder ergänzt die Auswahl.');label.append(input);
  form.insertBefore(label,form.lastElementChild);
 });
 // Choice buttons are selections, not implicit submissions. This lets a person
@@ -96,22 +127,22 @@ if(document.body.classList.contains('task-page')){
  const hero=document.querySelector('.task-hero');
  document.querySelectorAll('.agent-interaction').forEach(card=>hero?.after(card));
 }
-const shortcutHelp=()=>{let dialog=document.getElementById('shipyard-shortcuts');if(!dialog){dialog=document.createElement('dialog');dialog.id='shipyard-shortcuts';dialog.innerHTML='<article><header><button class="close" aria-label="Schließen"></button><h2>Tastatursteuerung</h2></header><dl><dt>Tab / Umschalt+Tab</dt><dd>Zum nächsten oder vorherigen Bedienelement</dd><dt>Eingabe / Leertaste</dt><dd>Link, Button oder Auswahl auslösen</dd><dt>↑ / ↓, Pos1 / Ende</dt><dd>Navigation in der Seitenleiste</dd><dt>Escape</dt><dd>Dialog oder mobile Navigation schließen</dd></dl><label><input type="checkbox" data-shortcut-hints> Hinweise zu Shortcuts anzeigen</label></article>';document.body.append(dialog);dialog.querySelector('.close').addEventListener('click',()=>dialog.close());dialog.querySelector('[data-shortcut-hints]').checked=shipyardPrefs.shortcutHints!==false;dialog.querySelector('[data-shortcut-hints]').addEventListener('change',e=>{shipyardPrefs.shortcutHints=e.target.checked;try{localStorage.setItem('shipyard.preferences',JSON.stringify(shipyardPrefs))}catch(_){}})}openModal(dialog)};
+const shortcutHelp=()=>{let dialog=document.getElementById('shipyard-shortcuts');if(!dialog){dialog=document.createElement('dialog');dialog.id='shipyard-shortcuts';dialog.innerHTML=`<article><header><button class="close" aria-label="${trText('Schließen')}"></button><h2>${trText('Tastatursteuerung')}</h2></header><dl><dt>Tab / Umschalt+Tab</dt><dd>${trText('Zum nächsten oder vorherigen Bedienelement')}</dd><dt>${trText('Eingabe / Leertaste')}</dt><dd>${trText('Link, Button oder Auswahl auslösen')}</dd><dt>↑ / ↓, Pos1 / Ende</dt><dd>${trText('Navigation in der Seitenleiste')}</dd><dt>Escape</dt><dd>${trText('Dialog oder mobile Navigation schließen')}</dd></dl><label><input type="checkbox" data-shortcut-hints> ${trText('Hinweise zu Shortcuts anzeigen')}</label></article>`;document.body.append(dialog);dialog.querySelector('.close').addEventListener('click',()=>dialog.close());dialog.querySelector('[data-shortcut-hints]').checked=shipyardPrefs.shortcutHints!==false;dialog.querySelector('[data-shortcut-hints]').addEventListener('change',e=>{shipyardPrefs.shortcutHints=e.target.checked;try{localStorage.setItem('shipyard.preferences',JSON.stringify(shipyardPrefs))}catch(_){}})}openModal(dialog)};
 document.addEventListener('keydown',event=>{if(event.key==='?'&&!/input|textarea|select/i.test(event.target.tagName)){event.preventDefault();shortcutHelp()}});
 document.querySelectorAll('.app-sidebar').forEach(sidebar=>{
  const shell=sidebar.closest('.app-shell');
  const desktop=matchMedia('(min-width:801px)');
- const toggle=document.createElement('button');toggle.type='button';toggle.className='mobile-nav-toggle';toggle.setAttribute('aria-label','Navigation öffnen');toggle.innerHTML='<span></span><span></span><span></span>';
+ const toggle=document.createElement('button');toggle.type='button';toggle.className='mobile-nav-toggle';toggle.setAttribute('aria-label',trText('Navigation öffnen'));toggle.innerHTML='<span></span><span></span><span></span>';
  sidebar.prepend(toggle);
  // Storage is a preference only. It must never make the toggle unusable in a
  // browser that blocks local storage (for example private or embedded views).
  const readOpen=()=>{try{return localStorage.getItem('taskboard.sidebar.expanded')==='true'}catch(_){return false}};
  const writeOpen=open=>{try{localStorage.setItem('taskboard.sidebar.expanded',String(open))}catch(_){}};
- const applyDesktop=open=>{const expanded=open??readOpen();shell?.classList.toggle('sidebar-expanded',expanded);toggle.setAttribute('aria-expanded',String(expanded));toggle.setAttribute('aria-label',expanded?'Navigation einklappen':'Navigation ausklappen')};
- const close=()=>{sidebar.classList.remove('mobile-open');if(!desktop.matches){toggle.setAttribute('aria-expanded','false');toggle.setAttribute('aria-label','Navigation öffnen')}};
+ const applyDesktop=open=>{const expanded=open??readOpen();shell?.classList.toggle('sidebar-expanded',expanded);toggle.setAttribute('aria-expanded',String(expanded));toggle.setAttribute('aria-label',trText(expanded?'Navigation einklappen':'Navigation ausklappen'))};
+ const close=()=>{sidebar.classList.remove('mobile-open');if(!desktop.matches){toggle.setAttribute('aria-expanded','false');toggle.setAttribute('aria-label',trText('Navigation öffnen'))}};
  const apply=()=>{if(desktop.matches)applyDesktop();else{shell?.classList.remove('sidebar-expanded');close()}};
  apply();desktop.addEventListener?.('change',apply);
- toggle.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();if(desktop.matches){const open=!shell?.classList.contains('sidebar-expanded');writeOpen(open);applyDesktop(open);return}const open=sidebar.classList.toggle('mobile-open');toggle.setAttribute('aria-expanded',String(open));toggle.setAttribute('aria-label',open?'Navigation schließen':'Navigation öffnen')});
+ toggle.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();if(desktop.matches){const open=!shell?.classList.contains('sidebar-expanded');writeOpen(open);applyDesktop(open);return}const open=sidebar.classList.toggle('mobile-open');toggle.setAttribute('aria-expanded',String(open));toggle.setAttribute('aria-label',trText(open?'Navigation schließen':'Navigation öffnen'))});
  sidebar.querySelectorAll('a').forEach(link=>link.addEventListener('click',close));
  document.addEventListener('click',event=>{if(!sidebar.contains(event.target))close()});
  document.addEventListener('keydown',event=>{if(event.key==='Escape')close()});
@@ -127,8 +158,8 @@ document.addEventListener('submit',event=>{const form=event.target;if(!(form ins
 // HTMX forms intentionally keep the current view until a successful redirect.
 // Surface all rejected mutations in the same view; otherwise a 4xx response
 // (invalid workflow, stale CSRF, unavailable agent) looks like a dead button.
-document.body.addEventListener('htmx:responseError',event=>{const xhr=event.detail?.xhr;let message=(xhr?.responseText||'Änderung konnte nicht gespeichert werden.').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim();if(!message)message='Änderung konnte nicht gespeichert werden.';notify(message.slice(0,420),'error')});
-document.body.addEventListener('htmx:sendError',()=>notify('Verbindung zum Server fehlgeschlagen. Bitte erneut versuchen.','error'));
+document.body.addEventListener('htmx:responseError',event=>{const xhr=event.detail?.xhr;let message=(xhr?.responseText||trText('Änderung konnte nicht gespeichert werden.')).replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim();if(!message)message=trText('Änderung konnte nicht gespeichert werden.');notify(message.slice(0,420),'error')});
+document.body.addEventListener('htmx:sendError',()=>notify(trText('Verbindung zum Server fehlgeschlagen. Bitte erneut versuchen.'),'error'));
 // The dashboard separates current action from historical charts. It is
 // populated asynchronously so live metric updates never delay first render.
 // Only the actual overview owns the attention feed. Other pages reuse the
@@ -137,25 +168,25 @@ const dashboard=document.querySelector('[data-dashboard-overview]');
 if(dashboard){fetch('/dashboard/attention').then(response=>response.ok?response.json():null).then(attention=>{
  if(!attention)return;
  const items=[['Blockierte Tasks',attention.BlockedTasks,'/boards'],['Aktuell fehlgeschlagen · 7 Tage',attention.FailedRuns7d,'/runs'],['Offene Agent-Fragen',attention.OpenInteractions,'/boards'],['Fällig in 24 Stunden',attention.DueNext24h,'/boards']];
- const section=document.createElement('section');section.className='attention-panel';section.setAttribute('aria-label','Braucht Aufmerksamkeit');
- section.innerHTML=`<header><div><p class="section-kicker">Jetzt handeln</p><h2>Braucht Aufmerksamkeit</h2></div><p>Nur offene Punkte, keine Historie.</p></header><div class="attention-grid">${items.map(([label,count,href])=>`<a href="${href}"><strong>${count}</strong><span>${label}</span></a>`).join('')}</div>`;
+ const section=document.createElement('section');section.className='attention-panel';section.setAttribute('aria-label',trText('Braucht Aufmerksamkeit'));
+ section.innerHTML=`<header><div><p class="section-kicker">${trText('Jetzt handeln')}</p><h2>${trText('Braucht Aufmerksamkeit')}</h2></div><p>${trText('Nur offene Punkte, keine Historie.')}</p></header><div class="attention-grid">${items.map(([label,count,href])=>`<a href="${href}"><strong>${count}</strong><span>${trText(label)}</span></a>`).join('')}</div>`;
  const notifications=dashboard.querySelector('.notifications');(notifications||dashboard).before(section);
 }).catch(()=>{})}
 // Provider tests are intentionally token-free checks. They verify the local
 // adapter or configured API secret before an agent can be assigned work.
-document.querySelectorAll('.provider-card form[action^="/settings/providers/"]').forEach(form=>{const path=form.action.replace(location.origin,'');if(!/^\/settings\/providers\/[^/]+$/.test(path))return;const button=document.createElement('button');button.type='button';button.className='secondary';button.textContent='Verbindung testen';const result=document.createElement('small');result.className='provider-test-result';result.setAttribute('role','status');button.addEventListener('click',async()=>{button.disabled=true;result.className='provider-test-result';result.textContent='Prüfe …';try{const response=await fetch(`${path}/test`,{method:'POST',headers:csrfHeaders()});const data=await response.json().catch(()=>null);if(!response.ok)throw new Error(data||'');result.classList.add('is-success');result.textContent=data?.result||'Provider ist erreichbar.'}catch(_){result.classList.add('is-error');result.textContent='Provider-Test fehlgeschlagen. Prüfe Adapter, Secret und Server-Log.'}finally{button.disabled=false}});form.querySelector('footer')?.prepend(button);form.querySelector('footer')?.before(result)});
+document.querySelectorAll('.provider-card form[action^="/settings/providers/"]').forEach(form=>{const path=form.action.replace(location.origin,'');if(!/^\/settings\/providers\/[^/]+$/.test(path))return;const button=document.createElement('button');button.type='button';button.className='secondary';button.textContent=trText('Verbindung testen');const result=document.createElement('small');result.className='provider-test-result';result.setAttribute('role','status');button.addEventListener('click',async()=>{button.disabled=true;result.className='provider-test-result';result.textContent=trText('Prüfe …');try{const response=await fetch(`${path}/test`,{method:'POST',headers:csrfHeaders()});const data=await response.json().catch(()=>null);if(!response.ok)throw new Error(data||'');result.classList.add('is-success');result.textContent=data?.result||trText('Provider ist erreichbar.')}catch(_){result.classList.add('is-error');result.textContent=trText('Provider-Test fehlgeschlagen. Prüfe Adapter, Secret und Server-Log.')}finally{button.disabled=false}});form.querySelector('footer')?.prepend(button);form.querySelector('footer')?.before(result)});
 // A run log is the terminal view; the compact trace above it explains why the
 // run exists and which delivery decision remains without duplicating logs.
 const traceLog=document.querySelector('[data-run-log-src]');
-document.addEventListener('toggle',async event=>{const entry=event.target;if(!(entry instanceof HTMLDetailsElement)||!entry.open||!entry.dataset.runLogEntry||entry.dataset.loaded)return;const output=entry.querySelector('pre');if(!output)return;entry.dataset.loaded='true';output.hidden=false;output.textContent='Vollständige Ausgabe wird geladen …';try{const response=await fetch(entry.dataset.runLogEntry);if(!response.ok)throw new Error();output.textContent=await response.text()}catch(_){output.textContent='Die vollständige Ausgabe konnte nicht geladen werden.'}},true);
+document.addEventListener('toggle',async event=>{const entry=event.target;if(!(entry instanceof HTMLDetailsElement)||!entry.open||!entry.dataset.runLogEntry||entry.dataset.loaded)return;const output=entry.querySelector('pre');if(!output)return;entry.dataset.loaded='true';output.hidden=false;output.textContent=trText('Vollständige Ausgabe wird geladen …');try{const response=await fetch(entry.dataset.runLogEntry);if(!response.ok)throw new Error();output.textContent=await response.text()}catch(_){output.textContent=trText('Die vollständige Ausgabe konnte nicht geladen werden.')}},true);
 // The run console starts with a compact tail. Older output is fetched in
 // chronological pages on demand, so a noisy dependency install cannot make
 // the active page, browser history or live SSE refresh unresponsive.
-document.addEventListener('click',async event=>{const button=event.target.closest('[data-run-log-older]');if(!button||button.disabled)return;const host=button.closest('[data-run-log-src]');if(!host)return;const before=button.dataset.before;if(!/^\d+$/.test(before||''))return;button.disabled=true;button.textContent='Ältere Ausgabe wird geladen …';try{const response=await fetch(`${host.dataset.runLogSrc}?before=${encodeURIComponent(before)}`);if(!response.ok)throw new Error();const page=document.createElement('template');page.innerHTML=await response.text();button.closest('[data-run-log-page]')?.replaceWith(page.content)}catch(_){button.disabled=false;button.textContent='Ältere Ausgabe erneut laden';notify('Ältere Ausgabe konnte nicht geladen werden.','error')}});
+document.addEventListener('click',async event=>{const button=event.target.closest('[data-run-log-older]');if(!button||button.disabled)return;const host=button.closest('[data-run-log-src]');if(!host)return;const before=button.dataset.before;if(!/^\d+$/.test(before||''))return;button.disabled=true;button.textContent=trText('Ältere Ausgabe wird geladen …');try{const response=await fetch(`${host.dataset.runLogSrc}?before=${encodeURIComponent(before)}`);if(!response.ok)throw new Error();const page=document.createElement('template');page.innerHTML=await response.text();button.closest('[data-run-log-page]')?.replaceWith(page.content)}catch(_){button.disabled=false;button.textContent=trText('Ältere Ausgabe erneut laden');notify(trText('Ältere Ausgabe konnte nicht geladen werden.'),'error')}});
 if(traceLog){const match=traceLog.dataset.runLogSrc.match(/^\/runs\/([^/]+)\/logs$/);if(match){fetch(`/runs/${match[1]}/trace`).then(response=>response.ok?response.json():null).then(trace=>{
  if(!trace||!trace.Items?.length)return;
- const section=document.createElement('section');section.className='run-trace';const heading=document.createElement('h2');heading.textContent='Ablauf';section.append(heading);const list=document.createElement('ol');
- trace.Items.forEach(item=>{const row=document.createElement('li'),title=document.createElement('strong'),meta=document.createElement('small'),detail=document.createElement('span');title.textContent=item.Kind;meta.textContent=new Date(item.At).toLocaleString('de-DE');detail.textContent=item.Detail;row.append(title,meta,detail);list.append(row)});section.append(list);traceLog.closest('section')?.before(section);
+ const section=document.createElement('section');section.className='run-trace';const heading=document.createElement('h2');heading.textContent=trText('Ablauf');section.append(heading);const list=document.createElement('ol');
+ trace.Items.forEach(item=>{const row=document.createElement('li'),title=document.createElement('strong'),meta=document.createElement('small'),detail=document.createElement('span');title.textContent=item.Kind;meta.textContent=new Date(item.At).toLocaleString(shipyardLanguage());detail.textContent=item.Detail;row.append(title,meta,detail);list.append(row)});section.append(list);traceLog.closest('section')?.before(section);
 }).catch(()=>{})}}
 // Delivery review stays next to the console: load the real patch on demand,
 // then allow a human to reject it with task-level feedback and an optional
@@ -237,22 +268,37 @@ document.addEventListener('pointercancel',()=>{clearTimeout(touchTimer);touchTas
 
 const canvas=document.querySelector('.flow-canvas');
 if(canvas){
- const controls=document.createElement('div');controls.className='canvas-controls';controls.innerHTML='<button type="button" data-zoom="-0.1" aria-label="Verkleinern">−</button><button type="button" data-zoom="0.1" aria-label="Vergrößern">+</button><button type="button" data-reset-canvas>Ansicht zurücksetzen</button>';canvas.before(controls);
- let zoom=1;const setZoom=value=>{zoom=Math.max(.65,Math.min(1.35,value));canvas.style.zoom=zoom;notify(`Ansicht ${Math.round(zoom*100)}%`)};controls.querySelectorAll('[data-zoom]').forEach(button=>button.addEventListener('click',()=>setZoom(zoom+Number(button.dataset.zoom))));controls.querySelector('[data-reset-canvas]').addEventListener('click',()=>{zoom=1;canvas.style.zoom='';canvas.scrollTo({left:0,top:0,behavior:'smooth'});notify('Ansicht zurückgesetzt')});
- const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.classList.add('workflow-lines');svg.setAttribute('width','100%');svg.setAttribute('height','100%');svg.innerHTML='<defs><marker id="flow-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8z" fill="#4868e8"/></marker></defs>';canvas.prepend(svg);
- const point=(node,side)=>{const c=canvas.getBoundingClientRect(),r=node.getBoundingClientRect();return{x:(side==='right'?r.right:r.left)-c.left+canvas.scrollLeft,y:r.top+r.height/2-c.top+canvas.scrollTop}};
- const snap=value=>Math.round(value/20)*20;
- const path=(a,b)=>{const start={x:snap(a.x),y:snap(a.y)},end={x:snap(b.x),y:snap(b.y)},mid=snap((start.x+end.x)/2);return `M ${start.x} ${start.y} H ${mid} V ${end.y} H ${end.x}`};
- const draw=()=>{svg.querySelectorAll('.edge-path').forEach(x=>x.remove());canvas.querySelectorAll('.workflow-edge').forEach(edge=>{const from=canvas.querySelector(`[data-column-id="${edge.dataset.from}"]`),to=canvas.querySelector(`[data-column-id="${edge.dataset.to}"]`);if(!from||!to)return;const p=document.createElementNS(svg.namespaceURI,'path');p.classList.add('edge-path');p.setAttribute('d',path(point(from,'right'),point(to,'left')));p.setAttribute('marker-end','url(#flow-arrow)');svg.append(p);if(edge.dataset.label){const label=document.createElementNS(svg.namespaceURI,'text');label.classList.add('edge-path','workflow-label');const a=point(from,'right'),b=point(to,'left');label.setAttribute('x',(a.x+b.x)/2);label.setAttribute('y',(a.y+b.y)/2-7);label.setAttribute('text-anchor','middle');label.textContent=edge.dataset.label;svg.append(label)}})};
- let moveNode;
- canvas.querySelectorAll('.node-grip').forEach(grip=>grip.addEventListener('pointerdown',event=>{event.preventDefault();moveNode=grip.closest('.flow-node');grip.setPointerCapture(event.pointerId)}));
- window.addEventListener('pointermove',event=>{if(!moveNode)return;const r=canvas.getBoundingClientRect();const x=Math.max(0,event.clientX-r.left+canvas.scrollLeft-25),y=Math.max(0,event.clientY-r.top+canvas.scrollTop-25);moveNode.style.left=`${x}px`;moveNode.style.top=`${y}px`;moveNode.dataset.x=Math.round(x);moveNode.dataset.y=Math.round(y);draw()});
- window.addEventListener('pointerup',()=>{if(!moveNode)return;const node=moveNode;moveNode=null;fetch(`/columns/${node.dataset.columnId}/position`,{method:'POST',headers:csrfHeaders({'Content-Type':'application/x-www-form-urlencoded'}),body:new URLSearchParams({x:node.dataset.x,y:node.dataset.y})}).catch(()=>{});});
+ const toolbar=canvas.previousElementSibling;
+ let zoom=1;
+ const zoomValue=toolbar?.querySelector('[data-canvas-zoom-value]');
+ const setZoom=value=>{zoom=Math.max(.5,Math.min(1.6,Math.round(value*20)/20));canvas.style.zoom=zoom;if(zoomValue)zoomValue.textContent=`${Math.round(zoom*100)}%`;draw();};
+ toolbar?.querySelectorAll('[data-canvas-zoom]').forEach(button=>button.addEventListener('click',()=>setZoom(zoom+Number(button.dataset.canvasZoom))));
+ toolbar?.querySelector('[data-reset-canvas]')?.addEventListener('click',()=>{setZoom(1);canvas.scrollTo({left:0,top:0,behavior:'smooth'});notify('Ansicht zurückgesetzt')});
+ const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.classList.add('workflow-lines');svg.setAttribute('role','group');svg.setAttribute('aria-label','Workflow-Verbindungen');svg.innerHTML='<defs></defs>';canvas.prepend(svg);
+ // CSS zoom scales getBoundingClientRect(), while SVG coordinates and scroll
+ // positions remain in the canvas' layout coordinate system. Convert visual
+ // coordinates back once here so edges stay attached at every zoom level.
+ const point=(node,side)=>({x:node.offsetLeft+(side==='right'?node.offsetWidth:0),y:node.offsetTop+node.offsetHeight/2});
+ const pointerPoint=event=>{const c=canvas.getBoundingClientRect();return{x:(event.clientX-c.left)/zoom+canvas.scrollLeft,y:(event.clientY-c.top)/zoom+canvas.scrollTop}};
+ const edgeStyles=[['var(--edge-1)','solid'],['var(--edge-2)','dashed'],['var(--edge-3)','dotted'],['var(--edge-4)','solid']];
+ const path=(a,b,lane=0)=>{const start={x:a.x,y:a.y},end={x:b.x,y:b.y},mid=(start.x+end.x)/2+lane*18;return `M ${start.x} ${start.y} H ${mid-12} Q ${mid} ${start.y} ${mid} ${start.y+12} V ${end.y-12} Q ${mid} ${end.y} ${mid+12} ${end.y} H ${end.x}`};
+ const draw=()=>{const width=Math.max(canvas.clientWidth,canvas.scrollWidth),height=Math.max(canvas.clientHeight,canvas.scrollHeight);svg.setAttribute('width',width);svg.setAttribute('height',height);svg.setAttribute('viewBox',`0 0 ${width} ${height}`);svg.querySelectorAll('.edge-path,.workflow-label').forEach(x=>x.remove());const defs=svg.querySelector('defs');defs.replaceChildren();const edges=[...canvas.querySelectorAll('.workflow-edge')];const pairCounts=new Map;edges.forEach(edge=>{const key=`${edge.dataset.from}:${edge.dataset.to}`;pairCounts.set(key,(pairCounts.get(key)||0)+1)});const pairIndexes=new Map;edges.forEach((edge,index)=>{const from=canvas.querySelector(`[data-column-id="${edge.dataset.from}"]`),to=canvas.querySelector(`[data-column-id="${edge.dataset.to}"]`);if(!from||!to)return;const key=`${edge.dataset.from}:${edge.dataset.to}`,count=pairCounts.get(key)||1,position=pairIndexes.get(key)||0;pairIndexes.set(key,position+1);const lane=(position-(count-1)/2),[color,style]=edgeStyles[index%edgeStyles.length];const markerId=`flow-arrow-${index}`;const marker=document.createElementNS(svg.namespaceURI,'marker');marker.id=markerId;marker.setAttribute('markerWidth','8');marker.setAttribute('markerHeight','8');marker.setAttribute('refX','7');marker.setAttribute('refY','4');marker.setAttribute('orient','auto');const arrow=document.createElementNS(svg.namespaceURI,'path');arrow.setAttribute('d','M0,0 L8,4 L0,8z');arrow.setAttribute('fill',color);marker.append(arrow);defs.append(marker);const p=document.createElementNS(svg.namespaceURI,'path');p.classList.add('edge-path',`edge-${style}`);p.style.setProperty('--edge-color',color);p.setAttribute('d',path(point(from,'right'),point(to,'left'),lane));p.setAttribute('marker-end',`url(#${markerId})`);p.setAttribute('aria-label',`${from.querySelector('.node-body strong').textContent} → ${to.querySelector('.node-body strong').textContent}`);svg.append(p);if(edge.dataset.label){const label=document.createElementNS(svg.namespaceURI,'text');label.classList.add('workflow-label');const a=point(from,'right'),b=point(to,'left');label.setAttribute('x',(a.x+b.x)/2);label.setAttribute('y',(a.y+b.y)/2-7+lane*4);label.setAttribute('text-anchor','middle');label.textContent=edge.dataset.label;svg.append(label)}})};
+ toolbar?.querySelector('[data-fit-canvas]')?.addEventListener('click',()=>{const nodes=[...canvas.querySelectorAll('.flow-node')];if(!nodes.length)return;const maxX=Math.max(...nodes.map(node=>node.offsetLeft+node.offsetWidth))+80,maxY=Math.max(...nodes.map(node=>node.offsetTop+node.offsetHeight))+80;const fit=Math.min(canvas.clientWidth/Math.max(maxX,1),canvas.clientHeight/Math.max(maxY,1),1);setZoom(Math.max(.5,fit));canvas.scrollTo({left:0,top:0,behavior:'smooth'});notify('Inhalt angepasst')});
+ const fullscreenButton=toolbar?.querySelector('[data-toggle-canvas-fullscreen]');fullscreenButton?.addEventListener('click',()=>{const workspace=canvas.closest('.flow-workspace');const active=workspace?.classList.toggle('is-maximized')||false;fullscreenButton.setAttribute('aria-pressed',String(active));fullscreenButton.textContent=active?'Maximierung verlassen':'Canvas maximieren';document.body.classList.toggle('canvas-is-maximized',active);requestAnimationFrame(draw)});
+ const pan={active:false,x:0,y:0,left:0,top:0};canvas.addEventListener('pointerdown',event=>{if(event.button!==1&&!event.altKey&&!event.shiftKey)return;if(event.target.closest('.flow-node'))return;pan.active=true;pan.x=event.clientX;pan.y=event.clientY;pan.left=canvas.scrollLeft;pan.top=canvas.scrollTop;canvas.classList.add('is-panning');canvas.setPointerCapture?.(event.pointerId);event.preventDefault()});canvas.addEventListener('pointermove',event=>{if(!pan.active)return;canvas.scrollLeft=pan.left-(event.clientX-pan.x)/zoom;canvas.scrollTop=pan.top-(event.clientY-pan.y)/zoom});canvas.addEventListener('pointerup',()=>{pan.active=false;canvas.classList.remove('is-panning')});
+ canvas.addEventListener('wheel',event=>{if(!event.ctrlKey)return;event.preventDefault();setZoom(zoom+(event.deltaY<0?.1:-.1))},{passive:false});
+ canvas.addEventListener('keydown',event=>{const distance=event.shiftKey?120:40;if(!['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','+','-','='].includes(event.key))return;event.preventDefault();if(event.key==='='||event.key==='+')setZoom(zoom+.1);else if(event.key==='-')setZoom(zoom-.1);else canvas.scrollBy({left:event.key==='ArrowRight'?distance:event.key==='ArrowLeft'?-distance:0,top:event.key==='ArrowDown'?distance:event.key==='ArrowUp'?-distance:0})});
+ let moveNode,moveOrigin;
+ canvas.querySelectorAll('.node-grip').forEach(grip=>grip.addEventListener('pointerdown',event=>{event.preventDefault();moveNode=grip.closest('.flow-node');moveOrigin={x:event.clientX,y:event.clientY,left:moveNode.offsetLeft,top:moveNode.offsetTop};grip.setPointerCapture(event.pointerId)}));
+ window.addEventListener('pointermove',event=>{if(!moveNode||!moveOrigin)return;const x=Math.max(0,moveOrigin.left+(event.clientX-moveOrigin.x)/zoom),y=Math.max(0,moveOrigin.top+(event.clientY-moveOrigin.y)/zoom);moveNode.style.left=`${x}px`;moveNode.style.top=`${y}px`;moveNode.dataset.x=Math.round(x);moveNode.dataset.y=Math.round(y);draw()});
+ window.addEventListener('pointerup',()=>{if(!moveNode)return;const node=moveNode;moveNode=null;moveOrigin=null;fetch(`/columns/${node.dataset.columnId}/position`,{method:'POST',headers:csrfHeaders({'Content-Type':'application/x-www-form-urlencoded'}),body:new URLSearchParams({x:node.dataset.x,y:node.dataset.y})}).catch(()=>{});});
  let connecting,temporary;
- canvas.querySelectorAll('.node-handle').forEach(handle=>handle.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();connecting=handle.closest('.flow-node');const start=point(connecting,'right');temporary=document.createElementNS(svg.namespaceURI,'path');temporary.classList.add('temporary');temporary.setAttribute('d',path(start,{x:event.clientX-canvas.getBoundingClientRect().left,y:event.clientY-canvas.getBoundingClientRect().top}));svg.append(temporary);handle.setPointerCapture(event.pointerId)}));
- window.addEventListener('pointermove',event=>{if(!connecting)return;const r=canvas.getBoundingClientRect();temporary.setAttribute('d',path(point(connecting,'right'),{x:event.clientX-r.left,y:event.clientY-r.top}))});
+ canvas.querySelectorAll('.node-handle').forEach(handle=>handle.addEventListener('pointerdown',event=>{event.preventDefault();event.stopPropagation();connecting=handle.closest('.flow-node');const start=point(connecting,'right');temporary=document.createElementNS(svg.namespaceURI,'path');temporary.classList.add('temporary');temporary.setAttribute('d',path(start,pointerPoint(event)));svg.append(temporary);handle.setPointerCapture(event.pointerId)}));
+ window.addEventListener('pointermove',event=>{if(!connecting)return;temporary.setAttribute('d',path(point(connecting,'right'),pointerPoint(event)))});
  window.addEventListener('pointerup',event=>{if(!connecting)return;const target=document.elementFromPoint(event.clientX,event.clientY)?.closest('.flow-node');if(target&&target!==connecting){const modal=document.getElementById('new-transition');modal.querySelector('[name=from]').value=connecting.dataset.columnId;modal.querySelector('[name=to]').value=target.dataset.columnId;modal.querySelector('[data-transition-from]').textContent=connecting.querySelector('.node-body strong').textContent;modal.querySelector('[data-transition-to]').textContent=target.querySelector('.node-body strong').textContent;openModal(modal)}temporary?.remove();temporary=null;connecting=null});
  draw();window.addEventListener('resize',draw);canvas.addEventListener('scroll',draw);
+ const enhanceEdgeAccessibility=()=>svg.querySelectorAll('.edge-path').forEach(edge=>{edge.setAttribute('role','img');edge.setAttribute('tabindex','0');edge.setAttribute('focusable','true');if(!edge.querySelector('title')){const title=document.createElementNS(svg.namespaceURI,'title');title.textContent=edge.getAttribute('aria-label')||'Workflow-Verbindung';edge.prepend(title)}});
+ const edgeObserver=new MutationObserver(enhanceEdgeAccessibility);edgeObserver.observe(svg,{childList:true});enhanceEdgeAccessibility();
 }
 
 const panel=document.getElementById('task-panel');
@@ -261,3 +307,11 @@ document.addEventListener('click',event=>{const link=event.target.closest('.task
 document.addEventListener('keydown',event=>{const card=event.target.closest?.('.task-card');if(!card||event.target.closest('a,button,input,textarea,select'))return;if(event.key==='Enter'||event.key===' '){event.preventDefault();const link=card.querySelector('a');if(link){openTaskPanel(link.href);link.focus()}}});
 document.addEventListener('click',event=>{if(event.target.closest('[data-close-panel]')){panel?.classList.remove('open');if(panel)panel.innerHTML='';}});
 document.addEventListener('submit',async event=>{const form=event.target.closest('[data-comment-form],[data-panel-form]');if(!form||!panel)return;event.preventDefault();const response=await fetch(form.action,{method:'POST',headers:csrfHeaders({'X-Task-Panel':'true'}),body:new FormData(form)});if(response.ok){openTaskPanel(form.action.replace(/\/(comments|move)$/,''));notify(form.matches('[data-comment-form]')?'Kommentar gespeichert':'Aufgabe verschoben')}else notify('Änderung konnte nicht gespeichert werden','error')});
+const taskTabs=document.querySelector('[role="tablist"]');
+if(taskTabs){
+ const tabs=[...taskTabs.querySelectorAll('[data-task-tab]')],panels=[...document.querySelectorAll('[data-task-tab-panel]')];
+ const selectTaskTab=(name,writeHistory=true,focus=false)=>{const active=tabs.some(tab=>tab.dataset.taskTab===name)?name:'conversation';tabs.forEach((tab,index)=>{const selected=tab.dataset.taskTab===active;tab.setAttribute('aria-selected',selected);tab.tabIndex=selected?0:-1;if(selected&&focus)tab.focus()});panels.forEach(panel=>{panel.hidden=panel.dataset.taskTabPanel!==active});if(writeHistory){const url=new URL(location.href);url.searchParams.set('tab',active);history.pushState({taskTab:active},'',url)}};
+ const initial=new URL(location.href).searchParams.get('tab');selectTaskTab(initial||'conversation',false);
+ tabs.forEach((tab,index)=>{tab.addEventListener('click',event=>{event.preventDefault();selectTaskTab(tab.dataset.taskTab,true,true)});tab.addEventListener('keydown',event=>{if(!['ArrowRight','ArrowDown','ArrowLeft','ArrowUp','Home','End'].includes(event.key))return;event.preventDefault();let next=index;if(event.key==='ArrowRight'||event.key==='ArrowDown')next=(index+1)%tabs.length;if(event.key==='ArrowLeft'||event.key==='ArrowUp')next=(index+tabs.length-1)%tabs.length;if(event.key==='Home')next=0;if(event.key==='End')next=tabs.length-1;selectTaskTab(tabs[next].dataset.taskTab,true,true)})});
+ addEventListener('popstate',event=>selectTaskTab(event.state?.taskTab||new URL(location.href).searchParams.get('tab')||'conversation',false));
+}
