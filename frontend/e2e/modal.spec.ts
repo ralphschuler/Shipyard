@@ -218,8 +218,13 @@ test("task comments stay compact and reveal older comments without reloading", a
 
   const olderCommentsButton = page.getByRole("button", { name: "Ältere Kommentare anzeigen" });
   await olderCommentsButton.focus();
+  const anchorTopBeforeReveal = await comments.nth(0).evaluate((element) => {
+    return element.getBoundingClientRect().top;
+  });
   await page.keyboard.press("Enter");
   await expect(comments).toHaveCount(10);
+  const anchorTopAfterReveal = await comments.nth(4).evaluate((element) => element.getBoundingClientRect().top);
+  expect(Math.abs(anchorTopAfterReveal - anchorTopBeforeReveal)).toBeLessThan(2);
   await expect(page.getByRole("button", { name: "Ältere Kommentare ausblenden" })).toHaveAttribute("aria-expanded", "true");
   await expect(comments.nth(0)).toContainText("Kommentar 1");
   await expect(comments.nth(9)).toContainText("Ein sehr langer Kommentar");
@@ -228,6 +233,8 @@ test("task comments stay compact and reveal older comments without reloading", a
 
   await page.getByRole("button", { name: "Ältere Kommentare ausblenden" }).click();
   await expect(comments).toHaveCount(6);
+  const anchorTopAfterCollapse = await comments.nth(0).evaluate((element) => element.getBoundingClientRect().top);
+  expect(Math.abs(anchorTopAfterCollapse - anchorTopBeforeReveal)).toBeLessThan(2);
 });
 
 test.describe("comment thresholds", () => {

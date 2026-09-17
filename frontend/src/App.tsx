@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Activity,
   Bot,
@@ -3311,6 +3311,18 @@ function TaskDetail({ id }: { id: string }) {
   const { data, error } = useAPI<any>("/api/v1/tasks/" + id);
   const [comment, setComment] = useState("");
   const [showOlderComments, setShowOlderComments] = useState(false);
+  const commentScrollAnchor = useRef<{ index: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    const anchor = commentScrollAnchor.current;
+    if (!anchor) return;
+    const element = document.querySelector<HTMLElement>(
+      `[data-testid="task-comment"][data-comment-index="${anchor.index}"]`,
+    );
+    if (element) {
+      window.scrollTo({ top: window.scrollY + element.getBoundingClientRect().top - anchor.top, behavior: "auto" });
+    }
+    commentScrollAnchor.current = null;
+  }, [showOlderComments]);
   const [edit, setEdit] = useState(false);
   const [targets, setTargets] = useState(false);
   const [handoff, setHandoff] = useState(false);
@@ -3326,6 +3338,16 @@ function TaskDetail({ id }: { id: string }) {
     ? allComments
     : allComments.slice(-6);
   const latestCommentStart = Math.max(0, allComments.length - 3);
+  const toggleOlderComments = () => {
+    if (hasOlderComments) {
+      const anchorIndex = allComments.length - 6;
+      const element = document.querySelector<HTMLElement>(
+        `[data-testid="task-comment"][data-comment-index="${anchorIndex}"]`,
+      );
+      if (element) commentScrollAnchor.current = { index: anchorIndex, top: element.getBoundingClientRect().top };
+    }
+    setShowOlderComments((visible) => !visible);
+  };
   const request = async (url: string, body: FormData) => {
     try {
       await mutation(url, { method: "POST", body });
@@ -3506,6 +3528,7 @@ function TaskDetail({ id }: { id: string }) {
                     <ChatBubble
                       key={entry.ID}
                       data-testid="task-comment"
+                      data-comment-index={originalIndex}
                       data-prominent={prominent}
                       className={prominent ? "task-comment--prominent" : "task-comment--compact"}
                       author={entry.Author || "Unbekannt"}
@@ -3534,7 +3557,7 @@ function TaskDetail({ id }: { id: string }) {
                   className="mt-4"
                   aria-expanded={showOlderComments}
                   aria-controls="task-comments-list"
-                  onClick={() => setShowOlderComments((visible) => !visible)}
+                  onClick={toggleOlderComments}
                 >
                   {showOlderComments ? "Ältere Kommentare ausblenden" : "Ältere Kommentare anzeigen"}
                 </Button>
