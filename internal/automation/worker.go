@@ -2926,7 +2926,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			w.failSecretAudit(ctx, run, provider.Provider, provider.Model)
 			return
 		}
-		text, usage, responseErr := runOpenAIResponses(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot)
+		text, usage, responseErr := runOpenAIResponsesForProfile(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot, agent.SandboxProfile)
 		out, tokenUsage, inputTokens, outputTokens, estimatedCostMicrousd, err = []byte(text), usage.TotalTokens, usage.InputTokens, usage.OutputTokens, usage.EstimatedCostMicrousd, responseErr
 		cachedInputTokens, cacheWriteTokens, reasoningTokens = usage.CachedInputTokens, usage.CacheWriteTokens, usage.ReasoningTokens
 		apiCalls, nativeCostMicrousd = usage.APICalls, usage.NativeCostMicrousd
