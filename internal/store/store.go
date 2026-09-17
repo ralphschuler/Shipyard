@@ -1954,7 +1954,7 @@ func defaultString(v, d string) string {
 	return v
 }
 func (s *Store) Agents(c context.Context) ([]domain.Agent, error) {
-	r, e := s.DB.Query(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,workspace_path,enabled,max_parallel_runs,created_at FROM agents ORDER BY name")
+	r, e := s.DB.Query(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,workspace_path,enabled,max_parallel_runs,created_at FROM agents WHERE retired_at IS NULL ORDER BY name")
 	if e != nil {
 		return nil, e
 	}
@@ -1978,7 +1978,7 @@ func (s *Store) UpdateAgent(c context.Context, id, name, desc, prefix, prompt, s
 	if max < 1 {
 		max = 1
 	}
-	_, err := s.DB.Exec(c, "UPDATE agents SET name=$2,description=$3,prompt_prefix=$4,prompt=$5,prompt_suffix=$6,workspace_path=$7,max_parallel_runs=$8,enabled=$9 WHERE id=$1", id, strings.TrimSpace(name), desc, prefix, prompt, suffix, strings.TrimSpace(workspace), max, enabled)
+	_, err := s.DB.Exec(c, "UPDATE agents SET name=$2,description=$3,prompt_prefix=$4,prompt=$5,prompt_suffix=$6,workspace_path=$7,max_parallel_runs=$8,enabled=$9 WHERE id=$1 AND retired_at IS NULL", id, strings.TrimSpace(name), desc, prefix, prompt, suffix, strings.TrimSpace(workspace), max, enabled)
 	return err
 }
 
@@ -2020,8 +2020,25 @@ func (s *Store) RecordTaskDecision(c context.Context, interaction domain.AgentIn
 	return err
 }
 func (s *Store) DeleteAgent(c context.Context, id string) error {
-	_, err := s.DB.Exec(c, "DELETE FROM agents WHERE id=$1", id)
-	return err
+	tx, err := s.DB.Begin(c)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(c)
+	// Retire instead of physically deleting: agent_runs intentionally retain
+	// their agent FK so historical traces and cost attribution remain intact.
+	var retired bool
+	if err = tx.QueryRow(c, "UPDATE agents SET enabled=false,retired_at=COALESCE(retired_at,now()) WHERE id=$1 RETURNING true", id).Scan(&retired); err != nil {
+		return err
+	}
+	// A retired profile must not retain secret access or skill assignments.
+	if _, err = tx.Exec(c, "DELETE FROM secret_agents WHERE agent_id=$1", id); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(c, "DELETE FROM agent_skills WHERE agent_id=$1", id); err != nil {
+		return err
+	}
+	return tx.Commit(c)
 }
 func (s *Store) SetAgentSkills(c context.Context, agentID string, installedSkillIDs []string) error {
 	tx, err := s.DB.Begin(c)

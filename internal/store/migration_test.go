@@ -116,3 +116,16 @@ func TestAutomationPayloadRepairMigrationRecreatesCanonicalFunction(t *testing.T
 		}
 	}
 }
+
+func TestRetireAgentsMigrationPreservesHistoricalIdentities(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/045_retire_agents.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"retired_at TIMESTAMPTZ", "DROP CONSTRAINT IF EXISTS agents_name_key", "agents_active_name_key", "WHERE retired_at IS NULL"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("retired-agent migration is missing %q", required)
+		}
+	}
+}

@@ -870,7 +870,7 @@ func validateAgentWorkspace(raw string) error {
 }
 func (a *App) deleteAgent(w http.ResponseWriter, r *http.Request) {
 	if e := a.store.DeleteAgent(r.Context(), r.PathValue("id")); e != nil {
-		http.Error(w, "Agent kann wegen vorhandener Run-Historie nicht gelöscht werden. Deaktiviere ihn stattdessen.", 409)
+		http.Error(w, "Agent konnte nicht ausgemustert werden: "+e.Error(), 409)
 		return
 	}
 	http.Redirect(w, r, "/agents", 303)
