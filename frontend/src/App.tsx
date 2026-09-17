@@ -5,12 +5,14 @@ import {
   Boxes,
   FolderGit2,
   Gauge,
+  GitCompareArrows,
   LayoutDashboard,
   LoaderCircle,
   Menu,
   Moon,
   Play,
   ShieldCheck,
+  ShieldAlert,
   Sun,
   Wrench,
 } from "lucide-react";
@@ -1250,6 +1252,7 @@ function Settings({ route }: { route: string }) {
     route === "/account" ? "account" : route.split("/").pop() || "providers";
   const tabs = [
     ["providers", "Provider"],
+    ["updates", "Updates"],
     ["agent-policy", "Agentenrichtlinien"],
     ["appearance", "Darstellung"],
     ["integrations", "Integrationen"],
@@ -1269,7 +1272,9 @@ function Settings({ route }: { route: string }) {
           </Button>
         ))}
       </div>
-      {tab === "agent-policy" ? (
+      {tab === "updates" ? (
+        <Updates />
+      ) : tab === "agent-policy" ? (
         <AgentPolicy />
       ) : tab === "appearance" ? (
         <Appearance />
@@ -1281,6 +1286,48 @@ function Settings({ route }: { route: string }) {
         <Providers />
       )}
     </>
+  );
+}
+function Updates() {
+  const { data, error } = useAPI<any>("/api/v1/settings/updates");
+  const [message, setMessage] = useState("");
+  if (error) return <Failure />;
+  if (!data) return <Loading />;
+  const release = data.release || {};
+  const available = data.status === "update_available" && data.installable;
+  const verifyLabel = release.verified && release.compatible ? "Verifiziert und kompatibel" : "Nicht zur Installation freigegeben";
+  const install = async () => {
+    if (!available || !confirm("Dieses verifizierte Release installieren? Aktive Runs müssen vorher beendet sein.")) return;
+    try {
+      await mutation("/settings/updates/install", { method: "POST" });
+    } catch (err) {
+      setMessage(String(err));
+    }
+  };
+  return (
+    <div className="grid gap-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2"><GitCompareArrows className="size-5" /> Update-Prüfung</CardTitle>
+          <CardDescription>Nur freigegebene GitHub-Releases auf dem Branch master werden berücksichtigt. Unvollständige oder unklare Artefakte bleiben gesperrt.</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 sm:grid-cols-2">
+          <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">Laufende Version</p><p className="mt-1 text-xl font-semibold">{data.current.version}</p><p className="font-mono text-xs text-muted-foreground">{data.current.commit}</p><p className="mt-3 text-sm">Build: {data.current.builtAt || "nicht angegeben"}</p></div>
+          <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">Vergleichsstatus</p><p className="mt-1 text-xl font-semibold">{data.status === "up_to_date" ? "Aktuell" : data.status === "update_available" ? "Update verfügbar" : data.status === "unavailable" ? "Keine Release-Daten" : "Prüfung unvollständig"}</p><p className="mt-3 text-sm text-muted-foreground">Quelle: {data.source.provider} · {data.source.repository}</p></div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader><CardTitle className="flex items-center gap-2"><ShieldAlert className="size-5" /> Nächstes Release</CardTitle><CardDescription>{verifyLabel}</CardDescription></CardHeader>
+        <CardContent className="grid gap-3">
+          {release.version ? <>
+            <div className="grid gap-3 text-sm sm:grid-cols-2"><p><span className="text-muted-foreground">Version</span><br /><strong>{release.version}</strong></p><p><span className="text-muted-foreground">Commit</span><br /><code>{release.commit || "nicht angegeben"}</code></p><p><span className="text-muted-foreground">Veröffentlicht</span><br />{release.publishedAt || "nicht angegeben"}</p><p><span className="text-muted-foreground">Migration</span><br />{release.migrationRequired ? "Erforderlich" : "Nicht erforderlich"}</p></div>
+            <div className="rounded-md bg-muted p-3 text-sm whitespace-pre-wrap">{release.changelog || "Kein Changelog angegeben."}</div>
+            <div className="flex flex-wrap items-center gap-2"><Button disabled={!available} onClick={install}>Update installieren</Button>{release.url && <a className="text-sm underline" href={release.url} target="_blank" rel="noreferrer">Auf GitHub ansehen</a>}</div>
+          </> : <p className="text-sm text-muted-foreground">Es wurde kein kompatibles Release gemeldet. Ein Installationsbutton ist deshalb nicht verfügbar.</p>}
+          {message && <p className="text-sm text-destructive">{message}</p>}
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 function Providers() {

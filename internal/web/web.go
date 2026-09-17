@@ -539,6 +539,8 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("GET /api/v1/settings/agent-policy", a.agentPolicyAPI)
 	m.HandleFunc("GET /api/v1/settings/appearance", a.appearanceAPI)
 	m.HandleFunc("GET /api/v1/settings/integrations", a.integrationsAPI)
+	m.HandleFunc("GET /api/v1/settings/updates", a.updatesAPI)
+	m.HandleFunc("POST /api/v1/settings/updates/install", a.installUpdateAPI)
 	m.HandleFunc("GET /api/v1/account", a.accountAPI)
 	m.HandleFunc("POST /api/v1/account/tokens", a.createAccountTokenAPI)
 	m.HandleFunc("GET /dashboard/attention", a.dashboardAttention)
@@ -607,6 +609,9 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("POST /settings/providers/{provider}", a.saveProvider)
 	m.HandleFunc("POST /settings/providers/{provider}/test", a.testProvider)
 	m.HandleFunc("GET /settings/integrations", a.integrations)
+	m.HandleFunc("GET /settings/updates", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/settings/providers", http.StatusSeeOther)
+	})
 	m.HandleFunc("POST /settings/integrations", a.createIntegration)
 	m.HandleFunc("POST /settings/integrations/{id}/delete", a.deleteIntegration)
 	m.HandleFunc("POST /agents/templates", a.createTemplateAgent)
@@ -2005,6 +2010,60 @@ func (a *App) integrationsAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	value, err := a.store.IntegrationConnections(r.Context(), u.ID)
 	writeAPI(w, value, err)
+}
+
+// updatesAPI exposes only release metadata supplied by the deployment. A
+// missing verification marker never becomes an installable update. Keeping
+// this projection environment-backed also avoids storing GitHub credentials
+// or release secrets in the database.
+func (a *App) updatesAPI(w http.ResponseWriter, r *http.Request) {
+	current := map[string]string{
+		"version": os.Getenv("TASKBOARD_VERSION"),
+		"commit":  os.Getenv("TASKBOARD_COMMIT_SHA"),
+		"builtAt": os.Getenv("TASKBOARD_BUILD_TIME"),
+	}
+	if current["version"] == "" {
+		current["version"] = "development"
+	}
+	if current["commit"] == "" {
+		current["commit"] = "unknown"
+	}
+	repository := os.Getenv("TASKBOARD_GITHUB_REPOSITORY")
+	if repository == "" {
+		repository = "ralphschuler/Shipyard"
+	}
+	release := map[string]any{
+		"version":           os.Getenv("TASKBOARD_UPDATE_VERSION"),
+		"commit":            os.Getenv("TASKBOARD_UPDATE_COMMIT"),
+		"publishedAt":       os.Getenv("TASKBOARD_UPDATE_PUBLISHED_AT"),
+		"changelog":         os.Getenv("TASKBOARD_UPDATE_CHANGELOG"),
+		"url":               os.Getenv("TASKBOARD_UPDATE_URL"),
+		"migrationRequired": os.Getenv("TASKBOARD_UPDATE_MIGRATION_REQUIRED") == "true",
+		"verified":          os.Getenv("TASKBOARD_UPDATE_VERIFIED") == "true",
+		"compatible":        os.Getenv("TASKBOARD_UPDATE_COMPATIBLE") == "true",
+		"checksum":          os.Getenv("TASKBOARD_UPDATE_SHA256"),
+	}
+	if release["url"] == "" && release["version"] != "" {
+		release["url"] = "https://github.com/" + repository + "/releases"
+	}
+	status := "unavailable"
+	if release["version"] != "" {
+		status = "unverified"
+		if release["verified"].(bool) && release["compatible"].(bool) && release["commit"] != "" && release["checksum"] != "" {
+			if release["version"] == current["version"] && release["commit"] == current["commit"] {
+				status = "up_to_date"
+			} else {
+				status = "update_available"
+			}
+		}
+	}
+	writeAPI(w, map[string]any{"current": current, "source": map[string]string{"provider": "GitHub", "repository": repository, "branch": "master"}, "status": status, "release": release, "installable": status == "update_available"}, nil)
+}
+
+func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
+	// The update orchestrator is deliberately not implicit: until a verified
+	// artifact and backup/restart implementation are configured, fail closed.
+	http.Error(w, "Update-Installation ist in dieser Umgebung nicht freigegeben.", http.StatusConflict)
 }
 func (a *App) accountAPI(w http.ResponseWriter, r *http.Request) {
 	u, ok := currentUser(r.Context())

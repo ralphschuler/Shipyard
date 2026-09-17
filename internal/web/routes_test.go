@@ -1,6 +1,7 @@
 package web
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -35,12 +36,31 @@ func TestSettingsTabsAreRegistered(t *testing.T) {
 		"/settings/agent-policy",
 		"/settings/appearance",
 		"/settings/integrations",
+		"/settings/updates",
 	} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		_, pattern := mux.Handler(req)
 		if pattern != "GET "+path {
 			t.Fatalf("%s: registered pattern = %q, want %q", path, pattern, "GET "+path)
 		}
+	}
+}
+
+func TestUpdatesAPIFailsClosedForUnverifiedRelease(t *testing.T) {
+	t.Setenv("TASKBOARD_VERSION", "1.2.0")
+	t.Setenv("TASKBOARD_COMMIT_SHA", "abc123")
+	t.Setenv("TASKBOARD_UPDATE_VERSION", "1.3.0")
+	t.Setenv("TASKBOARD_UPDATE_COMMIT", "def456")
+	t.Setenv("TASKBOARD_UPDATE_VERIFIED", "false")
+	t.Setenv("TASKBOARD_UPDATE_COMPATIBLE", "true")
+	res := httptest.NewRecorder()
+	(&App{}).updatesAPI(res, httptest.NewRequest(http.MethodGet, "/api/v1/settings/updates", nil))
+	var payload map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["status"] != "unverified" || payload["installable"] != false {
+		t.Fatalf("payload = %#v", payload)
 	}
 }
 
