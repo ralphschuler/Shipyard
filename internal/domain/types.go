@@ -66,6 +66,7 @@ type Task struct {
 	CreatedAt                                                       time.Time
 	IsTerminal                                                      bool
 	Labels                                                          []Label
+	TargetProjects                                                  []Project
 }
 type Label struct{ ID, Name, Color string }
 type History struct {

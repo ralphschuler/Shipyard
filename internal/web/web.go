@@ -2227,7 +2227,50 @@ func (a *App) createAccountTokenAPI(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) boardAPI(w http.ResponseWriter, r *http.Request) {
 	value, err := a.page(r.Context(), r.PathValue("id"), "", a.accountLanguage(r))
+	if err == nil {
+		value.Tasks = filterBoardTasks(value.Tasks, value.Board.ID, r.URL.Query())
+	}
 	writeAPI(w, value, err)
+}
+
+// filterBoardTasks keeps API filtering consistent with the client-side board
+// view. The board is loaded first so project matching uses effective targets,
+// including the implicit single-project board fallback.
+func filterBoardTasks(tasks []domain.Task, boardID string, query url.Values) []domain.Task {
+	search := strings.ToLower(strings.TrimSpace(query.Get("search")))
+	column, priority, label, project := query.Get("column"), query.Get("priority"), query.Get("label"), query.Get("project")
+	if boardID == "" && search == "" && column == "" && priority == "" && label == "" && project == "" {
+		return tasks
+	}
+	filtered := make([]domain.Task, 0, len(tasks))
+	for _, task := range tasks {
+		if boardID != "" && task.BoardID != boardID {
+			continue
+		}
+		textMatches := search == "" || strings.Contains(strings.ToLower(task.Title+" "+task.Description), search)
+		labelMatches := label == ""
+		if !labelMatches {
+			for _, taskLabel := range task.Labels {
+				if taskLabel.ID == label {
+					labelMatches = true
+					break
+				}
+			}
+		}
+		projectMatches := project == ""
+		if !projectMatches {
+			for _, target := range task.TargetProjects {
+				if target.ID == project {
+					projectMatches = true
+					break
+				}
+			}
+		}
+		if textMatches && (column == "" || task.ColumnID == column) && (priority == "" || task.Priority == priority) && labelMatches && projectMatches {
+			filtered = append(filtered, task)
+		}
+	}
+	return filtered
 }
 func (a *App) taskAPI(w http.ResponseWriter, r *http.Request) {
 	value, err := a.taskData(r.Context(), r.PathValue("id"))
@@ -2347,6 +2390,13 @@ func (a *App) page(c context.Context, id, errText string, lang string) (boardPag
 	tasks, e := a.store.Tasks(c, id)
 	if e != nil {
 		return boardPage{}, e
+	}
+	targetProjects, e := a.store.EffectiveTaskTargetProjectsForTasks(c, tasks)
+	if e != nil {
+		return boardPage{}, e
+	}
+	for i := range tasks {
+		tasks[i].TargetProjects = targetProjects[tasks[i].ID]
 	}
 	tr, e := a.store.Transitions(c, id)
 	labels, labelErr := a.store.Labels(c, id)

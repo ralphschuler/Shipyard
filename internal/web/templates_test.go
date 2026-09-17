@@ -14,6 +14,37 @@ func TestEmbeddedTemplatesParse(t *testing.T) {
 	}
 }
 
+func TestBoardFiltersContract(t *testing.T) {
+	page, err := files.ReadFile("templates/board.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(page)
+	for _, required := range []string{"data-board-filter", "data-filter-search", "data-filter=\"column\"", "data-filter=\"priority\"", "data-filter=\"label\"", "data-filter-reset", "data-filter-count", "data-filter-empty"} {
+		if !strings.Contains(html, required) {
+			t.Fatalf("board filter markup is missing %q", required)
+		}
+	}
+	card, err := files.ReadFile("templates/task-card.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"data-title", "data-description", "data-column", "data-priority", "data-labels"} {
+		if !strings.Contains(string(card), required) {
+			t.Fatalf("task filter data is missing %q", required)
+		}
+	}
+	script, err := files.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"shipyard.board-filters.", "toLocaleLowerCase", "setTimeout(render,180)", "data-clear-filter"} {
+		if !strings.Contains(string(script), required) {
+			t.Fatalf("board filter behavior is missing %q", required)
+		}
+	}
+}
+
 func TestSecretsTemplatePreservesExistingAgentAssignments(t *testing.T) {
 	page, err := files.ReadFile("templates/secrets.html")
 	if err != nil {

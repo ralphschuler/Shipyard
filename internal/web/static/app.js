@@ -315,3 +315,26 @@ if(taskTabs){
  tabs.forEach((tab,index)=>{tab.addEventListener('click',event=>{event.preventDefault();selectTaskTab(tab.dataset.taskTab,true,true)});tab.addEventListener('keydown',event=>{if(!['ArrowRight','ArrowDown','ArrowLeft','ArrowUp','Home','End'].includes(event.key))return;event.preventDefault();let next=index;if(event.key==='ArrowRight'||event.key==='ArrowDown')next=(index+1)%tabs.length;if(event.key==='ArrowLeft'||event.key==='ArrowUp')next=(index+tabs.length-1)%tabs.length;if(event.key==='Home')next=0;if(event.key==='End')next=tabs.length-1;selectTaskTab(tabs[next].dataset.taskTab,true,true)})});
  addEventListener('popstate',event=>selectTaskTab(event.state?.taskTab||new URL(location.href).searchParams.get('tab')||'conversation',false));
 }
+
+// Board filters are progressive enhancement over the server-rendered kanban.
+// The board id is part of the storage key so a filter can never leak between boards.
+const boardFilter=document.querySelector('[data-board-filter]');
+if(boardFilter){
+ const boardID=boardFilter.dataset.boardFilter, storageKey=`shipyard.board-filters.${boardID}`;
+ const search=boardFilter.querySelector('[data-filter-search]'), controls=[...boardFilter.querySelectorAll('[data-filter]')];
+ const cards=[...document.querySelectorAll('.kanban .task-card')];
+ const count=boardFilter.querySelector('[data-filter-count]'), empty=document.querySelector('[data-filter-empty]'), chips=boardFilter.querySelector('[data-filter-chips]');
+ const state={q:'',column:'',priority:'',label:''};
+ try{Object.assign(state,JSON.parse(sessionStorage.getItem(storageKey)||'{}'))}catch(_){ }
+ search.value=state.q;controls.forEach(control=>control.value=state[control.dataset.filter]||'');
+ const labels=new Map(controls.find(control=>control.dataset.filter==='label')?.options? [...controls.find(control=>control.dataset.filter==='label').options].map(option=>[option.value,option.textContent]):[]);
+ const columns=new Map(controls.find(control=>control.dataset.filter==='column')?.options? [...controls.find(control=>control.dataset.filter==='column').options].map(option=>[option.value,option.textContent]):[]);
+ const priorities=new Map([['urgent','Dringend'],['high','Hoch'],['normal','Normal'],['low','Niedrig']]);
+ const save=()=>{try{sessionStorage.setItem(storageKey,JSON.stringify(state))}catch(_){}};
+ const render=()=>{const query=state.q.trim().toLocaleLowerCase();let visible=0;const perColumn=new Map();cards.forEach(card=>{const haystack=`${card.dataset.title||''} ${card.dataset.description||''}`.toLocaleLowerCase();const matches=(!query||haystack.includes(query))&&(!state.column||card.dataset.column===state.column)&&(!state.priority||card.dataset.priority===state.priority)&&(!state.label||(` ${card.dataset.labels||''} `).includes(` ${state.label} `));card.hidden=!matches;if(matches){visible++;perColumn.set(card.dataset.column,(perColumn.get(card.dataset.column)||0)+1)}});document.querySelectorAll('[data-column]').forEach(column=>{const total=perColumn.get(column.dataset.column)||0;const value=column.querySelector('[data-column-count]');if(value)value.textContent=String(total)});count.textContent=`${visible} ${visible===1?'Aufgabe':'Aufgaben'}`;if(empty)empty.hidden=visible!==0;chips.replaceChildren();const active=[['q',state.q,'Suche'],['column',state.column,columns.get(state.column)],['priority',state.priority,priorities.get(state.priority)],['label',state.label,labels.get(state.label)]];active.filter(([,value])=>value).forEach(([key,value,name])=>{const chip=document.createElement('button');chip.type='button';chip.className='active-filter';chip.dataset.clearFilter=key;chip.textContent=`${name||key}: ${value} ×`;chips.append(chip)});save()};
+ search.addEventListener('input',()=>{state.q=search.value;clearTimeout(search._filterTimer);search._filterTimer=setTimeout(render,180)});
+ controls.forEach(control=>control.addEventListener('change',()=>{state[control.dataset.filter]=control.value;render()}));
+ boardFilter.querySelector('[data-filter-reset]')?.addEventListener('click',()=>{state.q='';search.value='';controls.forEach(control=>{state[control.dataset.filter]='';control.value=''});render();search.focus()});
+ chips.addEventListener('click',event=>{const button=event.target.closest('[data-clear-filter]');if(!button)return;const key=button.dataset.clearFilter;state[key]='';if(key==='q')search.value='';else boardFilter.querySelector(`[data-filter="${CSS.escape(key)}"]`).value='';render()});
+ render();
+}
