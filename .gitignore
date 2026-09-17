@@ -1,6 +1,6 @@
 .env
-taskboard
-taskboard.previous
+/taskboard
+/taskboard.previous
 .playwright-cli/
 __pycache__/
 coverage.out

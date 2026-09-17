@@ -1,0 +1,106 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"taskboard/internal/automation"
+	"taskboard/internal/mcp"
+	"taskboard/internal/store"
+	"taskboard/internal/web"
+	"time"
+)
+
+const (
+	defaultAddress     = "127.0.0.1:8080"
+	defaultDatabaseURL = "postgres://taskboard:taskboard@localhost:5432/taskboard?sslmode=disable"
+	shutdownTimeout    = 10 * time.Second
+)
+
+// These values are replaced by the release workflow with -ldflags. Keeping
+// development defaults makes local `go run` useful while still exposing an
+// immutable build identity to the Updates view in production.
+var (
+	version = "development"
+	commit  = "unknown"
+	builtAt string
+)
+
+func main() {
+	setBuildMetadata()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	databaseURL := envOrDefault("DATABASE_URL", defaultDatabaseURL)
+	address := envOrDefault("TASKBOARD_ADDR", defaultAddress)
+
+	openContext, cancel := context.WithTimeout(ctx, 10*time.Second)
+	s, err := store.Open(openContext, databaseURL)
+	cancel()
+	if err != nil {
+		log.Fatalf("Datenbank konnte nicht geöffnet werden: %v", err)
+	}
+	defer s.DB.Close()
+
+	if err := s.Migrate(ctx); err != nil {
+		log.Fatalf("Datenbankmigration fehlgeschlagen: %v", err)
+	}
+
+	worker := &automation.Worker{Store: s}
+	worker.Start(ctx)
+
+	app := web.New(s, worker)
+	mux := http.NewServeMux()
+	app.Register(mux)
+	// MCP has its own bearer-token authentication and is intentionally outside
+	// the browser session middleware.
+	mux.Handle("/mcp", mcp.New(s, worker))
+	server := &http.Server{
+		Addr:              address,
+		Handler:           app.Protected(app.HTMX(mux)),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      0,
+		IdleTimeout:       90 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	serveErrors := make(chan error, 1)
+	go func() { serveErrors <- server.ListenAndServe() }()
+
+	select {
+	case err := <-serveErrors:
+		if !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("HTTP-Server konnte nicht gestartet werden: %v", err)
+		}
+	case <-ctx.Done():
+		shutdownContext, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer shutdownCancel()
+		if err := server.Shutdown(shutdownContext); err != nil {
+			log.Printf("HTTP-Server konnte nicht sauber beendet werden: %v", err)
+		}
+	}
+}
+
+func setBuildMetadata() {
+	setDefaultEnv("TASKBOARD_VERSION", version)
+	setDefaultEnv("TASKBOARD_COMMIT_SHA", commit)
+	setDefaultEnv("TASKBOARD_BUILD_TIME", builtAt)
+}
+
+func setDefaultEnv(key, value string) {
+	if value != "" && os.Getenv(key) == "" {
+		_ = os.Setenv(key, value)
+	}
+}
+
+func envOrDefault(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
+}

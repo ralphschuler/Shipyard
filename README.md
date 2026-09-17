@@ -69,6 +69,15 @@ go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 ./deploy/deploy-local.sh
 ```
 
+### Releases
+
+Jeder Push auf `master` (einschließlich eines gemergten Pull Requests) startet
+`.github/workflows/release.yml`. Die Action baut reproduzierbare Linux-
+Artefakte für `amd64` und `arm64`, versieht sie mit der Build-Version und
+veröffentlicht ein idempotentes GitHub-Release samt `SHA256SUMS`. Ein manueller
+`workflow_dispatch` ist für einen erneuten Lauf verfügbar; das Release wird bei
+einem Retry aktualisiert statt doppelt angelegt.
+
 ### Produktionsnahe Automation-Integrationstests
 
 Die PostgreSQL-Integrationstests sind absichtlich opt-in. Für einen
