@@ -47,7 +47,7 @@ func ValidateProfile(p Profile) error {
 	if len(p.Mounts) != 1 || p.Mounts[0] != "worktree" {
 		return errors.New("Sandbox-Profile dürfen nur den Worktree mounten")
 	}
-	if p.NetworkMode != "none" && p.NetworkMode != "bridge-only" {
+	if p.NetworkMode != "none" && p.NetworkMode != "qa-network" && p.NetworkMode != "bridge-only" {
 		return errors.New("ungültiger Sandbox-Netzwerkmodus")
 	}
 	if p.WriteMode != "worktree" && p.WriteMode != "readonly" {

@@ -2,7 +2,7 @@ CREATE TABLE sandbox_profiles (
   name TEXT PRIMARY KEY,
   description TEXT NOT NULL,
   mounts JSONB NOT NULL DEFAULT '["worktree"]',
-  network_mode TEXT NOT NULL CHECK(network_mode IN ('none','bridge-only')),
+  network_mode TEXT NOT NULL CHECK(network_mode IN ('none','qa-network','bridge-only')),
   write_mode TEXT NOT NULL CHECK(write_mode IN ('worktree','readonly')),
   active BOOLEAN NOT NULL DEFAULT true
 );

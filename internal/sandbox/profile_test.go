@@ -29,4 +29,7 @@ func TestMountAndEffectivePolicyValidation(t *testing.T) {
 	if _, err := Effective("release-bridge", "/workspace/run"); err != nil {
 		t.Fatal(err)
 	}
+	if err := ValidateProfile(Profile{Name: "qa-network", Mounts: []string{"worktree"}, NetworkMode: "qa-network", WriteMode: "readonly", Active: true}); err != nil {
+		t.Fatalf("explicit QA network policy rejected: %v", err)
+	}
 }
