@@ -586,6 +586,35 @@ func TestRequestedSelfReviewAcceptsPassedStructuredReview(t *testing.T) {
 	}
 }
 
+func TestRequestedSelfReviewAcceptsMachineResultWithDetails(t *testing.T) {
+	raw := `{"status":"passed","checklist":[{"check":"Scope/Akzeptanz","result":"passed","details":"Scope and acceptance criteria verified."},{"check":"Diff/Secrets","result":"passed","details":"Diff reviewed."},{"check":"Tests/Fehler","result":"passed","details":"Tests passed."},{"check":"Sicherheits-/Betriebsrisiken","result":"passed","details":"Risks reviewed."},{"check":"Rückwärtskompatibilität","result":"passed","details":"Compatibility reviewed."}],"tests":"go test ./...","open_risks":"none"}`
+	review, err := requestedSelfReview([]domain.RunLog{{Message: "```taskboard-self-review\n" + raw + "\n```"}})
+	if err != nil {
+		t.Fatalf("self-review with details rejected: %v", err)
+	}
+	if review.Checklist[0].Details != "Scope and acceptance criteria verified." {
+		t.Fatalf("details not preserved: %#v", review.Checklist[0])
+	}
+}
+
+func TestRequestedSelfReviewReportsInvalidResultInsteadOfMissingCategory(t *testing.T) {
+	raw := `{"status":"passed","checklist":[{"check":"Scope/Akzeptanz","result":"Release-Agent-Adapter mit Validierung umgesetzt."},{"check":"Diff/Secrets","result":"passed"},{"check":"Tests/Fehler","result":"passed"},{"check":"Sicherheits-/Betriebsrisiken","result":"passed"},{"check":"Rückwärtskompatibilität","result":"passed"}],"tests":"go test ./...","open_risks":"none"}`
+	_, err := requestedSelfReview([]domain.RunLog{{Message: "```taskboard-self-review\n" + raw + "\n```"}})
+	if err == nil {
+		t.Fatal("prose checklist result must be rejected")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "ungültigen Status") || !strings.Contains(message, "erwartet wird einer von") {
+		t.Fatalf("error does not identify invalid result: %v", err)
+	}
+	if strings.Contains(message, "Release-Agent-Adapter") {
+		t.Fatalf("error leaked the prose result: %v", err)
+	}
+	if strings.Contains(message, "keinen bestandenen Checklistenpunkt") {
+		t.Fatalf("error still reports a missing passed category: %v", err)
+	}
+}
+
 func TestRequestedSelfReviewRejectsMissingFailedAndIncompleteReviews(t *testing.T) {
 	cases := []string{
 		"",

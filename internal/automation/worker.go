@@ -60,9 +60,16 @@ type taskboardSelfReview struct {
 }
 
 type selfReviewItem struct {
-	Check  string `json:"check"`
-	Result string `json:"result"`
+	Check   string `json:"check"`
+	Result  string `json:"result"`
+	Details string `json:"details,omitempty"`
 }
+
+// selfReviewResultValues is deliberately kept as a stable, ordered list. The
+// result field is a machine-readable gate, while human-readable evidence
+// belongs in the optional details field. Keeping the allowlist explicit avoids
+// accidentally treating a prose explanation as a passing checklist result.
+var selfReviewResultValues = []string{"ok", "passed", "pass", "bestanden", "erfüllt", "erfuellt", "geprüft", "geprueft"}
 
 func requestedSelfReview(logs []domain.RunLog) (taskboardSelfReview, error) {
 	matches := selfReviewFence.FindAllStringSubmatch(joinRunLogs(logs), -1)
@@ -93,7 +100,7 @@ func requestedSelfReview(logs []domain.RunLog) (taskboardSelfReview, error) {
 		}
 		result := strings.ToLower(strings.TrimSpace(item.Result))
 		if !validSelfReviewResult(result) {
-			return review, fmt.Errorf("taskboard-self-review enthält keinen bestandenen Checklistenpunkt %q", item.Check)
+			return review, fmt.Errorf("taskboard-self-review Checklistenpunkt %q enthält einen ungültigen Status (Länge %d); erwartet wird einer von: %s", item.Check, len(strings.TrimSpace(item.Result)), strings.Join(selfReviewResultValues, ", "))
 		}
 		if _, required := requiredChecks[check]; !required {
 			return review, fmt.Errorf("taskboard-self-review enthält keine gültige Pflichtkategorie %q", item.Check)
@@ -115,12 +122,12 @@ func requestedSelfReview(logs []domain.RunLog) (taskboardSelfReview, error) {
 }
 
 func validSelfReviewResult(result string) bool {
-	switch result {
-	case "ok", "passed", "pass", "bestanden", "erfüllt", "erfuellt", "geprüft", "geprueft":
-		return true
-	default:
-		return false
+	for _, allowed := range selfReviewResultValues {
+		if result == allowed {
+			return true
+		}
 	}
+	return false
 }
 
 func structuredControlLogs(provider string, logs []domain.RunLog, structuredOutput string) []domain.RunLog {
@@ -1904,7 +1911,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	prompt += "\n\nFühre die projektspezifischen Tests für deine Änderung aus und dokumentiere das Ergebnis im Abschluss. Begrenze jeden einzelnen Test-, Build- oder Installationsbefehl als direkten Befehl mit `timeout 120s <befehl>` (oder dem passenden Mechanismus der Plattform). Schreibe keinen verschachtelten `bash -lc`-Aufruf, setze keine zusätzlichen Shell-Anführungszeichen und werte `$?` nicht selbst aus; die Ausführungsumgebung meldet Status und Ausgabe. Hängt ein Befehl oder läuft er in das Limit, dokumentiere das als offenes Risiko und fahre mit anderen aussagekräftigen Prüfungen fort. Entferne vor dem Abschluss generierte Entwicklungsartefakte wie __pycache__, *.pyc, Coverage-Dateien und temporäre Daten. Beende alle temporären Server und Browser-Prozesse vor dem Abschluss; verwende keine interaktiven oder dauerhaft wartenden Befehle. Erstelle keinen Push, Merge, Release oder Deployment."
 	prompt += "\n\nDokumentiere am Ende Ergebnis, geänderte Bereiche, ausgeführte Tests und offene Risiken für Menschen als ```taskboard-comment\n…\n```. Wenn eine neue Entscheidung nötig ist, gib am Ende einen taskboard-interaction-Block aus: {\"key\":\"stabiler_schluessel\",\"title\":\"Kurze Frage\",\"body\":\"Kontext\",\"fields\":[...]}. Unterstützt: text, textarea, select, buttons. Frage keine verbindliche Nutzerentscheidung erneut ab. Öffne sie nur mit reopen:true und reason, wenn sich die Sachlage wesentlich geändert hat. Nach einer Antwort startet genau ein Folge-Run. Wenn du als Reviewer Nacharbeit verlangst, verwende zusätzlich genau einen ```taskboard-transition\n{\"target\":\"In Progress\",\"comment\":\"konkrete Nacharbeit\"}\n```-Block. Die Transition wird nur ausgeführt, wenn sie im Board erlaubt ist. Nur der Triage Agent darf zusätzlich genau einen ```taskboard-update\n{\"title\":\"…\",\"description\":\"…\"}\n```-Block und einen ```taskboard-targets\n{\"project_ids\":[\"uuid\"],\"group_ids\":[]}\n```-Block ausgeben."
 	prompt += "\n\nProjektanlage ist eine Ausnahme von bestehenden Zielprojekten: Wenn ein Task Projekte aus Repository-URLs neu anlegen oder importieren soll, ist das Fehlen einer project_id erwartbar und kein Blocker. Prüfe Duplikate anhand der Repository-URL und lege die Projekte an; ihre project_id entsteht dabei erst. Verlange nur dann eine project_id, wenn der Task ausdrücklich eine Änderung an einem bereits registrierten Einzelprojekt verlangt. Ein Run ohne tatsächliche Umsetzung darf nicht als erfolgreich beschrieben werden. Bei einer unvermeidbaren offenen Entscheidung liefere genau einen gültigen taskboard-interaction-Block; jedes fields-Element benötigt id, label, type und bei select/buttons mindestens eine Option."
-	prompt += "\n\nVor dem Abschlusskommentar und jeder Übergabe muss genau ein gültiger Block ```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"Scope/Akzeptanz\",\"result\":\"...\"},{\"check\":\"Diff/Secrets\",\"result\":\"...\"},{\"check\":\"Tests/Fehler\",\"result\":\"...\"},{\"check\":\"Sicherheits-/Betriebsrisiken\",\"result\":\"...\"},{\"check\":\"Rückwärtskompatibilität\",\"result\":\"...\"}],\"tests\":\"Nachweis\",\"open_risks\":\"Keine\"}\n``` ausgegeben werden. Bei fehlendem, ungültigem oder fehlgeschlagenem Self-Review wird nichts übernommen und keine Transition ausgeführt."
+	prompt += "\n\nBefore the final comment or any handoff, output exactly one valid ```taskboard-self-review block. The JSON must use status=passed and exactly these five checklist categories: Scope/Akzeptanz, Diff/Secrets, Tests/Fehler, Sicherheits-/Betriebsrisiken, and Rückwärtskompatibilität. Each checklist result MUST be exactly one of: ok, passed, pass, bestanden, erfüllt, erfuellt, geprüft, or geprueft. Put the human-readable evidence in the optional details field; never put a sentence in result. Example: ```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"Scope/Akzeptanz\",\"result\":\"passed\",\"details\":\"Scope implemented and acceptance criteria verified.\"},{\"check\":\"Diff/Secrets\",\"result\":\"passed\",\"details\":\"Diff reviewed; no secrets exposed.\"},{\"check\":\"Tests/Fehler\",\"result\":\"passed\",\"details\":\"Relevant tests passed.\"},{\"check\":\"Sicherheits-/Betriebsrisiken\",\"result\":\"passed\",\"details\":\"Risks reviewed.\"},{\"check\":\"Rückwärtskompatibilität\",\"result\":\"passed\",\"details\":\"Compatibility reviewed.\"}],\"tests\":\"Test commands and results.\",\"open_risks\":\"Known risks or none.\"}\n``` If the block is missing, invalid, or failed, nothing is applied and no transition is executed."
 	if skills, err := w.Store.AgentSkills(ctx, run.AgentID); err == nil && len(skills) > 0 {
 		paths := make([]string, 0, len(skills))
 		for _, skill := range skills {
