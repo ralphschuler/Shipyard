@@ -71,6 +71,20 @@ test.describe("Sidebar navigation", () => {
     await expect(menuButton).toBeFocused();
   });
 
+  test("traps keyboard focus in the mobile drawer", async ({ page }) => {
+    await mockApp(page, [{ ID: "board-1", Name: "Plattform" }]);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/app/#/boards");
+
+    const menuButton = page.getByRole("button", { name: "Navigation öffnen oder schließen" });
+    await menuButton.click();
+    const drawer = page.getByRole("dialog", { name: "Shipyard" });
+    await expect(drawer).toHaveAttribute("aria-modal", "true");
+    await drawer.getByRole("link", { name: "Übersicht" }).focus();
+    await page.keyboard.press("Shift+Tab");
+    await expect(page.getByRole("button", { name: "Dunkel" })).toBeFocused();
+  });
+
   test("localizes the boards navigation and supports long lists", async ({ page }) => {
     await mockApp(page, Array.from({ length: 80 }, (_, index) => ({ ID: `board-${index}`, Name: `Board ${index}` })), "en");
     await page.goto("/app/#/boards/board-79");
@@ -79,6 +93,25 @@ test.describe("Sidebar navigation", () => {
     await expect(page.getByRole("link", { name: "All boards" })).toBeVisible();
     await expect(page.getByRole("link", { name: "Board 79" })).toHaveAttribute("aria-current", "page");
     await expect(page.locator(".board-subnavigation")).toHaveCSS("overflow-y", "auto");
+    const boardMenu = page.locator(".board-subnavigation");
+    await expect.poll(() => boardMenu.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  });
+
+  test("keeps the active board after direct navigation and reload", async ({ page }) => {
+    await mockApp(page, [{ ID: "board-1", Name: "Plattform" }]);
+    await page.goto("/app/#/boards/board-1");
+    await expect(page.getByRole("link", { name: "Plattform" })).toHaveAttribute("aria-current", "page");
+    await page.reload();
+    await expect(page.getByRole("button", { name: "Boards" })).toHaveAttribute("aria-expanded", "true");
+    await expect(page.getByRole("link", { name: "Plattform" })).toHaveAttribute("aria-current", "page");
+  });
+
+  test("keeps the sidebar usable at tablet width", async ({ page }) => {
+    await mockApp(page, [{ ID: "board-1", Name: "Plattform" }]);
+    await page.setViewportSize({ width: 900, height: 700 });
+    await page.goto("/app/#/boards");
+    await expect(page.getByRole("navigation", { name: "Hauptnavigation" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Plattform" })).toBeVisible();
   });
 
   test("renders an understandable empty state on mobile", async ({ page }) => {

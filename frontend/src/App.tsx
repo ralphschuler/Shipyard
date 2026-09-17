@@ -196,7 +196,7 @@ export default function App() {
     if (!mobileNavOpen) return;
     const frame = requestAnimationFrame(() => {
       mobileNavRef.current
-        ?.querySelector<HTMLAnchorElement>("[data-nav-index]")
+        ?.querySelector<HTMLElement>("[data-nav-index]")
         ?.focus();
     });
     const closeMobileNavigation = () => {
@@ -206,10 +206,30 @@ export default function App() {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") closeMobileNavigation();
     };
+    const keepFocusInDrawer = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || !mobileNavRef.current) return;
+      const focusable = Array.from(
+        mobileNavRef.current.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => element.offsetParent !== null);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
     window.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("keydown", keepFocusInDrawer);
     return () => {
       cancelAnimationFrame(frame);
       window.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("keydown", keepFocusInDrawer);
     };
   }, [mobileNavOpen]);
   useEffect(() => {
@@ -329,13 +349,16 @@ export default function App() {
         <aside
           id="main-navigation"
           ref={mobileNavRef}
+          role={mobileNavOpen ? "dialog" : undefined}
+          aria-modal={mobileNavOpen ? "true" : undefined}
+          aria-labelledby={mobileNavOpen ? "shipyard-brand-name" : undefined}
           className={`shipyard-sidebar ${mobileNavOpen ? "flex w-72" : "hidden"} fixed inset-y-0 left-0 z-20 flex-col border-r md:flex ${navOpen ? "md:w-64" : "md:w-16"} ${navOpen ? "" : "is-collapsed"}`}
         >
           <div className="shipyard-brand flex h-16 items-center gap-3 border-b px-5">
             <span className="grid size-8 place-items-center rounded-lg bg-primary text-sm font-bold text-primary-foreground">
               SY
             </span>
-            {showNavLabels && <span><strong className="block font-semibold">Shipyard</strong><small>Control room</small></span>}
+            {showNavLabels && <span id="shipyard-brand-name"><strong className="block font-semibold">Shipyard</strong><small>Control room</small></span>}
           </div>
           <nav aria-label={t("navigation")} className="shipyard-nav flex-1 space-y-1 overflow-y-auto p-3">
             {nav.map((item, index) => {
@@ -377,18 +400,20 @@ export default function App() {
                     </a>
                   )}
                   {item.name === "boards" && boardsOpen && (
-                    <div id="board-subnavigation" className="board-subnavigation" aria-label={t("availableBoards")}>
-                      <a href="#/boards" onClick={(event) => { event.preventDefault(); navigate("/boards"); }} onKeyDown={(event) => navigateNav(boardsNavIndex + 1, event)} data-nav-index={boardsNavIndex + 1} className={`board-nav-link ${route === "/boards" ? "is-active" : ""}`} aria-current={route === "/boards" ? "page" : undefined} aria-label={t("allBoards")} title={t("allBoards")}>
-                        <span className="board-nav-glyph" aria-hidden="true">⌘</span><span>{t("allBoards")}</span>
-                      </a>
-                      {boards.map((board, boardIndex) => {
-                        const boardPath = `/boards/${board.ID}`;
-                        const boardSelected = route === boardPath || route.startsWith(`${boardPath}/`);
-                        const boardIndexInNavigation = boardsNavIndex + boardIndex + 2;
-                        return <a key={board.ID} href={`#${boardPath}`} onClick={(event) => { event.preventDefault(); navigate(boardPath); }} onKeyDown={(event) => navigateNav(boardIndexInNavigation, event)} data-nav-index={boardIndexInNavigation} className={`board-nav-link ${boardSelected ? "is-active" : ""}`} aria-current={boardSelected ? "page" : undefined} aria-label={board.Name} title={board.Name}><CircleDot className="size-3.5" aria-hidden="true" /><span>{board.Name}</span></a>;
-                      })}
-                      {boards.length === 0 && <p className="board-nav-empty">{t("noBoards")}</p>}
-                    </div>
+                    <nav id="board-subnavigation" className="board-subnavigation" aria-label={t("availableBoards")}>
+                      <ul>
+                        <li><a href="#/boards" onClick={(event) => { event.preventDefault(); navigate("/boards"); }} onKeyDown={(event) => navigateNav(boardsNavIndex + 1, event)} data-nav-index={boardsNavIndex + 1} className={`board-nav-link ${route === "/boards" ? "is-active" : ""}`} aria-current={route === "/boards" ? "page" : undefined} aria-label={t("allBoards")} title={t("allBoards")}>
+                          <span className="board-nav-glyph" aria-hidden="true">⌘</span><span>{t("allBoards")}</span>
+                        </a></li>
+                        {boards.map((board, boardIndex) => {
+                          const boardPath = `/boards/${board.ID}`;
+                          const boardSelected = route === boardPath || route.startsWith(`${boardPath}/`);
+                          const boardIndexInNavigation = boardsNavIndex + boardIndex + 2;
+                          return <li key={board.ID}><a href={`#${boardPath}`} onClick={(event) => { event.preventDefault(); navigate(boardPath); }} onKeyDown={(event) => navigateNav(boardIndexInNavigation, event)} data-nav-index={boardIndexInNavigation} className={`board-nav-link ${boardSelected ? "is-active" : ""}`} aria-current={boardSelected ? "page" : undefined} aria-label={board.Name} title={board.Name}><CircleDot className="size-3.5" aria-hidden="true" /><span>{board.Name}</span></a></li>;
+                        })}
+                        {boards.length === 0 && <li><p className="board-nav-empty">{t("noBoards")}</p></li>}
+                      </ul>
+                    </nav>
                   )}
                 </div>
               );

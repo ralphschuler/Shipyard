@@ -152,6 +152,11 @@
   padding: 0.15rem 0.35rem 0.15rem 0.6rem;
   scrollbar-color: oklch(1 0 0 / 22%) transparent;
 }
+.board-subnavigation ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
 .board-nav-link {
   display: flex;
   min-height: 2.25rem;

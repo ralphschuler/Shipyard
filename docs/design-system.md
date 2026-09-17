@@ -53,6 +53,18 @@ to sharing design decisions between tools.
 ## Layout and interaction invariants
 
 - The app shell is the only owner of the sidebar. It must remain toggleable on desktop, become a hamburger menu on narrow screens, and its link list must scroll independently when vertical space is limited.
+
+## Sidebar boards navigation
+
+The global sidebar exposes Boards as a disclosure control. Its nested navigation is
+generated from the current board collection and keeps the overview link separate
+from direct board links. A board route opens the disclosure automatically so a
+reload preserves a clear active location.
+
+On narrow screens the sidebar is a modal drawer: opening it moves focus inside,
+Escape and the scrim return focus to the menu button, and Tab/Shift+Tab wrap within
+the drawer. The board list is an independently scrollable region for large
+collections; an empty collection renders an explanatory, non-interactive state.
 - Pages use one content rhythm: a page header, then sections separated by `--space-4`; cards use `--space-3` internally. Do not introduce one-off margins to fix an individual view.
 - Lists are for inspection. Creation and edits happen in a native modal or a dedicated page, never as a permanent form beside a list.
 - Destructive actions are visually secondary, require a confirmation, and must not sit in the primary action position.
