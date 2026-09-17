@@ -913,10 +913,11 @@ func integrationPRMerged(output []byte) bool {
 }
 
 type integrationPR struct {
-	Number   int     `json:"number"`
-	URL      string  `json:"url"`
-	State    string  `json:"state"`
-	MergedAt *string `json:"mergedAt"`
+	Number     int     `json:"number"`
+	URL        string  `json:"url"`
+	State      string  `json:"state"`
+	MergedAt   *string `json:"mergedAt"`
+	HeadRefOID string  `json:"headRefOid"`
 }
 
 func reusablePR(output []byte) integrationPR {
@@ -924,11 +925,14 @@ func reusablePR(output []byte) integrationPR {
 	if json.Unmarshal(output, &pr) != nil {
 		return integrationPR{}
 	}
-	return reusablePRCandidate(pr)
+	return reusablePRCandidate(pr, pr.HeadRefOID)
 }
 
-func reusablePRCandidate(pr integrationPR) integrationPR {
+func reusablePRCandidate(pr integrationPR, currentHead string) integrationPR {
 	if pr.Number == 0 || strings.TrimSpace(pr.URL) == "" {
+		return integrationPR{}
+	}
+	if strings.TrimSpace(currentHead) == "" || !strings.EqualFold(strings.TrimSpace(pr.HeadRefOID), strings.TrimSpace(currentHead)) {
 		return integrationPR{}
 	}
 	if strings.EqualFold(pr.State, "OPEN") {
@@ -938,6 +942,13 @@ func reusablePRCandidate(pr integrationPR) integrationPR {
 		return pr
 	}
 	return integrationPR{}
+}
+
+func integrationDefaultBranch(project domain.Project, checkedOutBranch string) string {
+	if configured := strings.TrimSpace(project.DefaultBranch); configured != "" {
+		return configured
+	}
+	return strings.TrimSpace(checkedOutBranch)
 }
 
 // processIntegrationQueue is deliberately restartable: every step is stored
@@ -1061,12 +1072,12 @@ func (w *Worker) processIntegrationJob(ctx context.Context, job domain.Integrati
 		if remoteErr != nil {
 			return fmt.Errorf("Remote-URL für PR konnte nicht gelesen werden: %w", remoteErr)
 		}
-		out, ghErr := exec.CommandContext(ctx, "gh", "-R", remote, "pr", "list", "--head", job.Branch, "--base", job.DefaultBranch, "--state", "all", "--json", "number,url,state,mergedAt", "--limit", "20").CombinedOutput()
+		out, ghErr := exec.CommandContext(ctx, "gh", "-R", remote, "pr", "list", "--head", job.Branch, "--base", job.DefaultBranch, "--state", "all", "--json", "number,url,state,mergedAt,headRefOid", "--limit", "20").CombinedOutput()
 		if ghErr == nil {
 			var existing []integrationPR
 			if json.Unmarshal(out, &existing) == nil {
 				for _, candidate := range existing {
-					if reusable := reusablePRCandidate(candidate); reusable.Number > 0 {
+					if reusable := reusablePRCandidate(candidate, job.HeadSHA); reusable.Number > 0 {
 						job.PRNumber, job.PRURL = reusable.Number, reusable.URL
 						break
 					}
@@ -1139,13 +1150,16 @@ func trustedManagedCommit(ctx context.Context, path, sha string, accepted map[st
 // of one task. It deliberately starts from the fetched remote default branch
 // when available, so a local managed checkout can never seed a stale task
 // branch after another task has been merged remotely.
-func ensureTaskBranch(ctx context.Context, source, taskID string) (string, error) {
+func ensureTaskBranch(ctx context.Context, source, taskID string, configuredDefault ...string) (string, error) {
 	branch := taskIntegrationBranch(taskID)
 	if _, err := gitOutput(ctx, source, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
 		return branch, nil
 	}
 	base := "HEAD"
 	defaultBranch := repositoryBranch(ctx, source)
+	if len(configuredDefault) > 0 {
+		defaultBranch = integrationDefaultBranch(domain.Project{DefaultBranch: configuredDefault[0]}, defaultBranch)
+	}
 	// The task branch must start from the current configured default branch,
 	// not from a stale remote-tracking ref left by an earlier run.
 	if _, err := gitOutput(ctx, source, "fetch", "--no-tags", "origin", defaultBranch); err != nil {
@@ -2105,6 +2119,17 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	if err != nil || source == "" {
 		return errors.New("Quell-Workspace für diesen Run nicht verfügbar")
 	}
+	project := domain.Project{}
+	if run.TargetProject != "" {
+		project, err = w.Store.Project(ctx, run.TargetProject)
+		if err != nil {
+			return fmt.Errorf("Projektkonfiguration für Integrations-Branch konnte nicht gelesen werden: %w", err)
+		}
+	}
+	defaultBranch := integrationDefaultBranch(project, repositoryBranch(ctx, source))
+	if defaultBranch == "" {
+		return errors.New("kein konfigurierter Default-Branch für die Integration verfügbar")
+	}
 	unlock, err := lockRepository(ctx, source)
 	if err != nil {
 		return fmt.Errorf("Repository-Übernahme konnte nicht gesperrt werden: %w", err)
@@ -2128,7 +2153,7 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	if err != nil || worktree == "" {
 		return errors.New("Worktree für diesen Run nicht verfügbar")
 	}
-	taskBranch, branchErr := ensureTaskBranch(ctx, source, run.TaskID)
+	taskBranch, branchErr := ensureTaskBranch(ctx, source, run.TaskID, defaultBranch)
 	if branchErr != nil {
 		return branchErr
 	}
@@ -2185,7 +2210,6 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	if commitSHA == "" {
 		return errors.New("Task-Branch-Commit konnte nicht verifiziert werden")
 	}
-	defaultBranch := repositoryBranch(ctx, source)
 	baseSHA, baseErr := gitOutput(ctx, source, "rev-parse", "origin/"+defaultBranch)
 	if baseErr == nil {
 		_ = w.Store.AddRunLog(ctx, runID, "info", "Integrations-Basis-SHA: "+strings.TrimSpace(baseSHA))

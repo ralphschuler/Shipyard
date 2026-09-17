@@ -166,9 +166,27 @@ func TestReusablePRRequiresOpenOrMergedState(t *testing.T) {
 	if pr := reusablePR(closed); pr.Number != 0 {
 		t.Fatalf("closed pull request was reused: %#v", pr)
 	}
-	open := []byte(`{"number":8,"url":"https://example.test/pr/8","state":"OPEN","mergedAt":null}`)
+	open := []byte(`{"number":8,"url":"https://example.test/pr/8","state":"OPEN","mergedAt":null,"headRefOid":"open-head"}`)
 	if pr := reusablePR(open); pr.Number != 8 || pr.URL == "" {
 		t.Fatalf("open pull request was not reused: %#v", pr)
+	}
+}
+
+func TestReusablePRRequiresCurrentHead(t *testing.T) {
+	mergedAt := "2026-09-17T16:00:00Z"
+	pr := integrationPR{Number: 9, URL: "https://example.test/pr/9", State: "MERGED", MergedAt: &mergedAt, HeadRefOID: "new-head"}
+	if candidate := reusablePRCandidate(pr, "old-head"); candidate.Number != 0 {
+		t.Fatalf("historical merged pull request was reused: %#v", candidate)
+	}
+	if candidate := reusablePRCandidate(pr, "new-head"); candidate.Number != 9 {
+		t.Fatalf("current merged pull request was not reusable: %#v", candidate)
+	}
+}
+
+func TestIntegrationDefaultBranchUsesPersistedProjectConfiguration(t *testing.T) {
+	project := domain.Project{DefaultBranch: "configured-default"}
+	if got := integrationDefaultBranch(project, "checked-out-branch"); got != "configured-default" {
+		t.Fatalf("configured default branch = %q", got)
 	}
 }
 
