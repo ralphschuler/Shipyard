@@ -901,16 +901,21 @@ func (s *Store) DashboardFiltered(c context.Context, from, to *time.Time, provid
 		return d, err
 	}
 	// The legacy dashboard contains operational task metrics as well as
-	// telemetry. Keep those metrics on the same filtered run/task population;
-	// otherwise a date-filtered page mixes historic task counts with current
-	// cost data.
-	taskConditions := `EXISTS (SELECT 1 FROM agent_runs ar WHERE ar.task_id=t.id
-		AND ($1::timestamptz IS NULL OR ar.created_at >= $1)
-		AND ($2::timestamptz IS NULL OR ar.created_at < $2)
-		AND ($3='' OR ar.usage_provider=$3)
-		AND ($4='' OR ar.usage_model=$4)
-		AND (NULLIF($5,'')::uuid IS NULL OR ar.agent_id=NULLIF($5,'')::uuid))
-		AND (NULLIF($6,'')::uuid IS NULL OR t.board_id=NULLIF($6,'')::uuid)`
+	// telemetry. Keep those metrics on the same filtered run/task population
+	// when a telemetry filter is active. For an entirely unfiltered request,
+	// preserve the operational population, including tasks without agent runs.
+	taskConditions := "TRUE"
+	if from != nil || to != nil || provider != "" || model != "" || agent != "" {
+		taskConditions = `EXISTS (SELECT 1 FROM agent_runs ar WHERE ar.task_id=t.id
+			AND ($1::timestamptz IS NULL OR ar.created_at >= $1)
+			AND ($2::timestamptz IS NULL OR ar.created_at < $2)
+			AND ($3='' OR ar.usage_provider=$3)
+			AND ($4='' OR ar.usage_model=$4)
+			AND (NULLIF($5,'')::uuid IS NULL OR ar.agent_id=NULLIF($5,'')::uuid))`
+	}
+	if board != "" {
+		taskConditions += ` AND (NULLIF($6,'')::uuid IS NULL OR t.board_id=NULLIF($6,'')::uuid)`
+	}
 	taskWhere := `WHERE ` + taskConditions
 	where := `WHERE ($1::timestamptz IS NULL OR r.created_at >= $1) AND ($2::timestamptz IS NULL OR r.created_at < $2) AND ($3='' OR r.usage_provider=$3) AND ($4='' OR r.usage_model=$4) AND (NULLIF($5,'')::uuid IS NULL OR r.agent_id=NULLIF($5,'')::uuid) AND (NULLIF($6,'')::uuid IS NULL OR r.task_id IN (SELECT id FROM tasks WHERE board_id=NULLIF($6,'')::uuid))`
 	args := []any{from, to, provider, model, agent, board}
@@ -994,7 +999,13 @@ func (s *Store) DashboardFiltered(c context.Context, from, to *time.Time, provid
 		end := time.Now().AddDate(0, 0, 1)
 		taskSeriesTo = &end
 	}
-	taskSeriesConditions := `EXISTS (SELECT 1 FROM agent_runs ar WHERE ar.task_id=t.id AND ($3::timestamptz IS NULL OR ar.created_at >= $3) AND ($4::timestamptz IS NULL OR ar.created_at < $4) AND ($5='' OR ar.usage_provider=$5) AND ($6='' OR ar.usage_model=$6) AND (NULLIF($7,'')::uuid IS NULL OR ar.agent_id=NULLIF($7,'')::uuid)) AND (NULLIF($8,'')::uuid IS NULL OR t.board_id=NULLIF($8,'')::uuid)`
+	taskSeriesConditions := "TRUE"
+	if from != nil || to != nil || provider != "" || model != "" || agent != "" {
+		taskSeriesConditions = `EXISTS (SELECT 1 FROM agent_runs ar WHERE ar.task_id=t.id AND ($3::timestamptz IS NULL OR ar.created_at >= $3) AND ($4::timestamptz IS NULL OR ar.created_at < $4) AND ($5='' OR ar.usage_provider=$5) AND ($6='' OR ar.usage_model=$6) AND (NULLIF($7,'')::uuid IS NULL OR ar.agent_id=NULLIF($7,'')::uuid))`
+	}
+	if board != "" {
+		taskSeriesConditions += ` AND (NULLIF($8,'')::uuid IS NULL OR t.board_id=NULLIF($8,'')::uuid)`
+	}
 	seriesArgs := append([]any{taskSeriesFrom, taskSeriesTo}, args...)
 	createdTasks, err := s.DB.Query(c, `SELECT to_char(day,'DD.MM'),count(t.id)::int FROM generate_series($1::timestamptz,$2::timestamptz-interval '1 day',interval '1 day') day LEFT JOIN tasks t ON t.created_at >= day AND t.created_at < day + interval '1 day' AND `+taskSeriesConditions+` GROUP BY day ORDER BY day`, seriesArgs...)
 	if err != nil {
