@@ -3,6 +3,8 @@ import {
   Activity,
   Bot,
   Boxes,
+  ChevronDown,
+  CircleDot,
   FolderGit2,
   Gauge,
   GitCompareArrows,
@@ -48,6 +50,7 @@ type NavItem = {
   endpoint?: string;
   icon: typeof LayoutDashboard;
 };
+type BoardNavItem = { ID: string; Name: string };
 const nav: NavItem[] = [
   { name: "overview", path: "/", icon: LayoutDashboard },
   {
@@ -151,6 +154,7 @@ function endpointUsesChange(endpoint: string, change: LiveChange) {
 export default function App() {
   const [route, setRoute] = useState(routeFromHash);
   const { data: appearance } = useAPI<any>("/api/v1/settings/appearance");
+  const { data: boards = [] } = useAPI<BoardNavItem[]>("/api/v1/boards");
   const [language, setLanguage] = useState<Language>(() => normalizeLanguage(localStorage.getItem("shipyard-language")));
   const t = (key: string) => translate(language, key);
   const [dark, setDark] = useState(
@@ -160,7 +164,12 @@ export default function App() {
     localStorage.getItem("shipyard-nav-open") !== "false",
   );
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [boardsOpen, setBoardsOpen] = useState(() => {
+    const saved = localStorage.getItem("shipyard-boards-open");
+    return saved == null ? routeFromHash().startsWith("/boards") : saved === "true";
+  });
   const mobileNavRef = useRef<HTMLElement>(null);
+  const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   useEffect(() => {
     if (appearance?.Language) setLanguage(normalizeLanguage(appearance.Language));
@@ -187,16 +196,40 @@ export default function App() {
     if (!mobileNavOpen) return;
     const frame = requestAnimationFrame(() => {
       mobileNavRef.current
-        ?.querySelector<HTMLAnchorElement>("[data-nav-index]")
+        ?.querySelector<HTMLElement>("[data-nav-index]")
         ?.focus();
     });
+    const closeMobileNavigation = () => {
+      setMobileNavOpen(false);
+      requestAnimationFrame(() => mobileMenuButtonRef.current?.focus());
+    };
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMobileNavOpen(false);
+      if (event.key === "Escape") closeMobileNavigation();
+    };
+    const keepFocusInDrawer = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || !mobileNavRef.current) return;
+      const focusable = Array.from(
+        mobileNavRef.current.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => element.offsetParent !== null);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("keydown", keepFocusInDrawer);
     return () => {
       cancelAnimationFrame(frame);
       window.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("keydown", keepFocusInDrawer);
     };
   }, [mobileNavOpen]);
   useEffect(() => {
@@ -239,6 +272,12 @@ export default function App() {
     localStorage.setItem("shipyard-nav-open", String(navOpen));
   }, [navOpen]);
   useEffect(() => {
+    localStorage.setItem("shipyard-boards-open", String(boardsOpen));
+  }, [boardsOpen]);
+  useEffect(() => {
+    if (route.startsWith("/boards/")) setBoardsOpen(true);
+  }, [route]);
+  useEffect(() => {
     const desktop = window.matchMedia("(min-width: 768px)");
     const closeMobileMenu = () => {
       if (desktop.matches) setMobileNavOpen(false);
@@ -259,7 +298,10 @@ export default function App() {
     return () => window.removeEventListener("keydown", handler);
   }, [appearance?.ShortcutHints]);
   const navigate = (path: string) => {
-    setMobileNavOpen(false);
+    if (mobileNavOpen) {
+      setMobileNavOpen(false);
+      requestAnimationFrame(() => mobileMenuButtonRef.current?.focus());
+    }
     if (route === path) return;
     window.history.pushState(null, "", `#${path}`);
     setRoute(path);
@@ -271,18 +313,24 @@ export default function App() {
       setMobileNavOpen((value) => !value);
     }
   };
-  const navigateNav = (index: number, event: React.KeyboardEvent<HTMLAnchorElement>) => {
+  const navigateNav = (index: number, event: React.KeyboardEvent<HTMLElement>) => {
     let next = index;
-    if (event.key === "ArrowDown" || event.key === "ArrowRight") next = (index + 1) % nav.length;
-    else if (event.key === "ArrowUp" || event.key === "ArrowLeft") next = (index - 1 + nav.length) % nav.length;
+    const total = nav.length + (boardsOpen ? boards.length + 1 : 0);
+    if (event.key === "ArrowDown" || event.key === "ArrowRight") next = (index + 1) % total;
+    else if (event.key === "ArrowUp" || event.key === "ArrowLeft") next = (index - 1 + total) % total;
     else if (event.key === "Home") next = 0;
-    else if (event.key === "End") next = nav.length - 1;
+    else if (event.key === "End") next = total - 1;
     else return;
     event.preventDefault();
-    document.querySelector<HTMLAnchorElement>(`[data-nav-index="${next}"]`)?.focus();
+    document.querySelector<HTMLElement>(`[data-nav-index="${next}"]`)?.focus();
   };
   const active = nav.find((item) => item.path === route);
   const showNavLabels = navOpen || mobileNavOpen;
+  const boardsActive = route === "/boards" || route.startsWith("/boards/");
+  const boardsNavIndex = nav.findIndex((item) => item.name === "boards");
+  const boardSubmenuSize = boardsOpen ? boards.length + 1 : 0;
+  const navIndexFor = (index: number) =>
+    index + (boardsOpen && index > boardsNavIndex ? boardSubmenuSize : 0);
   return (
     <TooltipProvider>
       <div className="min-h-dvh bg-background">
@@ -293,6 +341,7 @@ export default function App() {
           aria-label={t("navigationToggle")}
           aria-controls="main-navigation"
           className="fixed left-3 top-3 z-30 md:left-4 md:top-4"
+          ref={mobileMenuButtonRef}
           onClick={toggleNavigation}
         >
           <Menu className="size-4" />
@@ -300,40 +349,73 @@ export default function App() {
         <aside
           id="main-navigation"
           ref={mobileNavRef}
-          className={`${mobileNavOpen ? "flex w-64" : "hidden"} fixed inset-y-0 left-0 z-20 flex-col border-r bg-card md:flex ${navOpen ? "md:w-64" : "md:w-16"}`}
+          role={mobileNavOpen ? "dialog" : undefined}
+          aria-modal={mobileNavOpen ? "true" : undefined}
+          aria-labelledby={mobileNavOpen ? "shipyard-brand-name" : undefined}
+          className={`shipyard-sidebar ${mobileNavOpen ? "flex w-72" : "hidden"} fixed inset-y-0 left-0 z-20 flex-col border-r md:flex ${navOpen ? "md:w-64" : "md:w-16"} ${navOpen ? "" : "is-collapsed"}`}
         >
-          <div className="flex h-16 items-center gap-3 border-b px-5">
+          <div className="shipyard-brand flex h-16 items-center gap-3 border-b px-5">
             <span className="grid size-8 place-items-center rounded-lg bg-primary text-sm font-bold text-primary-foreground">
               SY
             </span>
-            {showNavLabels && <span className="font-semibold">Shipyard</span>}
+            {showNavLabels && <span id="shipyard-brand-name"><strong className="block font-semibold">Shipyard</strong><small>Control room</small></span>}
           </div>
-          <nav className="flex-1 space-y-1 overflow-y-auto p-3">
+          <nav aria-label={t("navigation")} className="shipyard-nav flex-1 space-y-1 overflow-y-auto p-3">
             {nav.map((item, index) => {
               const Icon = item.icon;
-              const selected = item.path === route;
+              const selected = item.path === route || (item.name === "boards" && boardsActive);
+              const navIndex = navIndexFor(index);
               return (
-                <a
-                  key={item.path}
-                  href={"#/".concat(item.path.slice(1))}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    navigate(item.path);
-                  }}
-                  onKeyDown={(event) => navigateNav(index, event)}
-                  data-nav-index={index}
-                  aria-current={selected ? "page" : undefined}
-                  aria-label={t(item.name)}
-                  title={t(item.name)}
-                  className={
-                    selected
-                      ? "flex h-9 items-center gap-3 rounded-md bg-accent px-3 text-sm font-medium text-accent-foreground"
-                      : "flex h-9 items-center gap-3 rounded-md px-3 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
-                  }
-                >
-                  <Icon className="size-4" />
-                  {showNavLabels && t(item.name)}
-                </a>
+                <div key={item.path} className="space-y-1">
+                  {item.name === "boards" ? (
+                    <button
+                      type="button"
+                      aria-expanded={boardsOpen}
+                      aria-controls="board-subnavigation"
+                      aria-current={selected ? "page" : undefined}
+                      aria-label={t(item.name)}
+                      title={t(item.name)}
+                      className={`shipyard-nav-item ${selected ? "is-active" : ""}`}
+                      onClick={() => setBoardsOpen((value) => !value)}
+                      onKeyDown={(event) => navigateNav(navIndex, event)}
+                      data-nav-index={navIndex}
+                    >
+                      <Icon className="size-4 shrink-0" />
+                      {showNavLabels && <span className="min-w-0 flex-1 text-left">{t(item.name)}</span>}
+                      {showNavLabels && <ChevronDown className={`size-4 transition-transform ${boardsOpen ? "rotate-180" : ""}`} aria-hidden="true" />}
+                    </button>
+                  ) : (
+                    <a
+                      href={`#${item.path}`}
+                      onClick={(event) => { event.preventDefault(); navigate(item.path); }}
+                      onKeyDown={(event) => navigateNav(navIndex, event)}
+                      data-nav-index={navIndex}
+                      aria-current={selected ? "page" : undefined}
+                      aria-label={t(item.name)}
+                      title={t(item.name)}
+                      className={`shipyard-nav-item ${selected ? "is-active" : ""}`}
+                    >
+                      <Icon className="size-4 shrink-0" />
+                      {showNavLabels && t(item.name)}
+                    </a>
+                  )}
+                  {item.name === "boards" && boardsOpen && (
+                    <nav id="board-subnavigation" className="board-subnavigation" aria-label={t("availableBoards")}>
+                      <ul>
+                        <li><a href="#/boards" onClick={(event) => { event.preventDefault(); navigate("/boards"); }} onKeyDown={(event) => navigateNav(boardsNavIndex + 1, event)} data-nav-index={boardsNavIndex + 1} className={`board-nav-link ${route === "/boards" ? "is-active" : ""}`} aria-current={route === "/boards" ? "page" : undefined} aria-label={t("allBoards")} title={t("allBoards")}>
+                          <span className="board-nav-glyph" aria-hidden="true">⌘</span><span>{t("allBoards")}</span>
+                        </a></li>
+                        {boards.map((board, boardIndex) => {
+                          const boardPath = `/boards/${board.ID}`;
+                          const boardSelected = route === boardPath || route.startsWith(`${boardPath}/`);
+                          const boardIndexInNavigation = boardsNavIndex + boardIndex + 2;
+                          return <li key={board.ID}><a href={`#${boardPath}`} onClick={(event) => { event.preventDefault(); navigate(boardPath); }} onKeyDown={(event) => navigateNav(boardIndexInNavigation, event)} data-nav-index={boardIndexInNavigation} className={`board-nav-link ${boardSelected ? "is-active" : ""}`} aria-current={boardSelected ? "page" : undefined} aria-label={board.Name} title={board.Name}><CircleDot className="size-3.5" aria-hidden="true" /><span>{board.Name}</span></a></li>;
+                        })}
+                        {boards.length === 0 && <li><p className="board-nav-empty">{t("noBoards")}</p></li>}
+                      </ul>
+                    </nav>
+                  )}
+                </div>
               );
             })}
           </nav>
@@ -353,7 +435,10 @@ export default function App() {
             type="button"
             aria-label={t("navigationClose")}
             className="fixed inset-0 z-10 bg-foreground/20 md:hidden"
-            onClick={() => setMobileNavOpen(false)}
+            onClick={() => {
+              setMobileNavOpen(false);
+              requestAnimationFrame(() => mobileMenuButtonRef.current?.focus());
+            }}
           />
         )}
         <Dialog open={shortcutsOpen} onOpenChange={setShortcutsOpen}>

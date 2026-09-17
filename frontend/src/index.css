@@ -88,6 +88,145 @@
   }
 }
 
+/* The navigation is intentionally darker than the workspace: it reads as a
+   persistent control surface, while the aqua marker keeps the active place
+   legible in both themes. */
+.shipyard-sidebar {
+  --sidebar-bg: oklch(0.2 0.035 252);
+  --sidebar-text: oklch(0.87 0.018 245);
+  --sidebar-muted: oklch(0.67 0.03 250);
+  --sidebar-line: oklch(1 0 0 / 10%);
+  --sidebar-active: oklch(0.75 0.12 184);
+  background: var(--sidebar-bg);
+  border-color: var(--sidebar-line);
+  color: var(--sidebar-text);
+}
+.dark .shipyard-sidebar {
+  --sidebar-bg: oklch(0.13 0.028 252);
+}
+.shipyard-brand {
+  border-color: var(--sidebar-line);
+}
+.shipyard-brand small {
+  color: var(--sidebar-muted);
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+}
+.shipyard-nav {
+  scrollbar-color: oklch(1 0 0 / 22%) transparent;
+}
+.shipyard-nav-item {
+  display: flex;
+  width: 100%;
+  min-height: 2.5rem;
+  align-items: center;
+  gap: 0.75rem;
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  color: var(--sidebar-muted);
+  font-size: 0.875rem;
+  text-decoration: none;
+  transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease;
+}
+.shipyard-nav-item:hover {
+  background: oklch(1 0 0 / 8%);
+  color: var(--sidebar-text);
+}
+.shipyard-nav-item.is-active {
+  border-color: oklch(0.75 0.12 184 / 30%);
+  background: oklch(0.75 0.12 184 / 14%);
+  color: var(--sidebar-active);
+  font-weight: 600;
+}
+.shipyard-nav-item:focus-visible,
+.board-nav-link:focus-visible {
+  outline: 2px solid var(--sidebar-active);
+  outline-offset: 2px;
+}
+.board-subnavigation {
+  max-height: min(20rem, 42vh);
+  overflow-y: auto;
+  margin: 0.2rem 0 0.35rem 1.5rem;
+  border-left: 1px solid var(--sidebar-line);
+  padding: 0.15rem 0.35rem 0.15rem 0.6rem;
+  scrollbar-color: oklch(1 0 0 / 22%) transparent;
+}
+.board-subnavigation ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.board-nav-link {
+  display: flex;
+  min-height: 2.25rem;
+  align-items: center;
+  gap: 0.55rem;
+  border-radius: 0.4rem;
+  padding: 0.45rem 0.55rem;
+  color: var(--sidebar-muted);
+  font-size: 0.8rem;
+  line-height: 1.2;
+  text-decoration: none;
+}
+.board-nav-link span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.board-nav-link:hover {
+  background: oklch(1 0 0 / 7%);
+  color: var(--sidebar-text);
+}
+.board-nav-link.is-active {
+  background: oklch(0.75 0.12 184 / 12%);
+  color: var(--sidebar-active);
+  font-weight: 600;
+}
+.board-nav-glyph {
+  width: 0.875rem;
+  color: currentColor;
+  font-size: 0.9rem;
+  text-align: center;
+}
+.board-nav-empty {
+  margin: 0;
+  padding: 0.55rem;
+  color: var(--sidebar-muted);
+  font-size: 0.78rem;
+  font-style: italic;
+}
+.shipyard-sidebar.is-collapsed .board-subnavigation {
+  margin-left: 0;
+  padding-left: 0.15rem;
+}
+.shipyard-sidebar.is-collapsed .board-nav-link {
+  justify-content: center;
+  padding-inline: 0.35rem;
+}
+.shipyard-sidebar.is-collapsed .board-nav-link span:last-child,
+.shipyard-sidebar.is-collapsed .board-nav-empty {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+@media (max-width: 767px) {
+  .shipyard-sidebar {
+    box-shadow: 1.25rem 0 3rem oklch(0.1 0.02 250 / 22%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .shipyard-nav-item,
+  .board-nav-link,
+  .shipyard-nav-item svg {
+    transition: none;
+  }
+}
+
 /* Task discussions use the same neutral surfaces and radius scale as the
    shadcn cards.  The selector is deliberately scoped to the comment composer,
    so activity feeds and audit rows keep their compact list treatment. */
