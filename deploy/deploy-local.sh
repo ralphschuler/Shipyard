@@ -10,11 +10,15 @@ previous_binary="$project_dir/taskboard.previous"
 live_binary="$project_dir/taskboard"
 database_url="${DATABASE_URL:-postgres://taskboard:taskboard@localhost:5432/taskboard?sslmode=disable}"
 backup_dir="${TASKBOARD_BACKUP_DIR:-/home/agent/taskboard-backups}"
+update_env_file="${TASKBOARD_ENV_FILE:-/etc/taskboard/taskboard.env}"
 
 cleanup() { rm -f "$staged_binary"; }
 trap cleanup EXIT
 
 cd "$project_dir"
+if [[ "${TASKBOARD_SKIP_UPDATE_CONFIG_CHECK:-0}" != "1" ]]; then
+  TASKBOARD_ENV_FILE="$update_env_file" ./deploy/validate-update-config.sh
+fi
 if [[ -f frontend/package.json ]]; then
   (cd frontend && npm run build)
 fi

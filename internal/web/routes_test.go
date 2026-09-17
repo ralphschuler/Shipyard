@@ -63,8 +63,11 @@ func TestUpdatesAPIFailsClosedForUnverifiedRelease(t *testing.T) {
 	if err := json.NewDecoder(res.Body).Decode(&payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["status"] != "unavailable" || payload["installable"] != false {
+	if payload["status"] != "unverified" || payload["installable"] != false {
 		t.Fatalf("payload = %#v", payload)
+	}
+	if !strings.Contains(payload["reason"].(string), "TASKBOARD_GITHUB_RELEASE_ALLOWLIST") {
+		t.Fatalf("reason = %#v", payload["reason"])
 	}
 }
 
