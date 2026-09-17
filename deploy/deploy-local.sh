@@ -18,7 +18,13 @@ cd "$project_dir"
 if [[ -f frontend/package.json ]]; then
   (cd frontend && npm run build)
 fi
-go build -o "$staged_binary" ./cmd/taskboard
+# Keep the Updates view tied to the exact source that was deployed. Operators
+# may override these values for a development build, while tagged checkouts
+# automatically expose their semantic release version and immutable commit.
+build_version="${TASKBOARD_VERSION:-$(git describe --tags --exact-match HEAD 2>/dev/null || printf 'development')}"
+build_commit="${TASKBOARD_COMMIT_SHA:-$(git rev-parse HEAD)}"
+build_time="${TASKBOARD_BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+go build -trimpath -ldflags "-X main.version=$build_version -X main.commit=$build_commit -X main.builtAt=$build_time" -o "$staged_binary" ./cmd/taskboard
 chmod 0755 "$staged_binary"
 
 # Migrations run at service start and are intentionally forward-only.  A
