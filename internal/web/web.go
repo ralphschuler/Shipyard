@@ -2038,7 +2038,7 @@ func (a *App) resolveUpdates(r *http.Request) updates.Snapshot {
 	}
 	// Release metadata must always come from the configured GitHub API. Never
 	// accept operator- or UI-supplied version, commit, checksum, or trust flags.
-	return updates.Resolve(r.Context(), current, repository, branch, updates.Client{HTTP: http.DefaultClient, BaseURL: os.Getenv("TASKBOARD_GITHUB_API_URL"), Token: os.Getenv("TASKBOARD_GITHUB_TOKEN")})
+	return updates.Resolve(r.Context(), current, repository, branch, updates.Client{HTTP: http.DefaultClient, BaseURL: os.Getenv("TASKBOARD_GITHUB_API_URL"), Token: os.Getenv("TASKBOARD_GITHUB_TOKEN"), ApprovedTags: strings.Split(os.Getenv("TASKBOARD_GITHUB_RELEASE_ALLOWLIST"), ",")})
 }
 
 func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
@@ -2077,7 +2077,10 @@ func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Update ist nicht verifiziert und installierbar.", http.StatusConflict)
 		return
 	}
-	a.auditUpdate(r, "update.install_confirmed", snapshot, "confirmed")
+	if err := a.auditUpdate(r, "update.install_confirmed", snapshot, "confirmed"); err != nil {
+		http.Error(w, "Update-Audit konnte nicht sicher geschrieben werden.", http.StatusServiceUnavailable)
+		return
+	}
 	progress := make([]updates.Progress, 0, 12)
 	if err := a.update.Install(r.Context(), snapshot, func(p updates.Progress) {
 		progress = append(progress, p)
@@ -2090,11 +2093,22 @@ func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
 		}
 	}); err != nil {
 		a.auditUpdate(r, "update.install_failed", snapshot, "failed")
-		http.Error(w, err.Error(), http.StatusConflict)
+		http.Error(w, updateInstallErrorMessage(err), http.StatusConflict)
 		return
 	}
-	a.auditUpdate(r, "update.install_succeeded", snapshot, "succeeded")
+	if err := a.auditUpdate(r, "update.install_succeeded", snapshot, "succeeded"); err != nil {
+		log.Printf("update audit failed after successful installation: %v", err)
+		http.Error(w, "Update wurde ausgeführt, aber nicht vollständig auditiert.", http.StatusServiceUnavailable)
+		return
+	}
 	writeAPI(w, map[string]any{"status": "succeeded", "progress": progress}, nil)
+}
+
+// Adapter errors can contain filesystem paths, command lines, or deployment
+// details. Keep those details in server-side diagnostics, never in the API
+// response rendered by the browser.
+func updateInstallErrorMessage(error) string {
+	return "Update konnte nicht sicher installiert werden. Die Wiederherstellung wurde geprüft."
 }
 
 func (a *App) activeUpdateRuns(ctx context.Context) (bool, error) {
@@ -2107,15 +2121,15 @@ func (a *App) activeUpdateRuns(ctx context.Context) (bool, error) {
 	return busy, err
 }
 
-func (a *App) auditUpdate(r *http.Request, kind string, snapshot updates.Snapshot, result string) {
+func (a *App) auditUpdate(r *http.Request, kind string, snapshot updates.Snapshot, result string) error {
 	if a.store == nil {
-		return
+		return nil
 	}
 	actor := ""
 	if user, ok := currentUser(r.Context()); ok {
 		actor = user.ID
 	}
-	_ = a.store.RecordAudit(r.Context(), actor, kind, "update", snapshot.Release.Commit, map[string]string{
+	return a.store.RecordAudit(r.Context(), actor, kind, "update", snapshot.Release.Commit, map[string]string{
 		"result": result, "version": snapshot.Release.Version, "repository": snapshot.Repository,
 	})
 }

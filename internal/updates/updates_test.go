@@ -123,6 +123,26 @@ func TestResolveRejectsTagNotContainedInApprovedBranch(t *testing.T) {
 	}
 }
 
+func TestResolveRequiresExplicitReleaseAllowlist(t *testing.T) {
+	client := Client{HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v1.3.0"}`)), Header: make(http.Header)}, nil
+	})}, GOOS: "linux", GOARCH: "amd64"}
+	snapshot := Resolve(context.Background(), Current{Version: "1.2.0"}, "ralphschuler/Shipyard", "master", client)
+	if snapshot.Installable || snapshot.Status != "unverified" {
+		t.Fatalf("snapshot = %#v, want an unverified snapshot without an allowlist", snapshot)
+	}
+}
+
+func TestResolveRejectsReleaseOutsideExplicitAllowlist(t *testing.T) {
+	client := Client{ApprovedTags: []string{"v1.4.0"}, HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v1.3.0","target_commitish":"master"}`)), Header: make(http.Header)}, nil
+	})}, GOOS: "linux", GOARCH: "amd64"}
+	snapshot := Resolve(context.Background(), Current{Version: "1.2.0"}, "ralphschuler/Shipyard", "master", client)
+	if snapshot.Installable || snapshot.Status != "unverified" {
+		t.Fatalf("snapshot = %#v, want an unverified snapshot for a non-allowlisted tag", snapshot)
+	}
+}
+
 func TestOrchestratorBacksUpBeforeInstallAndRollsBackAfterFailure(t *testing.T) {
 	var calls []string
 	var switchedArtifact []byte

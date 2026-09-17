@@ -193,6 +193,16 @@ type Client struct {
 	HTTP           *http.Client
 	BaseURL, Token string
 	GOOS, GOARCH   string
+	ApprovedTags   []string
+}
+
+func tagApproved(tag string, approved []string) bool {
+	for _, candidate := range approved {
+		if strings.TrimSpace(candidate) == tag {
+			return true
+		}
+	}
+	return false
 }
 
 // DownloadAndVerify downloads only the URL selected from the trusted GitHub
@@ -331,6 +341,10 @@ func Resolve(ctx context.Context, current Current, repo, branch string, client C
 	}
 	if r.Draft || r.Prerelease || strings.TrimSpace(branch) == "" || r.TargetCommitish != branch {
 		s.Status, s.Reason = "unverified", "Release ist kein freigegebenes stabiles Release auf dem Zielbranch."
+		return s
+	}
+	if !tagApproved(r.TagName, client.ApprovedTags) {
+		s.Status, s.Reason = "unverified", "Release-Tag ist nicht in der konfigurierten Freigabe-Allowlist."
 		return s
 	}
 	commit, err := client.tagCommit(ctx, repo, r.TagName)
