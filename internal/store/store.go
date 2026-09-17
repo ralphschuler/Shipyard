@@ -2787,8 +2787,8 @@ func (s *Store) EnqueueIntegration(c context.Context, job domain.IntegrationJob)
 	var result domain.IntegrationJob
 	err := s.DB.QueryRow(c, `INSERT INTO repository_integration_queue(repository_path,run_id,task_id,branch,default_branch,base_sha,head_sha)
 		VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(run_id) DO UPDATE SET head_sha=EXCLUDED.head_sha,updated_at=now()
-		RETURNING id,repository_path,run_id,task_id,branch,default_branch,base_sha,head_sha,status,step,pr_url,pr_number,attempts,last_error,next_attempt_at,claimed_until,created_at,updated_at`, job.RepositoryPath, job.RunID, job.TaskID, job.Branch, job.DefaultBranch, job.BaseSHA, job.HeadSHA).
-		Scan(&result.ID, &result.RepositoryPath, &result.RunID, &result.TaskID, &result.Branch, &result.DefaultBranch, &result.BaseSHA, &result.HeadSHA, &result.Status, &result.Step, &result.PRURL, &result.PRNumber, &result.Attempts, &result.LastError, &result.NextAttemptAt, &result.ClaimedUntil, &result.CreatedAt, &result.UpdatedAt)
+		RETURNING id,repository_path,run_id,task_id,branch,default_branch,base_sha,head_sha,status,step,pr_url,last_error,pr_number,attempts,next_attempt_at,claimed_until,created_at,updated_at`, job.RepositoryPath, job.RunID, job.TaskID, job.Branch, job.DefaultBranch, job.BaseSHA, job.HeadSHA).
+		Scan(&result.ID, &result.RepositoryPath, &result.RunID, &result.TaskID, &result.Branch, &result.DefaultBranch, &result.BaseSHA, &result.HeadSHA, &result.Status, &result.Step, &result.PRURL, &result.LastError, &result.PRNumber, &result.Attempts, &result.NextAttemptAt, &result.ClaimedUntil, &result.CreatedAt, &result.UpdatedAt)
 	return result, err
 }
 
@@ -2808,9 +2808,9 @@ func (s *Store) IntegrationJobs(c context.Context, limit int) ([]domain.Integrat
 		UPDATE repository_integration_queue q
 		SET claimed_until=now()+interval '2 minutes',status=CASE WHEN q.status='queued' THEN 'running' ELSE q.status END,updated_at=now()
 		FROM candidates c WHERE q.id=c.id
-		RETURNING q.id,q.repository_path,q.run_id,q.task_id,q.branch,q.default_branch,q.base_sha,q.head_sha,q.status,q.step,q.pr_url,q.pr_number,q.attempts,q.last_error,q.next_attempt_at,q.claimed_until,q.created_at,q.updated_at
+		RETURNING q.id,q.repository_path,q.run_id,q.task_id,q.branch,q.default_branch,q.base_sha,q.head_sha,q.status,q.step,q.pr_url,q.last_error,q.pr_number,q.attempts,q.next_attempt_at,q.claimed_until,q.created_at,q.updated_at
 	)
-	SELECT id,repository_path,run_id,task_id,branch,default_branch,base_sha,head_sha,status,step,pr_url,pr_number,attempts,last_error,next_attempt_at,claimed_until,created_at,updated_at FROM claimed`, limit)
+	SELECT id,repository_path,run_id,task_id,branch,default_branch,base_sha,head_sha,status,step,pr_url,last_error,pr_number,attempts,next_attempt_at,claimed_until,created_at,updated_at FROM claimed`, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -274,6 +274,152 @@ func TestApplyConcurrentRetriesObservePersistedAppliedState(t *testing.T) {
 	}
 }
 
+func TestProcessIntegrationQueueEndToEndRebasesPushesCreatesPRAndSyncsMerge(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, t.TempDir(), "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Integration Test")
+	runGit(t, source, "config", "user.email", "integration@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+
+	board, err := s.CreateBoard(ctx, "Queue E2E "+time.Now().Format("150405.000000000"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	project, err := s.CreateProject(ctx, "Queue E2E project "+time.Now().Format("150405.000000000"), remote, "master", source, []string{board.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The task target is inherited from the board's single project.
+	task, err := s.CreateTask(ctx, board.ID, "Queue E2E task", "exercise the durable integration queue", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "Queue E2E agent "+time.Now().Format("150405.000000000"), "integration", "", "", "", source, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule, err := s.CreateRule(ctx, "Queue E2E rule", board.ID, "task.created", "", agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.CreateRun(ctx, task.ID, agent.ID, rule.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	branch, err := ensureTaskBranch(ctx, source, task.ID, project.DefaultBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	branchWorktree := filepath.Join(t.TempDir(), "task-branch")
+	runGit(t, source, "worktree", "add", branchWorktree, branch)
+	if err := os.WriteFile(filepath.Join(branchWorktree, "delivery.txt"), []byte("delivery\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, branchWorktree, "add", "delivery.txt")
+	runGit(t, branchWorktree, "commit", "-m", "delivery")
+	head, err := gitOutput(ctx, branchWorktree, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "worktree", "remove", "--force", branchWorktree)
+
+	// Advance the default branch after the task branch was created. The queue
+	// must fetch and rebase before pushing the task branch.
+	other := filepath.Join(t.TempDir(), "other")
+	runGit(t, t.TempDir(), "clone", remote, other)
+	runGit(t, other, "config", "user.name", "Remote Test")
+	runGit(t, other, "config", "user.email", "remote@example.invalid")
+	if err := os.WriteFile(filepath.Join(other, "remote.txt"), []byte("remote\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, other, "add", "remote.txt")
+	runGit(t, other, "commit", "-m", "remote progress")
+	runGit(t, other, "push", "origin", "master")
+
+	stateFile := filepath.Join(t.TempDir(), "pr-state")
+	fakeGH := filepath.Join(t.TempDir(), "gh")
+	if err := os.WriteFile(fakeGH, []byte("#!/bin/sh\n"+
+		"case \"$*\" in\n"+"  *'pr list'*) printf '%s\\n' '[]' ;;\n"+"  *'number,url'*) printf '%s\\n' '{\"number\":17,\"url\":\"https://example.invalid/pr/17\"}' ;;\n"+"  *'pr view'*) if grep -q merged \"$PR_STATE\"; then printf '%s\\n' '{\"state\":\"MERGED\",\"mergedAt\":\"2026-09-18T00:00:00Z\"}'; else printf '%s\\n' '{\"state\":\"OPEN\",\"mergedAt\":null}'; fi ;;\n"+"esac\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stateFile, []byte("open\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PR_STATE", stateFile)
+	t.Setenv("PATH", filepath.Dir(fakeGH)+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	base, err := gitOutput(ctx, source, "rev-parse", "origin/master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := s.EnqueueIntegration(ctx, domain.IntegrationJob{RepositoryPath: source, RunID: run.ID, TaskID: task.ID, Branch: branch, DefaultBranch: project.DefaultBranch, BaseSHA: base, HeadSHA: head})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := s.IntegrationJobs(ctx, 1)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("first queue claimant got %d jobs: %v", len(claimed), err)
+	}
+	if duplicate, err := s.IntegrationJobs(ctx, 1); err != nil || len(duplicate) != 0 {
+		t.Fatalf("second concurrent claimant got %d jobs: %v", len(duplicate), err)
+	}
+	if err := s.UpdateIntegration(ctx, job.ID, "queued", "fetch", base, head, "", "", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	w := &Worker{Store: s}
+	w.processIntegrationQueue(ctx)
+	var status, step, pushedHead, lastError string
+	if err := s.DB.QueryRow(ctx, "SELECT status,step,head_sha,last_error FROM repository_integration_queue WHERE id=$1", job.ID).Scan(&status, &step, &pushedHead, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pr_open" || step != "done" || pushedHead == head {
+		t.Fatalf("queue did not complete rebase/push/PR: status=%s step=%s head=%s original=%s error=%s", status, step, pushedHead, head, lastError)
+	}
+	if _, err := gitOutput(ctx, remote, "show", "task/"+task.ID+":remote.txt"); err != nil {
+		t.Fatalf("rebased remote change missing from pushed task branch: %v", err)
+	}
+
+	// Simulate the provider-confirmed merge in the bare remote, then run the
+	// same durable job again. The managed checkout must fast-forward cleanly.
+	merger := filepath.Join(t.TempDir(), "merger")
+	runGit(t, t.TempDir(), "clone", remote, merger)
+	runGit(t, merger, "config", "user.name", "Merge Test")
+	runGit(t, merger, "config", "user.email", "merge@example.invalid")
+	runGit(t, merger, "fetch", "origin", branch)
+	runGit(t, merger, "switch", "master")
+	runGit(t, merger, "merge", "--ff-only", "origin/"+branch)
+	runGit(t, merger, "push", "origin", "master")
+	if err := os.WriteFile(stateFile, []byte("merged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.processIntegrationQueue(ctx)
+	if err := s.DB.QueryRow(ctx, "SELECT status FROM repository_integration_queue WHERE id=$1", job.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "succeeded" {
+		t.Fatalf("merged queue job status = %q, want succeeded", status)
+	}
+	managedHead, err := gitOutput(ctx, source, "rev-parse", "HEAD")
+	if err != nil || managedHead != pushedHead {
+		t.Fatalf("managed checkout head = %q, want rebased delivery %q (err=%v)", managedHead, pushedHead, err)
+	}
+	if dirty, err := gitOutput(ctx, source, "status", "--porcelain"); err != nil || dirty != "" {
+		t.Fatalf("managed checkout is not clean: %q (%v)", dirty, err)
+	}
+}
+
 func fakeProviderScript(t *testing.T, countPath, transition string, target ...string) string {
 	t.Helper()
 	script := filepath.Join(t.TempDir(), "provider.sh")
