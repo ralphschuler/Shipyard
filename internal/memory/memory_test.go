@@ -58,3 +58,15 @@ func TestFitNeverExceedsTokenBudget(t *testing.T) {
 		t.Fatalf("bad pack: %+v", p)
 	}
 }
+
+func TestFactVersionVisibleAtHonorsValidityWindow(t *testing.T) {
+	point := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	from := point.Add(-time.Hour)
+	until := point.Add(time.Hour)
+	if !FactVersionVisibleAt(from, &until, point) {
+		t.Fatal("version inside validity window must be visible")
+	}
+	if FactVersionVisibleAt(point.Add(time.Nanosecond), &until, point) || FactVersionVisibleAt(from, &point, point) {
+		t.Fatal("validity window must be half-open")
+	}
+}

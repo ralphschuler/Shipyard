@@ -5,6 +5,7 @@ import {
   Boxes,
   ChevronDown,
   CircleDot,
+  BrainCircuit,
   FolderGit2,
   Gauge,
   GitCompareArrows,
@@ -45,6 +46,7 @@ import { normalizeLanguage, translate, type Language } from "@/i18n";
 import { renderMarkdown, safeMarkdownURL } from "@/markdown";
 
 const Dashboard = lazy(() => import("@/features/dashboard"));
+const Memory = lazy(() => import("@/features/memory"));
 type NavItem = {
   name: string;
   path: string;
@@ -70,6 +72,7 @@ const nav: NavItem[] = [
   },
   { name: "skills", path: "/skills", endpoint: "/api/v1/skills", icon: Wrench },
   { name: "runs", path: "/runs", endpoint: "/api/v1/runs", icon: Play },
+  { name: "memory", path: "/memory", icon: BrainCircuit },
   {
     name: "audit",
     path: "/audit",
@@ -94,6 +97,7 @@ function titleFor(route: string, t: (key: string) => string) {
   if (route === "/automations") return t("automations");
   if (route === "/skills") return t("skills");
   if (route === "/runs") return t("runs");
+  if (route === "/memory") return t("memory");
   if (route === "/audit") return t("audit");
   return "Shipyard";
 }
@@ -149,6 +153,7 @@ function endpointUsesChange(endpoint: string, change: LiveChange) {
   if (endpoint.includes("/boards")) return matches("boards", "tasks", "workflow_columns");
   if (endpoint.includes("/dashboard")) return matches("boards", "tasks", "agent_runs", "agent_run_batches", "notifications", "automation_events", "agent_interactions", "task_decisions");
   if (endpoint.includes("/audit")) return matches("audit_events");
+  if (endpoint.includes("/memory")) return matches("memory_conversations", "memory_facts", "memory_fact_versions", "memory_audit_events");
   return true;
 }
 
@@ -493,6 +498,8 @@ export default function App() {
             <AgentDetail id={route.split("/")[2]} />
           ) : route === "/" ? (
             <Suspense fallback={<Loading />}><Dashboard /></Suspense>
+          ) : route === "/memory" ? (
+            <Suspense fallback={<Loading />}><Memory /></Suspense>
           ) : active?.endpoint ? (
             <ResourceList endpoint={active.endpoint} title={t(active.name)} />
           ) : route === "/settings" || route.startsWith("/settings/") || route === "/account" ? (

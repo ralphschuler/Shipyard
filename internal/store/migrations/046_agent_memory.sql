@@ -39,6 +39,8 @@ CREATE TABLE memory_fact_versions (
   UNIQUE(fact_id,version_no)
 );
 CREATE UNIQUE INDEX memory_one_active_version ON memory_fact_versions(fact_id) WHERE active;
+CREATE INDEX memory_fact_versions_current_validity ON memory_fact_versions(fact_id,valid_from,valid_until) WHERE active;
+CREATE INDEX memory_facts_retention ON memory_facts(tenant_id,user_id,project_id,task_id,agent_id,expires_at) WHERE expires_at IS NOT NULL;
 ALTER TABLE memory_facts ADD CONSTRAINT memory_current_version_fk FOREIGN KEY(current_version_id) REFERENCES memory_fact_versions(id);
 
 CREATE TABLE memory_audit_events (

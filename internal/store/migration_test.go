@@ -181,6 +181,7 @@ func TestAgentMemoryMigrationEnforcesScopeHistoryAndActiveVersion(t *testing.T) 
 		"UNIQUE(tenant_id,user_id,project_id,task_id,agent_id,dedupe_key)",
 		"CREATE UNIQUE INDEX memory_one_active_version ON memory_fact_versions(fact_id) WHERE active",
 		"current_version_id UUID", "high_impact BOOLEAN",
+		"memory_fact_versions_current_validity", "memory_facts_retention",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("memory migration missing %q", required)

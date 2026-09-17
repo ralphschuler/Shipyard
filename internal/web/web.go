@@ -22,6 +22,7 @@ import (
 	"sync"
 	"taskboard/internal/automation"
 	"taskboard/internal/domain"
+	"taskboard/internal/memory"
 	"taskboard/internal/skillcatalog"
 	"taskboard/internal/store"
 	"taskboard/internal/updates"
@@ -34,6 +35,7 @@ var files embed.FS
 
 type App struct {
 	store        *store.Store
+	memory       *memory.Store
 	worker       *automation.Worker
 	update       *updates.Orchestrator
 	templates    *template.Template
@@ -504,7 +506,7 @@ func NewWithUpdateOrchestrator(s *store.Store, worker *automation.Worker, orches
 	if err != nil {
 		panic("parse web templates: " + err.Error())
 	}
-	app := &App{store: s, worker: worker, update: orchestrator, live: &liveHub{clients: map[chan string]struct{}{}}, logins: newLoginThrottle(), templates: templates}
+	app := &App{store: s, memory: memory.New(s), worker: worker, update: orchestrator, live: &liveHub{clients: map[chan string]struct{}{}}, logins: newLoginThrottle(), templates: templates}
 	go s.ListenChanges(context.Background(), app.live.publish)
 	go app.syncProjectsLoop()
 	return app
@@ -545,6 +547,10 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("POST /api/v1/skills/install", a.installSkillAPI)
 	m.HandleFunc("GET /api/v1/runs", a.runsAPI)
 	m.HandleFunc("GET /api/v1/audit", a.auditAPI)
+	m.HandleFunc("GET /api/v1/memory", a.memoryAPI)
+	m.HandleFunc("POST /api/v1/memory/facts", a.createMemoryFactAPI)
+	m.HandleFunc("POST /api/v1/memory/facts/{id}/status", a.setMemoryFactStatusAPI)
+	m.HandleFunc("DELETE /api/v1/memory", a.deleteMemoryAPI)
 	m.HandleFunc("GET /api/v1/settings/providers", a.providersAPI)
 	m.HandleFunc("GET /api/v1/settings/secrets", a.secretsAPI)
 	m.HandleFunc("POST /api/v1/settings/secrets", a.createSecretAPI)
