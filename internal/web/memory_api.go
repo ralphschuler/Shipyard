@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"taskboard/internal/memory"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 func (a *App) memoryScope(r *http.Request) (memory.Scope, error) {
@@ -23,6 +25,25 @@ func (a *App) memoryScope(r *http.Request) (memory.Scope, error) {
 	}
 	if !scope.Valid() {
 		return memory.Scope{}, errors.New("tenant_id, project_id, task_id and agent_id are required")
+	}
+	var allowed bool
+	err := a.store.DB.QueryRow(r.Context(), `SELECT EXISTS(
+		SELECT 1 FROM workspace_members wm
+		JOIN projects p ON p.id=$3
+		JOIN tasks t ON t.id=$4
+		JOIN agents ag ON ag.id=$5 AND ag.retired_at IS NULL
+		WHERE wm.workspace_id=$1 AND wm.user_id=$2
+		  AND (EXISTS (SELECT 1 FROM task_target_projects tp WHERE tp.task_id=t.id AND tp.project_id=p.id)
+		       OR EXISTS (SELECT 1 FROM board_projects bp WHERE bp.project_id=p.id AND bp.board_id=t.board_id))
+	)`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID).Scan(&allowed)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return memory.Scope{}, errors.New("memory scope is not accessible")
+		}
+		return memory.Scope{}, err
+	}
+	if !allowed {
+		return memory.Scope{}, errors.New("memory scope is not accessible")
 	}
 	return scope, nil
 }
@@ -61,6 +82,21 @@ func (a *App) memoryAPI(w http.ResponseWriter, r *http.Request) {
 		nextBeforeID = last.ID
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"messages": items, "context": pack, "next_before": nextBefore, "next_before_id": nextBeforeID})
+}
+
+func (a *App) exportMemoryAPI(w http.ResponseWriter, r *http.Request) {
+	scope, err := a.memoryScope(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	data, err := a.memory.ExportMemory(r.Context(), scope, r.URL.Query().Get("q"), 10000)
+	if err != nil {
+		http.Error(w, "memory export unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(data)
 }
 
 func (a *App) createMemoryFactAPI(w http.ResponseWriter, r *http.Request) {
@@ -112,13 +148,13 @@ func (a *App) deleteMemoryAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	n, err := a.memory.DeleteMemory(r.Context(), scope)
+	result, err := a.memory.DeleteMemoryStats(r.Context(), scope)
 	if err != nil {
 		http.Error(w, "memory deletion unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]int64{"deleted_messages": n})
+	_ = json.NewEncoder(w).Encode(result)
 }
 
 func (a *App) retainMemoryAPI(w http.ResponseWriter, r *http.Request) {

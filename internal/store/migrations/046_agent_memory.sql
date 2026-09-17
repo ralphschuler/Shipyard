@@ -13,7 +13,7 @@ CREATE TABLE memory_conversations (
 );
 CREATE INDEX memory_conversations_page ON memory_conversations(tenant_id,user_id,project_id,task_id,agent_id,thread_id,occurred_at DESC,id DESC);
 CREATE INDEX memory_conversations_search ON memory_conversations USING GIN(search_vector);
-CREATE UNIQUE INDEX memory_conversations_message ON memory_conversations(tenant_id,task_id,message_id);
+CREATE UNIQUE INDEX memory_conversations_message ON memory_conversations(tenant_id,user_id,project_id,task_id,agent_id,message_id);
 
 CREATE TABLE memory_facts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(), tenant_id UUID NOT NULL, user_id UUID NOT NULL,
@@ -26,7 +26,7 @@ CREATE TABLE memory_facts (
   confidence NUMERIC(5,4) NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
   status TEXT NOT NULL CHECK (status IN ('pending','confirmed','revoked','superseded')) DEFAULT 'pending',
   high_impact BOOLEAN NOT NULL DEFAULT false, current_version_id UUID, created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ, confirmed_by UUID, confirmed_at TIMESTAMPTZ,
   UNIQUE(tenant_id,user_id,project_id,task_id,agent_id,dedupe_key)
 );
 CREATE TABLE memory_fact_versions (
@@ -38,7 +38,14 @@ CREATE TABLE memory_fact_versions (
   confirmed_by UUID, confirmed_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), provenance_json JSONB NOT NULL,
   UNIQUE(fact_id,version_no)
 );
-CREATE UNIQUE INDEX memory_one_active_version ON memory_fact_versions(fact_id) WHERE active;
+-- Version rows are immutable. The current pointer on memory_facts selects the
+-- readable version; active is retained for compatibility with old clients.
+CREATE OR REPLACE FUNCTION memory_fact_versions_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'memory fact versions are append-only';
+END $$;
+CREATE TRIGGER memory_fact_versions_append_only BEFORE UPDATE OR DELETE ON memory_fact_versions
+  FOR EACH ROW EXECUTE FUNCTION memory_fact_versions_append_only();
 CREATE INDEX memory_fact_versions_current_validity ON memory_fact_versions(fact_id,valid_from,valid_until) WHERE active;
 CREATE INDEX memory_facts_retention ON memory_facts(tenant_id,user_id,project_id,task_id,agent_id,expires_at) WHERE expires_at IS NOT NULL;
 ALTER TABLE memory_facts ADD CONSTRAINT memory_current_version_fk FOREIGN KEY(current_version_id) REFERENCES memory_fact_versions(id);

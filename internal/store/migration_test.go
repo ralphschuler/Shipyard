@@ -179,7 +179,7 @@ func TestAgentMemoryMigrationEnforcesScopeHistoryAndActiveVersion(t *testing.T) 
 	for _, required := range []string{
 		"memory_conversations", "memory_audit_events", "provenance_json", "search_vector",
 		"UNIQUE(tenant_id,user_id,project_id,task_id,agent_id,dedupe_key)",
-		"CREATE UNIQUE INDEX memory_one_active_version ON memory_fact_versions(fact_id) WHERE active",
+		"CREATE TRIGGER memory_fact_versions_append_only BEFORE UPDATE OR DELETE ON memory_fact_versions",
 		"current_version_id UUID", "high_impact BOOLEAN",
 		"memory_fact_versions_current_validity", "memory_facts_retention",
 	} {

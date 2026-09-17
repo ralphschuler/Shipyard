@@ -2,6 +2,7 @@ package memory
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -99,5 +100,25 @@ func TestRetentionResultReportsBothMemoryKinds(t *testing.T) {
 	result := RetentionResult{ConversationRows: 2, FactRows: 3}
 	if result.TotalRows() != 5 {
 		t.Fatalf("total retention rows = %d, want 5", result.TotalRows())
+	}
+}
+
+func TestMemoryMigrationProtectsVersionHistoryAndUsesCurrentPointer(t *testing.T) {
+	b, err := os.ReadFile("../store/migrations/046_agent_memory.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sql := string(b)
+	for _, want := range []string{"memory_fact_versions_append_only", "RAISE EXCEPTION", "current_version_id"} {
+		if !strings.Contains(sql, want) {
+			t.Fatalf("migration must contain %q", want)
+		}
+	}
+}
+
+func TestRetentionResultIncludesOperationalCounters(t *testing.T) {
+	result := RetentionResult{ConversationRows: 2, FactRows: 3, Runs: 1}
+	if result.TotalRows() != 5 || result.Runs != 1 {
+		t.Fatalf("unexpected retention stats: %+v", result)
 	}
 }

@@ -548,6 +548,7 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("GET /api/v1/runs", a.runsAPI)
 	m.HandleFunc("GET /api/v1/audit", a.auditAPI)
 	m.HandleFunc("GET /api/v1/memory", a.memoryAPI)
+	m.HandleFunc("GET /api/v1/memory/export", a.exportMemoryAPI)
 	m.HandleFunc("POST /api/v1/memory/facts", a.createMemoryFactAPI)
 	m.HandleFunc("POST /api/v1/memory/facts/{id}/status", a.setMemoryFactStatusAPI)
 	m.HandleFunc("DELETE /api/v1/memory", a.deleteMemoryAPI)

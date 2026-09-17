@@ -51,6 +51,7 @@ type RetentionPolicy struct {
 type RetentionResult struct {
 	ConversationRows int64 `json:"conversation_rows"`
 	FactRows         int64 `json:"fact_rows"`
+	Runs             int64 `json:"runs"`
 }
 
 func (r RetentionResult) TotalRows() int64 { return r.ConversationRows + r.FactRows }
@@ -71,6 +72,10 @@ type ConversationMessage struct {
 	ID, ThreadID, MessageID, RunID, Role, Content string
 	OccurredAt                                    time.Time
 	ExpiresAt                                     *time.Time
+}
+type ExportData struct {
+	Messages []ConversationMessage `json:"messages"`
+	Context  ContextPack           `json:"context"`
 }
 type Fact struct {
 	ID, Subject, Predicate, Status string
