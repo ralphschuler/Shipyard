@@ -95,7 +95,11 @@ test("manual update check shows failure and retry without duplicate requests", a
   await page.route("**/api/v1/settings/updates", async (route) => {
     checks += 1;
     await new Promise((resolve) => setTimeout(resolve, 150));
-    await route.abort("failed");
+    if (checks === 3) {
+      await route.abort("failed");
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify(updateFixture) });
   });
   await checkButton.click();
   await checkButton.click();
