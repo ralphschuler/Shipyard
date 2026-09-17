@@ -9,6 +9,21 @@ async function mockApp(page: Page, boards: Array<{ ID: string; Name: string }>, 
 }
 
 test.describe("Sidebar navigation", () => {
+  test("moves focus across the Boards button and its submenu", async ({ page }) => {
+    await mockApp(page, [{ ID: "board-1", Name: "Plattform" }]);
+    await page.goto("/app/#/projects");
+
+    const projects = page.getByRole("link", { name: "Projekte" });
+    const boardsToggle = page.getByRole("button", { name: "Boards" });
+    await projects.focus();
+    await page.keyboard.press("ArrowDown");
+    await expect(boardsToggle).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(page.getByRole("link", { name: "Alle Boards" })).toBeFocused();
+    await page.keyboard.press("End");
+    await expect(page.getByRole("link", { name: "Einstellungen" })).toBeFocused();
+  });
+
   test("shows the active board and supports keyboard collapse", async ({ page }) => {
     await mockApp(page, [
       { ID: "board-1", Name: "Plattform" },

@@ -302,11 +302,15 @@ export default function App() {
     else if (event.key === "End") next = total - 1;
     else return;
     event.preventDefault();
-    document.querySelector<HTMLAnchorElement>(`[data-nav-index="${next}"]`)?.focus();
+    document.querySelector<HTMLElement>(`[data-nav-index="${next}"]`)?.focus();
   };
   const active = nav.find((item) => item.path === route);
   const showNavLabels = navOpen || mobileNavOpen;
   const boardsActive = route === "/boards" || route.startsWith("/boards/");
+  const boardsNavIndex = nav.findIndex((item) => item.name === "boards");
+  const boardSubmenuSize = boardsOpen ? boards.length + 1 : 0;
+  const navIndexFor = (index: number) =>
+    index + (boardsOpen && index > boardsNavIndex ? boardSubmenuSize : 0);
   return (
     <TooltipProvider>
       <div className="min-h-dvh bg-background">
@@ -337,6 +341,7 @@ export default function App() {
             {nav.map((item, index) => {
               const Icon = item.icon;
               const selected = item.path === route || (item.name === "boards" && boardsActive);
+              const navIndex = navIndexFor(index);
               return (
                 <div key={item.path} className="space-y-1">
                   {item.name === "boards" ? (
@@ -349,8 +354,8 @@ export default function App() {
                       title={t(item.name)}
                       className={`shipyard-nav-item ${selected ? "is-active" : ""}`}
                       onClick={() => setBoardsOpen((value) => !value)}
-                      onKeyDown={(event) => navigateNav(index, event)}
-                      data-nav-index={index}
+                      onKeyDown={(event) => navigateNav(navIndex, event)}
+                      data-nav-index={navIndex}
                     >
                       <Icon className="size-4 shrink-0" />
                       {showNavLabels && <span className="min-w-0 flex-1 text-left">{t(item.name)}</span>}
@@ -360,8 +365,8 @@ export default function App() {
                     <a
                       href={`#${item.path}`}
                       onClick={(event) => { event.preventDefault(); navigate(item.path); }}
-                      onKeyDown={(event) => navigateNav(index, event)}
-                      data-nav-index={index}
+                      onKeyDown={(event) => navigateNav(navIndex, event)}
+                      data-nav-index={navIndex}
                       aria-current={selected ? "page" : undefined}
                       aria-label={t(item.name)}
                       title={t(item.name)}
@@ -373,13 +378,13 @@ export default function App() {
                   )}
                   {item.name === "boards" && boardsOpen && (
                     <div id="board-subnavigation" className="board-subnavigation" aria-label={t("availableBoards")}>
-                      <a href="#/boards" onClick={(event) => { event.preventDefault(); navigate("/boards"); }} onKeyDown={(event) => navigateNav(nav.length, event)} data-nav-index={nav.length} className={`board-nav-link ${route === "/boards" ? "is-active" : ""}`} aria-current={route === "/boards" ? "page" : undefined} aria-label={t("allBoards")} title={t("allBoards")}>
+                      <a href="#/boards" onClick={(event) => { event.preventDefault(); navigate("/boards"); }} onKeyDown={(event) => navigateNav(boardsNavIndex + 1, event)} data-nav-index={boardsNavIndex + 1} className={`board-nav-link ${route === "/boards" ? "is-active" : ""}`} aria-current={route === "/boards" ? "page" : undefined} aria-label={t("allBoards")} title={t("allBoards")}>
                         <span className="board-nav-glyph" aria-hidden="true">⌘</span><span>{t("allBoards")}</span>
                       </a>
                       {boards.map((board, boardIndex) => {
                         const boardPath = `/boards/${board.ID}`;
                         const boardSelected = route === boardPath || route.startsWith(`${boardPath}/`);
-                        const boardIndexInNavigation = nav.length + boardIndex + 1;
+                        const boardIndexInNavigation = boardsNavIndex + boardIndex + 2;
                         return <a key={board.ID} href={`#${boardPath}`} onClick={(event) => { event.preventDefault(); navigate(boardPath); }} onKeyDown={(event) => navigateNav(boardIndexInNavigation, event)} data-nav-index={boardIndexInNavigation} className={`board-nav-link ${boardSelected ? "is-active" : ""}`} aria-current={boardSelected ? "page" : undefined} aria-label={board.Name} title={board.Name}><CircleDot className="size-3.5" aria-hidden="true" /><span>{board.Name}</span></a>;
                       })}
                       {boards.length === 0 && <p className="board-nav-empty">{t("noBoards")}</p>}
