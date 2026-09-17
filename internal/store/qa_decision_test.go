@@ -60,3 +60,19 @@ func TestQADecisionTargetFailsClosedForInvalidOrAmbiguousAnswers(t *testing.T) {
 		t.Fatalf("non-QA interaction produced target %q", got)
 	}
 }
+
+func TestQADecisionTargetRejectsFallbackForInvalidAnswer(t *testing.T) {
+	columns := []domain.Column{
+		{ID: "qa", Name: "QA", Type: "standard"},
+		{ID: "development", Name: "In Progress", Type: "standard"},
+		{ID: "done", Name: "Done", Type: "done"},
+	}
+	transitions := []domain.Transition{
+		{FromColumnID: "qa", ToColumnID: "development"},
+		{FromColumnID: "qa", ToColumnID: "done"},
+	}
+
+	if _, err := resolveQADecisionTarget("qa_release", []byte(`{"release_decision":["later"]}`), "qa", columns, transitions); err == nil {
+		t.Fatal("invalid QA answer must reject the fallback workflow target")
+	}
+}

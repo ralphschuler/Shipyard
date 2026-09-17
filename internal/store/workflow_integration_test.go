@@ -673,6 +673,16 @@ func TestWorkflowIntegrationQAReworkSupersedesPreviousReleaseDecision(t *testing
 	if superseded != 1 {
 		t.Fatalf("superseded QA decisions=%d, want 1", superseded)
 	}
+	if _, err = s.DB.Exec(ctx, `INSERT INTO task_decisions(task_id,agent_id,decision_key,title,response,resolved_by)
+		VALUES($1,$2,'qa_release','Freigabe für QA','{"release_decision":["approve"]}'::jsonb,'qa-test-2')`, task.ID, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if active, err := s.HasTaskDecision(ctx, task.ID, agent.ID, "qa_release"); err != nil || !active {
+		t.Fatalf("new QA decision active=%t err=%v", active, err)
+	}
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, columnByName(t, columns, "Done").ID, "mcp"); err != nil || !moved {
+		t.Fatalf("second QA approval to done: moved=%t err=%v", moved, err)
+	}
 }
 
 func deliverySource(t *testing.T, s *Store, ctx context.Context, runID string) string {

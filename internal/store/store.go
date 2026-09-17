@@ -2051,11 +2051,15 @@ func (s *Store) ResolveInteractionAndMove(c context.Context, id, answerer, freef
 			}
 			return i, nil, transitionsErr
 		}
-		if qaTarget := qaDecisionTarget(i.DecisionKey, response, currentColumnID, columns, transitions); qaTarget != "" {
-			// The semantic QA decision owns the route. An optional legacy form
-			// target must not turn "Überarbeiten" into a release or vice versa.
-			targetColumnID = qaTarget
+		qaTarget, qaErr := resolveQADecisionTarget(i.DecisionKey, response, currentColumnID, columns, transitions)
+		if qaErr != nil {
+			// QA answers own the route. Never fall back to an optional legacy
+			// target when the semantic answer is invalid or ambiguous.
+			return i, nil, qaErr
 		}
+		// The semantic QA decision owns the route. An optional legacy form
+		// target must not turn "Überarbeiten" into a release or vice versa.
+		targetColumnID = qaTarget
 	}
 	// A selected workflow step hands the task back to the workflow itself. Its
 	// entered-column event will pick the appropriate specialist exactly once;
@@ -2206,12 +2210,20 @@ func workflowTransitionsFromTx(c context.Context, tx pgx.Tx, boardID, fromColumn
 }
 
 func qaDecisionTarget(key string, response []byte, currentColumnID string, columns []domain.Column, transitions []domain.Transition) string {
-	if strings.TrimSpace(key) != "qa_release" || strings.TrimSpace(currentColumnID) == "" {
+	target, err := resolveQADecisionTarget(key, response, currentColumnID, columns, transitions)
+	if err != nil {
 		return ""
+	}
+	return target
+}
+
+func resolveQADecisionTarget(key string, response []byte, currentColumnID string, columns []domain.Column, transitions []domain.Transition) (string, error) {
+	if strings.TrimSpace(key) != "qa_release" || strings.TrimSpace(currentColumnID) == "" {
+		return "", nil
 	}
 	var answers map[string][]string
 	if json.Unmarshal(response, &answers) != nil || len(answers["release_decision"]) != 1 {
-		return ""
+		return "", errors.New("invalid or ambiguous QA decision")
 	}
 	value := strings.ToLower(strings.TrimSpace(answers["release_decision"][0]))
 	wantedType, wantedNames := "", map[string]bool{}
@@ -2221,7 +2233,7 @@ func qaDecisionTarget(key string, response []byte, currentColumnID string, colum
 	case "rework":
 		wantedNames = map[string]bool{"in progress": true, "entwicklung": true, "development": true}
 	default:
-		return ""
+		return "", errors.New("invalid QA decision")
 	}
 	columnTypes := make(map[string]string, len(columns))
 	columnNames := make(map[string]string, len(columns))
@@ -2238,11 +2250,14 @@ func qaDecisionTarget(key string, response []byte, currentColumnID string, colum
 			continue
 		}
 		if target != "" {
-			return ""
+			return "", errors.New("ambiguous QA transition")
 		}
 		target = transition.ToColumnID
 	}
-	return target
+	if target == "" {
+		return "", errors.New("QA transition is not configured")
+	}
+	return target, nil
 }
 func (s *Store) CreateLabel(c context.Context, b, n, color string) (domain.Label, error) {
 	var l domain.Label
