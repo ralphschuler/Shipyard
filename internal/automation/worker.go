@@ -1227,7 +1227,7 @@ func patchFiles(patch string) []string {
 // branch. The managed source checkout is never modified, which means two
 // tasks can be accepted independently even while the remote default branch
 // advances between their runs.
-func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, taskID string) (string, error) {
+func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, taskID string, configuredDefault ...string) (string, error) {
 	if dirty, checkErr := exec.CommandContext(ctx, "git", "-C", source, "status", "--porcelain").Output(); checkErr != nil {
 		return "", checkErr
 	} else if strings.TrimSpace(string(dirty)) != "" {
@@ -1241,6 +1241,9 @@ func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, 
 		return "", errors.New("dieser Run enthält keine übernehmbaren Änderungen")
 	}
 	defaultBranch := repositoryBranch(ctx, source)
+	if len(configuredDefault) > 0 {
+		defaultBranch = integrationDefaultBranch(domain.Project{DefaultBranch: configuredDefault[0]}, defaultBranch)
+	}
 	remoteRef := "origin/" + defaultBranch
 	if _, err := gitOutput(ctx, source, "fetch", "--no-tags", "origin", defaultBranch); err != nil {
 		// Local-only repositories are supported for tests and development. A
@@ -1249,7 +1252,7 @@ func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, 
 			return "", fmt.Errorf("Remote-Stand konnte vor der Task-Integration nicht gelesen werden: %w", err)
 		}
 	}
-	branch, err := ensureTaskBranch(ctx, source, taskID)
+	branch, err := ensureTaskBranch(ctx, source, taskID, defaultBranch)
 	if err != nil {
 		return "", err
 	}
@@ -2195,7 +2198,7 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	commitSHA := delivery.AcceptedCommitSHA
 	if !alreadyCommitted {
 		var applyErr error
-		commitSHA, applyErr = applyRunPatchToTaskBranch(ctx, source, worktree, runID, run.TaskID)
+		commitSHA, applyErr = applyRunPatchToTaskBranch(ctx, source, worktree, runID, run.TaskID, defaultBranch)
 		if applyErr != nil {
 			if isIntegrationConflict(applyErr) {
 				if recordErr := w.recordIntegrationConflict(ctx, run, applyErr); recordErr != nil {

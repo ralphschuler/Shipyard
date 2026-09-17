@@ -123,6 +123,11 @@ func TestRunTemplateShowsGitIntegrationMetadata(t *testing.T) {
 			t.Fatalf("run template is missing integration metadata %q", required)
 		}
 	}
+	section := strings.Index(html, `<h2>Git-Integration</h2>`)
+	closingHTML := strings.Index(html, `</html>`)
+	if section < 0 || closingHTML < 0 || section > closingHTML {
+		t.Fatalf("git integration metadata must be inside the HTML document")
+	}
 }
 
 // Navigation is progressively enhanced by app.js so every legacy, server
