@@ -1532,9 +1532,10 @@ function Updates({ language }: { language: Language }) {
   const result = (manualData || data) as UpdateData | undefined;
   if (error) return <Failure />;
   if (!result) return <Loading />;
-  const release = result.release || {};
+  const displayStatus = checkError ? "unavailable" : result.status;
+  const release = checkError ? {} : result.release || {};
   const releaseURL = typeof release.url === "string" ? safeMarkdownURL(release.url) : undefined;
-  const available = result.status === "update_available" && result.installable;
+  const available = displayStatus === "update_available" && result.installable;
   const checkFailed = Boolean(checkError) || !["up_to_date", "update_available"].includes(result.status);
   const checkedAt = checkError ? new Date(checkError.checkedAt) : result.checked_at ? new Date(result.checked_at) : undefined;
   const checkedLabel = checkedAt && !Number.isNaN(checkedAt.getTime())
@@ -1590,7 +1591,7 @@ function Updates({ language }: { language: Language }) {
             </Button>
           </div>
           <p className="sr-only" role="status" aria-live="polite">
-            {checking ? t("updatesChecking") : checkFailed ? (checkError?.message || result.reason || t("updatesCheckFailed")) : result.status === "update_available" ? t("updatesAvailable") : t("updatesUpToDate")}
+            {checking ? t("updatesChecking") : checkFailed ? (checkError?.message || result.reason || t("updatesCheckFailed")) : displayStatus === "update_available" ? t("updatesAvailable") : t("updatesUpToDate")}
           </p>
           <p className="text-sm text-muted-foreground" aria-label={t("updatesLastChecked")}>{t("updatesLastChecked")}: {checkedLabel}</p>
           <p className={checkFailed ? "rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive" : "sr-only"} role={checkFailed ? "alert" : undefined} aria-live="polite">
@@ -1598,7 +1599,7 @@ function Updates({ language }: { language: Language }) {
           </p>
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesCurrentVersion")}</p><p className="mt-1 text-xl font-semibold">{result.current.version}</p><p className="font-mono text-xs text-muted-foreground">{result.current.commit}</p><p className="mt-3 text-sm">Build: {result.current.builtAt || t("notAvailable")}</p></div>
-            <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesStatus")}</p><p className="mt-1 text-xl font-semibold">{result.status === "up_to_date" ? t("updatesUpToDate") : result.status === "update_available" ? t("updatesAvailable") : t("updatesFailed")}</p><p className="mt-3 text-sm text-muted-foreground">Quelle: {result.source.provider} · {result.source.repository}</p></div>
+            <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesStatus")}</p><p className="mt-1 text-xl font-semibold">{displayStatus === "up_to_date" ? t("updatesUpToDate") : displayStatus === "update_available" ? t("updatesAvailable") : t("updatesFailed")}</p><p className="mt-3 text-sm text-muted-foreground">Quelle: {result.source.provider} · {result.source.repository}</p></div>
           </div>
         </CardContent>
       </Card>
