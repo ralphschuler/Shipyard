@@ -110,6 +110,25 @@ func ValidateRelease(r Release, repository string) error {
 	return nil
 }
 
+// ValidateReleaseForBranch verifies the complete release trust chain. The
+// branch and the commit resolved from the immutable tag are inputs from the
+// GitHub API, never values supplied by the operator or the UI.
+func ValidateReleaseForBranch(r Release, repository, branch, approvedBranch, tagCommit string, tagVerified bool) error {
+	if strings.TrimSpace(branch) == "" || strings.TrimSpace(approvedBranch) == "" || branch != approvedBranch {
+		return errors.New("release branch is not configured")
+	}
+	if err := ValidateRelease(r, repository); err != nil {
+		return err
+	}
+	if !shaPattern.MatchString(tagCommit) || !strings.EqualFold(r.Commit, tagCommit) {
+		return errors.New("release tag does not resolve to the release commit")
+	}
+	if !tagVerified {
+		return errors.New("release tag commit is not cryptographically verified")
+	}
+	return nil
+}
+
 func Compare(current, release string) string {
 	if release == "" {
 		return "unavailable"
@@ -220,7 +239,7 @@ func Resolve(ctx context.Context, current Current, repo, branch string, client C
 		s.Reason = "GitHub-Release konnte nicht sicher geprüft werden."
 		return s
 	}
-	if r.Draft || r.Prerelease || r.TargetCommitish != "" && r.TargetCommitish != branch {
+	if r.Draft || r.Prerelease || strings.TrimSpace(branch) == "" || r.TargetCommitish != branch {
 		s.Status, s.Reason = "unverified", "Release ist kein freigegebenes stabiles Release auf dem Zielbranch."
 		return s
 	}
@@ -249,7 +268,7 @@ func Resolve(ctx context.Context, current Current, repo, branch string, client C
 	s.Release.Verified = shaPattern.MatchString(s.Release.Commit) && commit.Commit.Verification.Verified
 	s.Release.Compatible = s.Release.Verified
 	s.Status = Compare(current.Version, s.Release.Version)
-	s.Installable = s.Status == "update_available" && ValidateRelease(s.Release, repo) == nil
+	s.Installable = s.Status == "update_available" && ValidateReleaseForBranch(s.Release, repo, branch, branch, commit.SHA, commit.Commit.Verification.Verified) == nil
 	if !s.Installable && s.Status == "update_available" {
 		s.Status = "unverified"
 		s.Reason = "Release-Verifikation ist unvollständig."

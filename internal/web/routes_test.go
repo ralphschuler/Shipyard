@@ -2,9 +2,11 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"taskboard/internal/updates"
 	"testing"
 )
 
@@ -79,6 +81,25 @@ func TestInstallUpdateRequiresExplicitConfirmation(t *testing.T) {
 	(&App{}).installUpdateAPI(res, httptest.NewRequest(http.MethodPost, "/api/v1/settings/updates/install", bytes.NewBufferString(`{"confirm":true}`)))
 	if res.Code != http.StatusServiceUnavailable {
 		t.Fatalf("confirmed status = %d, want %d", res.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestInstallUpdateRunsOnlyAfterVerifiedSnapshot(t *testing.T) {
+	t.Setenv("TASKBOARD_VERSION", "1.2.0")
+	t.Setenv("TASKBOARD_UPDATE_VERSION", "1.3.0")
+	t.Setenv("TASKBOARD_UPDATE_COMMIT", "0123456789012345678901234567890123456789")
+	t.Setenv("TASKBOARD_UPDATE_PUBLISHED_AT", "2026-09-17T10:00:00Z")
+	t.Setenv("TASKBOARD_UPDATE_URL", "https://github.com/ralphschuler/Shipyard/releases/tag/v1.3.0")
+	t.Setenv("TASKBOARD_UPDATE_VERIFIED", "true")
+	t.Setenv("TASKBOARD_UPDATE_COMPATIBLE", "true")
+	t.Setenv("TASKBOARD_UPDATE_SHA256", "0123456789012345678901234567890123456789012345678901234567890123")
+	called := false
+	noop := func(context.Context, updates.Snapshot) error { called = true; return nil }
+	app := &App{update: &updates.Orchestrator{Backup: noop, Verify: noop, Migrate: noop, Switch: noop, Restart: noop, Health: noop}}
+	res := httptest.NewRecorder()
+	app.installUpdateAPI(res, httptest.NewRequest(http.MethodPost, "/api/v1/settings/updates/install", bytes.NewBufferString(`{"confirm":true}`)))
+	if res.Code != http.StatusOK || !called {
+		t.Fatalf("status = %d, called = %v, body = %s", res.Code, called, res.Body.String())
 	}
 }
 

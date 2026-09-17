@@ -35,6 +35,7 @@ var files embed.FS
 type App struct {
 	store        *store.Store
 	worker       *automation.Worker
+	update       *updates.Orchestrator
 	templates    *template.Template
 	live         *liveHub
 	logins       *loginThrottle
@@ -2014,6 +2015,11 @@ func (a *App) integrationsAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) updatesAPI(w http.ResponseWriter, r *http.Request) {
+	snapshot := a.resolveUpdates(r)
+	writeAPI(w, map[string]any{"current": snapshot.Current, "source": map[string]string{"provider": snapshot.Provider, "repository": snapshot.Repository, "branch": snapshot.Branch}, "status": snapshot.Status, "release": snapshot.Release, "installable": snapshot.Installable, "reason": snapshot.Reason}, nil)
+}
+
+func (a *App) resolveUpdates(r *http.Request) updates.Snapshot {
 	current := updates.Current{Version: os.Getenv("TASKBOARD_VERSION"), Commit: os.Getenv("TASKBOARD_COMMIT_SHA"), BuiltAt: os.Getenv("TASKBOARD_BUILD_TIME")}
 	if current.Version == "" {
 		current.Version = "development"
@@ -2045,7 +2051,7 @@ func (a *App) updatesAPI(w http.ResponseWriter, r *http.Request) {
 	} else {
 		snapshot = updates.Resolve(r.Context(), current, repository, branch, updates.Client{HTTP: http.DefaultClient, BaseURL: os.Getenv("TASKBOARD_GITHUB_API_URL"), Token: os.Getenv("TASKBOARD_GITHUB_TOKEN")})
 	}
-	writeAPI(w, map[string]any{"current": snapshot.Current, "source": map[string]string{"provider": snapshot.Provider, "repository": snapshot.Repository, "branch": snapshot.Branch}, "status": snapshot.Status, "release": snapshot.Release, "installable": snapshot.Installable, "reason": snapshot.Reason}, nil)
+	return snapshot
 }
 
 func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
@@ -2056,10 +2062,61 @@ func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Explizite Update-Bestätigung erforderlich.", http.StatusBadRequest)
 		return
 	}
-	// No generic shell/binary replacement is permitted. The deployment-specific
-	// backup, migration, restart and healthcheck adapter must be supplied before
-	// an installation can mutate this process.
-	http.Error(w, "Update geprüft, aber kein sicherer Installationsadapter ist konfiguriert.", http.StatusServiceUnavailable)
+	if a.update == nil {
+		// No generic shell/binary replacement is permitted. The deployment-specific
+		// adapter must be supplied before an installation can mutate this process.
+		http.Error(w, "Update geprüft, aber kein sicherer Installationsadapter ist konfiguriert.", http.StatusServiceUnavailable)
+		return
+	}
+	if a.store != nil {
+		busy, err := a.activeUpdateRuns(r.Context())
+		if err != nil {
+			http.Error(w, "Aktive Runs konnten nicht sicher geprüft werden.", http.StatusServiceUnavailable)
+			return
+		}
+		if busy {
+			http.Error(w, "Aktive Runs oder Workspaces blockieren die Update-Installation.", http.StatusConflict)
+			return
+		}
+	}
+	snapshot := a.resolveUpdates(r)
+	if !snapshot.Installable || snapshot.Status != "update_available" {
+		a.auditUpdate(r, "update.install_blocked", snapshot, "snapshot_not_installable")
+		http.Error(w, "Update ist nicht verifiziert und installierbar.", http.StatusConflict)
+		return
+	}
+	a.auditUpdate(r, "update.install_confirmed", snapshot, "confirmed")
+	progress := make([]updates.Progress, 0, 12)
+	if err := a.update.Install(r.Context(), snapshot, func(p updates.Progress) { progress = append(progress, p) }); err != nil {
+		a.auditUpdate(r, "update.install_failed", snapshot, "failed")
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	a.auditUpdate(r, "update.install_succeeded", snapshot, "succeeded")
+	writeAPI(w, map[string]any{"status": "succeeded", "progress": progress}, nil)
+}
+
+func (a *App) activeUpdateRuns(ctx context.Context) (bool, error) {
+	var busy bool
+	err := a.store.DB.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM agent_runs WHERE status IN ('queued','running')
+	) OR EXISTS(
+		SELECT 1 FROM agent_run_batches WHERE status IN ('queued','running')
+	)`).Scan(&busy)
+	return busy, err
+}
+
+func (a *App) auditUpdate(r *http.Request, kind string, snapshot updates.Snapshot, result string) {
+	if a.store == nil {
+		return
+	}
+	actor := ""
+	if user, ok := currentUser(r.Context()); ok {
+		actor = user.ID
+	}
+	_ = a.store.RecordAudit(r.Context(), actor, kind, "update", snapshot.Release.Commit, map[string]string{
+		"result": result, "version": snapshot.Release.Version, "repository": snapshot.Repository,
+	})
 }
 func (a *App) accountAPI(w http.ResponseWriter, r *http.Request) {
 	u, ok := currentUser(r.Context())

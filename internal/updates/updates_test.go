@@ -1,6 +1,11 @@
 package updates
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"reflect"
+	"testing"
+)
 
 func TestCompareOnlyReportsNewerSemanticRelease(t *testing.T) {
 	for _, tc := range []struct{ current, release, want string }{
@@ -28,5 +33,54 @@ func TestValidateReleaseRequiresFullTrustChainMetadata(t *testing.T) {
 				t.Fatal("expected validation failure")
 			}
 		})
+	}
+}
+
+func TestValidateReleaseForBranchRequiresSignedTagCommitOnApprovedBranch(t *testing.T) {
+	r := Release{Version: "v1.3.0", Commit: "0123456789012345678901234567890123456789", URL: "https://github.com/ralphschuler/Shipyard/releases/tag/v1.3.0", Verified: true, Compatible: true, Checksum: "0123456789012345678901234567890123456789012345678901234567890123"}
+	if err := ValidateReleaseForBranch(r, "ralphschuler/Shipyard", "master", "master", r.Commit, true); err != nil {
+		t.Fatal(err)
+	}
+	for name, args := range map[string]struct {
+		branch, approvedBranch, tagCommit string
+		signed            bool
+	}{
+		"empty branch": {branch: ""},
+		"wrong branch": {branch: "main", approvedBranch: "master", tagCommit: r.Commit, signed: true},
+		"tag mismatch": {branch: "master", approvedBranch: "master", tagCommit: "abcdefabcdefabcdefabcdefabcdefabcdefabcd", signed: true},
+		"unsigned tag": {branch: "master", approvedBranch: "master", tagCommit: r.Commit},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if ValidateReleaseForBranch(r, "ralphschuler/Shipyard", args.branch, args.approvedBranch, args.tagCommit, args.signed) == nil {
+				t.Fatal("expected branch/tag trust failure")
+			}
+		})
+	}
+}
+
+func TestOrchestratorBacksUpBeforeInstallAndRollsBackAfterFailure(t *testing.T) {
+	var calls []string
+	o := Orchestrator{
+		Backup: func(context.Context, Snapshot) error { calls = append(calls, "backup"); return nil },
+		Verify: func(context.Context, Snapshot) error { calls = append(calls, "verify"); return nil },
+		Migrate: func(context.Context, Snapshot) error {
+			calls = append(calls, "migrate")
+			return errors.New("migration failed")
+		},
+		Rollback: func(context.Context, Snapshot) error { calls = append(calls, "rollback"); return nil },
+	}
+	s := Snapshot{Status: "update_available", Installable: true, Release: Release{Version: "v1.3.0"}}
+	err := o.Install(context.Background(), s, func(Progress) {})
+	if err == nil || !reflect.DeepEqual(calls, []string{"backup", "verify", "migrate", "rollback"}) {
+		t.Fatalf("error = %v, calls = %v", err, calls)
+	}
+}
+
+func TestOrchestratorBlocksBusyRunsAndDoesNotMutate(t *testing.T) {
+	called := false
+	o := Orchestrator{Busy: func(context.Context) bool { return true }, Backup: func(context.Context, Snapshot) error { called = true; return nil }}
+	err := o.Install(context.Background(), Snapshot{Status: "update_available", Installable: true}, func(Progress) {})
+	if err == nil || called {
+		t.Fatalf("error = %v, backup called = %v", err, called)
 	}
 }

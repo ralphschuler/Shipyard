@@ -1291,6 +1291,7 @@ function Settings({ route }: { route: string }) {
 function Updates() {
   const { data, error } = useAPI<any>("/api/v1/settings/updates");
   const [message, setMessage] = useState("");
+  const [progress, setProgress] = useState<any[]>([]);
   const [installing, setInstalling] = useState(false);
   if (error) return <Failure />;
   if (!data) return <Loading />;
@@ -1301,8 +1302,10 @@ function Updates() {
     if (!available || !confirm("Dieses verifizierte Release installieren? Aktive Runs müssen vorher beendet sein.")) return;
     setInstalling(true); setMessage("Update wird geprüft und für die Wartung vorbereitet …");
     try {
-      await mutation("/api/v1/settings/updates/install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }) });
-      setMessage("Update erfolgreich gestartet.");
+      const response = await mutation("/api/v1/settings/updates/install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }) });
+      const result = await response.json();
+      setProgress(result.progress || []);
+      setMessage(result.status === "succeeded" ? "Update erfolgreich abgeschlossen." : "Update abgeschlossen.");
     } catch (err) {
       setMessage(String(err));
     } finally { setInstalling(false); }
@@ -1326,6 +1329,7 @@ function Updates() {
             <div className="grid gap-3 text-sm sm:grid-cols-2"><p><span className="text-muted-foreground">Version</span><br /><strong>{release.version}</strong></p><p><span className="text-muted-foreground">Commit</span><br /><code>{release.commit || "nicht angegeben"}</code></p><p><span className="text-muted-foreground">Veröffentlicht</span><br />{release.publishedAt || "nicht angegeben"}</p><p><span className="text-muted-foreground">Migration</span><br />{release.migrationRequired ? "Erforderlich" : "Nicht erforderlich"}</p></div>
             <div className="rounded-md bg-muted p-3 text-sm whitespace-pre-wrap">{release.changelog || "Kein Changelog angegeben."}</div>
             <div className="flex flex-wrap items-center gap-2"><Button disabled={!available || installing} onClick={install}>{installing ? "Update wird vorbereitet …" : "Update installieren"}</Button>{release.url && <a className="text-sm underline" href={release.url} target="_blank" rel="noreferrer">Auf GitHub ansehen</a>}</div>
+            {progress.length > 0 && <ol className="grid gap-2 rounded-md border p-3 text-sm" aria-label="Update-Fortschritt">{progress.map((step, index) => <li key={`${step.phase}-${index}`} className="flex items-center justify-between gap-3"><span>{step.phase}</span><span className="text-muted-foreground">{step.status === "succeeded" ? "Abgeschlossen" : step.status === "failed" ? "Fehlgeschlagen" : "Läuft"}</span></li>)}</ol>}
             {data.reason && <p className="text-sm text-muted-foreground">{data.reason}</p>}
           </> : <p className="text-sm text-muted-foreground">Es wurde kein kompatibles Release gemeldet. Ein Installationsbutton ist deshalb nicht verfügbar.</p>}
           {message && <p className="text-sm text-destructive">{message}</p>}
