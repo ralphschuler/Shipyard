@@ -5,16 +5,40 @@ import { Dialog as DialogPrimitive } from "radix-ui"
 import { Button } from "@/components/ui/button"
 import { XIcon } from "lucide-react"
 
+let lastDialogTrigger: HTMLElement | null = null
+
 function Dialog({
+  onOpenChange,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Root>) {
-  return <DialogPrimitive.Root data-slot="dialog" {...props} />
+  return (
+    <DialogPrimitive.Root
+      data-slot="dialog"
+      onOpenChange={(open) => {
+        if (open && document.activeElement instanceof HTMLElement) {
+          lastDialogTrigger = document.activeElement
+        }
+        onOpenChange?.(open)
+      }}
+      {...props}
+    />
+  )
 }
 
 function DialogTrigger({
+  onClick,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Trigger>) {
-  return <DialogPrimitive.Trigger data-slot="dialog-trigger" {...props} />
+  return (
+    <DialogPrimitive.Trigger
+      data-slot="dialog-trigger"
+      onClick={(event) => {
+        lastDialogTrigger = event.currentTarget
+        onClick?.(event)
+      }}
+      {...props}
+    />
+  )
 }
 
 function DialogPortal({
@@ -50,6 +74,7 @@ function DialogContent({
   children,
   showCloseButton = true,
   onOpenAutoFocus,
+  onCloseAutoFocus,
   onEscapeKeyDown,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
@@ -76,6 +101,9 @@ function DialogContent({
     if (event.defaultPrevented) return
     event.preventDefault()
     const dialog = event.currentTarget as HTMLElement
+    if (document.activeElement instanceof HTMLElement && !dialog.contains(document.activeElement)) {
+      lastDialogTrigger = document.activeElement
+    }
     const target =
       dialog.querySelector<HTMLElement>("[autofocus]") ??
       dialog.querySelector<HTMLElement>(
@@ -94,6 +122,17 @@ function DialogContent({
       event.preventDefault()
     }
   }
+  const restoreDialogFocus: NonNullable<
+    React.ComponentProps<typeof DialogPrimitive.Content>["onCloseAutoFocus"]
+  > = (event) => {
+    onCloseAutoFocus?.(event)
+    if (event.defaultPrevented) return
+    const trigger = lastDialogTrigger
+    if (!trigger?.isConnected) return
+    event.preventDefault()
+    requestAnimationFrame(() => trigger.focus())
+    lastDialogTrigger = null
+  }
 
   return (
     <DialogPortal>
@@ -105,6 +144,7 @@ function DialogContent({
           className
         )}
         onOpenAutoFocus={focusDialog}
+        onCloseAutoFocus={restoreDialogFocus}
         onEscapeKeyDown={handleEscapeKeyDown}
         {...props}
       >
