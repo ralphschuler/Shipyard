@@ -2032,8 +2032,15 @@ func (s *Store) DeleteAgent(c context.Context, id string) error {
 		return err
 	}
 	// A retired profile must not retain secret access or skill assignments.
-	if _, err = tx.Exec(c, "DELETE FROM secret_agents WHERE agent_id=$1", id); err != nil {
+	// Older installations may not have the optional secrets schema yet.
+	var secretTable *string
+	if err = tx.QueryRow(c, "SELECT to_regclass('public.secret_agents')").Scan(&secretTable); err != nil {
 		return err
+	}
+	if secretTable != nil {
+		if _, err = tx.Exec(c, "DELETE FROM secret_agents WHERE agent_id=$1", id); err != nil {
+			return err
+		}
 	}
 	if _, err = tx.Exec(c, "DELETE FROM agent_skills WHERE agent_id=$1", id); err != nil {
 		return err
