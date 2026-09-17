@@ -320,6 +320,51 @@ func TestApplyRunPatchAcceptsTwoSequentialRunWorktrees(t *testing.T) {
 	}
 }
 
+func TestFindUnpersistedRunCommitRequiresExactRunDiff(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	worktree := filepath.Join(t.TempDir(), "recovery")
+	runGit(t, source, "worktree", "add", worktree, "HEAD")
+	if err := os.WriteFile(filepath.Join(worktree, "delivery.txt"), []byte("delivery\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, worktree, "add", "delivery.txt")
+	if _, err := applyRunPatch(context.Background(), source, worktree, "recoverable-run"); err != nil {
+		t.Fatalf("apply delivery: %v", err)
+	}
+	found, err := findUnpersistedRunCommit(context.Background(), source, worktree, "recoverable-run")
+	if err != nil || found == "" {
+		t.Fatalf("matching unpersisted commit = %q, %v", found, err)
+	}
+	if err := removeRunWorktree(context.Background(), "recoverable-run", source, worktree); err != nil {
+		t.Fatalf("cleanup recovery worktree: %v", err)
+	}
+
+	// A forgeable subject with a different patch must not be accepted as the
+	// recovery marker for this run.
+	worktree = filepath.Join(t.TempDir(), "forged")
+	runGit(t, source, "worktree", "add", worktree, "HEAD")
+	if err := os.WriteFile(filepath.Join(worktree, "different.txt"), []byte("different\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, worktree, "add", "different.txt")
+	runGit(t, source, "-c", "user.name=Taskboard", "-c", "user.email=taskboard@local", "commit", "--allow-empty", "-m", "taskboard: accept run forged-run")
+	found, err = findUnpersistedRunCommit(context.Background(), source, worktree, "forged-run")
+	if err != nil || found != "" {
+		t.Fatalf("forged subject was accepted: %q, %v", found, err)
+	}
+	if err := removeRunWorktree(context.Background(), "forged-run", source, worktree); err != nil {
+		t.Fatalf("cleanup forged worktree: %v", err)
+	}
+}
+
 func TestApplyRunPatchReportsThreeWayConflictAndPreservesDiff(t *testing.T) {
 	source := t.TempDir()
 	runGit(t, source, "init", "-b", "master")

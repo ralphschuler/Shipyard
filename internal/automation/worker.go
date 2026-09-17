@@ -660,6 +660,37 @@ func runCommitExists(ctx context.Context, source, commitSHA string) (bool, error
 	return err == nil && actual == commitSHA, nil
 }
 
+// findUnpersistedRunCommit recovers the only unavoidable failure window in
+// Apply: Git may have created the acceptance commit while the following DB
+// write failed. A subject marker alone is deliberately insufficient here.
+// The candidate must be an ancestor of the managed HEAD and its complete
+// binary diff must equal the still-present isolated run diff.
+func findUnpersistedRunCommit(ctx context.Context, source, worktree, runID string) (string, error) {
+	expected, err := exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--binary", "HEAD").Output()
+	if err != nil {
+		return "", err
+	}
+	if len(expected) == 0 {
+		return "", nil
+	}
+	logOutput, err := gitOutput(ctx, source, "log", "--format=%H%x00%s", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	marker := "taskboard: accept run " + runID
+	for _, entry := range strings.Split(logOutput, "\n") {
+		parts := strings.SplitN(entry, "\x00", 2)
+		if len(parts) != 2 || parts[1] != marker {
+			continue
+		}
+		candidateDiff, diffErr := exec.CommandContext(ctx, "git", "-C", source, "diff", "--binary", parts[0]+"^", parts[0]).Output()
+		if diffErr == nil && string(candidateDiff) == string(expected) {
+			return parts[0], nil
+		}
+	}
+	return "", nil
+}
+
 func gitOutput(ctx context.Context, directory string, args ...string) (string, error) {
 	command := exec.CommandContext(ctx, "git", append([]string{"-C", directory}, args...)...)
 	out, err := command.CombinedOutput()
@@ -1436,9 +1467,26 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	}
 	defer unlock()
 
+	worktree, err := w.Store.RunWorktree(ctx, runID)
+	if err != nil || worktree == "" {
+		return errors.New("Worktree für diesen Run nicht verfügbar")
+	}
 	alreadyCommitted, err := runCommitExists(ctx, source, delivery.AcceptedCommitSHA)
 	if err != nil {
 		return err
+	}
+	if !alreadyCommitted && delivery.AcceptedCommitSHA == "" {
+		// This is a narrow crash-recovery path, not normal idempotency: the
+		// candidate must match the exact isolated diff as well as the run ID.
+		recoveredSHA, recoveryErr := findUnpersistedRunCommit(ctx, source, worktree, runID)
+		if recoveryErr != nil {
+			return fmt.Errorf("verwaister Übernahme-Commit konnte nicht geprüft werden: %w", recoveryErr)
+		}
+		if recoveredSHA != "" {
+			delivery.AcceptedCommitSHA = recoveredSHA
+			alreadyCommitted = true
+			_ = w.Store.AddRunLog(ctx, runID, "warning", "Vorhandener Übernahme-Commit anhand von Run-ID und vollständigem Diff wiederhergestellt.")
+		}
 	}
 	if !alreadyCommitted {
 		if dirty, checkErr := exec.Command("git", "-C", source, "status", "--porcelain").Output(); checkErr != nil {
@@ -1446,10 +1494,6 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 		} else if strings.TrimSpace(string(dirty)) != "" {
 			return managedCheckoutProblem("nicht sauber", strings.TrimSpace(string(dirty)), "fremde oder manuelle Änderungen würden von dieser Übernahme berührt")
 		}
-	}
-	worktree, err := w.Store.RunWorktree(ctx, runID)
-	if err != nil || worktree == "" {
-		return errors.New("Worktree für diesen Run nicht verfügbar")
 	}
 	if !alreadyCommitted {
 		if _, err := applyRunPatch(ctx, source, worktree, runID); err != nil {
