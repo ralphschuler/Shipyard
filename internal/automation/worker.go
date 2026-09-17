@@ -251,8 +251,10 @@ type transitionRequest struct {
 // Triage owns task wording and repository routing. These narrow controls keep
 // that useful authority separate from arbitrary database or workflow access.
 type taskUpdateRequest struct {
-	Title       string `json:"title"`
-	Description string `json:"description"`
+	Title          string `json:"title"`
+	Description    string `json:"description"`
+	HasTitle       bool   `json:"-"`
+	HasDescription bool   `json:"-"`
 }
 
 type taskTargetsRequest struct {
@@ -350,21 +352,62 @@ func suppressAutomationOutcome(run domain.AgentRun, requested, awaitingDecision 
 }
 
 func requestedTaskUpdate(logs []domain.RunLog) (taskUpdateRequest, bool) {
-	var result taskUpdateRequest
-	found := false
-	for _, match := range taskUpdateFence.FindAllStringSubmatch(joinRunLogs(logs), -1) {
-		var request taskUpdateRequest
-		if json.Unmarshal([]byte(match[1]), &request) != nil {
-			continue
-		}
-		request.Title = strings.TrimSpace(request.Title)
-		request.Description = strings.TrimSpace(request.Description)
-		if request.Title == "" || request.Description == "" || len(request.Title) > 300 || len(request.Description) > 12000 || found {
-			continue
-		}
-		result, found = request, true
-	}
+	result, found, _ := requestedTaskUpdateWithReason(logs)
 	return result, found
+}
+
+func requestedTaskUpdateWithReason(logs []domain.RunLog) (taskUpdateRequest, bool, string) {
+	var result taskUpdateRequest
+	var reason string
+	for _, match := range taskUpdateFence.FindAllStringSubmatch(joinRunLogs(logs), -1) {
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(match[1]), &raw); err != nil {
+			reason = "taskboard-update enthält malformed JSON"
+			continue
+		}
+		var request taskUpdateRequest
+		if value, present := raw["title"]; present {
+			request.HasTitle = true
+			if err := json.Unmarshal(value, &request.Title); err != nil || !validTaskWording(request.Title, 300) {
+				request.Title = ""
+				reason = "taskboard-update title wurde verworfen"
+			} else {
+				request.Title = strings.TrimSpace(request.Title)
+			}
+		}
+		if value, present := raw["description"]; present {
+			request.HasDescription = true
+			if err := json.Unmarshal(value, &request.Description); err != nil || !validTaskWording(request.Description, 12000) {
+				request.Description = ""
+				reason = "taskboard-update description wurde verworfen"
+			} else {
+				request.Description = strings.TrimSpace(request.Description)
+			}
+		}
+		if !request.HasTitle && !request.HasDescription {
+			reason = "taskboard-update liefert weder title noch description"
+			continue
+		}
+		if request.HasTitle && !validTaskWording(request.Title, 300) {
+			request.HasTitle = false
+		}
+		if request.HasDescription && !validTaskWording(request.Description, 12000) {
+			request.HasDescription = false
+		}
+		if !request.HasTitle && !request.HasDescription {
+			continue
+		}
+		return request, true, reason
+	}
+	return result, false, reason
+}
+
+func validTaskWording(value string, maxLength int) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "…" || value == "..." || len(value) > maxLength {
+		return false
+	}
+	return true
 }
 
 func requestedTaskTargets(logs []domain.RunLog) (taskTargetsRequest, bool) {
@@ -2388,12 +2431,24 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 				_ = w.Store.AddComment(ctx, run.TaskID, "Agent", comment)
 			}
 			if agent.Name == "Triage Agent" && taskErr == nil {
-				if update, requested := requestedTaskUpdate(controlLogs); requested {
-					if updateErr := w.Store.UpdateTaskWording(ctx, task.ID, update.Title, update.Description); updateErr != nil {
+				if update, requested, updateReason := requestedTaskUpdateWithReason(controlLogs); requested {
+					var title, description *string
+					if update.HasTitle {
+						title = &update.Title
+					}
+					if update.HasDescription {
+						description = &update.Description
+					}
+					if updateReason != "" {
+						_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Triage-Aktualisierung enthielt verworfene Felder: "+updateReason)
+					}
+					if updateErr := w.Store.UpdateTaskWordingPartial(ctx, task.ID, title, description); updateErr != nil {
 						_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Triage-Aktualisierung wurde nicht übernommen: "+updateErr.Error())
 					} else {
 						_ = w.Store.AddComment(ctx, task.ID, "Taskboard", "Triage hat Titel und Beschreibung aktualisiert.")
 					}
+				} else if updateReason != "" {
+					_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Triage-Aktualisierung wurde verworfen: "+updateReason)
 				}
 				if targets, requested := requestedTaskTargets(controlLogs); requested {
 					if targetErr := w.Store.SetTaskTargets(ctx, task.ID, targets.ProjectIDs, targets.GroupIDs); targetErr != nil {

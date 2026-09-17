@@ -1485,10 +1485,41 @@ func (s *Store) UpdateTask(c context.Context, id, title, description, priority, 
 // UpdateTaskWording is the deliberately narrow mutation available to the
 // Triage Agent. It cannot alter priority, schedule, labels or workflow state.
 func (s *Store) UpdateTaskWording(c context.Context, id, title, description string) error {
-	if strings.TrimSpace(title) == "" || strings.TrimSpace(description) == "" {
+	return s.UpdateTaskWordingPartial(c, id, &title, &description)
+}
+
+// UpdateTaskWordingPartial atomically updates only the supplied, validated
+// wording fields. Nil fields are deliberately left untouched.
+func (s *Store) UpdateTaskWordingPartial(c context.Context, id string, title, description *string) error {
+	if title == nil && description == nil {
 		return errors.New("task title and description are required")
 	}
-	_, err := s.DB.Exec(c, "UPDATE tasks SET title=$2,description=$3,updated_at=now() WHERE id=$1", id, strings.TrimSpace(title), strings.TrimSpace(description))
+	if title != nil {
+		*title = strings.TrimSpace(*title)
+		if *title == "" || *title == "…" || *title == "..." || len(*title) > 300 {
+			return errors.New("invalid task title")
+		}
+	}
+	if description != nil {
+		*description = strings.TrimSpace(*description)
+		if *description == "" || *description == "…" || *description == "..." || len(*description) > 12000 {
+			return errors.New("invalid task description")
+		}
+	}
+	var query string
+	var args []any
+	switch {
+	case title != nil && description != nil:
+		query = "UPDATE tasks SET title=$2,description=$3,updated_at=now() WHERE id=$1"
+		args = []any{id, *title, *description}
+	case title != nil:
+		query = "UPDATE tasks SET title=$2,updated_at=now() WHERE id=$1"
+		args = []any{id, *title}
+	default:
+		query = "UPDATE tasks SET description=$2,updated_at=now() WHERE id=$1"
+		args = []any{id, *description}
+	}
+	_, err := s.DB.Exec(c, query, args...)
 	return err
 }
 func (s *Store) DeleteTask(c context.Context, id string) error {

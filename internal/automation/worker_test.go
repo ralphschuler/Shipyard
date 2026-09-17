@@ -846,11 +846,31 @@ func TestRequestedTriageControlsAcceptOneBoundedRequest(t *testing.T) {
 
 func TestRequestedTriageControlsRejectAmbiguousOrEmptyRequests(t *testing.T) {
 	logs := []domain.RunLog{{Message: "```taskboard-update\n{\"title\":\"\",\"description\":\"x\"}\n```\n```taskboard-targets\n{\"project_ids\":[],\"group_ids\":[]}\n```"}}
-	if _, ok := requestedTaskUpdate(logs); ok {
-		t.Fatal("empty update must be rejected")
+	update, ok := requestedTaskUpdate(logs)
+	if !ok || update.HasTitle || !update.HasDescription || update.Description != "x" {
+		t.Fatalf("valid partial update was not accepted: %#v, %t", update, ok)
 	}
 	if _, ok := requestedTaskTargets(logs); ok {
 		t.Fatal("empty target request must be rejected")
+	}
+}
+
+func TestRequestedTaskUpdateAcceptsOnlyValidatedFields(t *testing.T) {
+	logs := []domain.RunLog{{Message: "```taskboard-update\n{\"title\":\"…\",\"description\":\"Neue belastbare Beschreibung\"}\n```"}}
+	update, ok := requestedTaskUpdate(logs)
+	if !ok || update.Title != "" || update.HasTitle || update.Description != "Neue belastbare Beschreibung" || !update.HasDescription {
+		t.Fatalf("unexpected partial triage update: %#v, %t", update, ok)
+	}
+}
+
+func TestRequestedTaskUpdateRejectsPlaceholderOnlyAndMalformedJSON(t *testing.T) {
+	for _, message := range []string{
+		"```taskboard-update\n{\"title\":\"...\",\"description\":\"   \"}\n```",
+		"```taskboard-update\n{\"title\":\"valid\"\n```",
+	} {
+		if _, ok := requestedTaskUpdate([]domain.RunLog{{Message: message}}); ok {
+			t.Fatalf("invalid triage update was accepted: %q", message)
+		}
 	}
 }
 
