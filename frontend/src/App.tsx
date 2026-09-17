@@ -42,6 +42,7 @@ import { ChatBubble } from "@/components/ui/chat-bubble";
 import { MarkdownContent } from "@/components/markdown-content";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { normalizeLanguage, translate, type Language } from "@/i18n";
+import { renderMarkdown } from "@/markdown";
 
 const Dashboard = lazy(() => import("@/features/dashboard"));
 type NavItem = {
@@ -1513,6 +1514,7 @@ function Updates() {
   const [message, setMessage] = useState("");
   const [progress, setProgress] = useState<any[]>([]);
   const [installing, setInstalling] = useState(false);
+  const [showSource, setShowSource] = useState(false);
   if (error) return <Failure />;
   if (!data) return <Loading />;
   const release = data.release || {};
@@ -1547,7 +1549,8 @@ function Updates() {
         <CardContent className="grid gap-3">
           {release.version ? <>
             <div className="grid gap-3 text-sm sm:grid-cols-2"><p><span className="text-muted-foreground">Version</span><br /><strong>{release.version}</strong></p><p><span className="text-muted-foreground">Commit</span><br /><code>{release.commit || "nicht angegeben"}</code></p><p><span className="text-muted-foreground">Veröffentlicht</span><br />{release.publishedAt || "nicht angegeben"}</p><p><span className="text-muted-foreground">Migration</span><br />{release.migrationRequired ? "Erforderlich" : "Nicht erforderlich"}</p></div>
-            <div className="rounded-md bg-muted p-3 text-sm whitespace-pre-wrap">{release.changelog || "Kein Changelog angegeben."}</div>
+            <div className="flex items-center justify-between gap-3"><h3 className="text-base font-semibold">Changelog</h3><Button variant="ghost" size="sm" onClick={() => setShowSource((value) => !value)}>{showSource ? "Formatierte Ansicht" : "Quelltext anzeigen"}</Button></div>
+            {showSource ? <section aria-label="Changelog-Quelltext" className="max-h-[34rem] overflow-auto rounded-md bg-muted p-3 text-sm"><pre className="whitespace-pre-wrap break-words">{release.changelog || "Kein Changelog angegeben."}</pre></section> : <section aria-label="Changelog" className="max-h-[34rem] overflow-auto rounded-md bg-muted p-4 text-sm">{renderChangelog(release.changelog)}</section>}
             <div className="flex flex-wrap items-center gap-2"><Button disabled={!available || installing} onClick={install}>{installing ? "Update wird vorbereitet …" : "Update installieren"}</Button>{release.url && <a className="text-sm underline" href={release.url} target="_blank" rel="noreferrer">Auf GitHub ansehen</a>}</div>
             {progress.length > 0 && <ol className="grid gap-2 rounded-md border p-3 text-sm" aria-label="Update-Fortschritt">{progress.map((step, index) => <li key={`${step.phase}-${index}`} className="flex items-center justify-between gap-3"><span>{step.phase}</span><span className="text-muted-foreground">{step.status === "succeeded" ? "Abgeschlossen" : step.status === "failed" ? "Fehlgeschlagen" : "Läuft"}</span></li>)}</ol>}
             {data.reason && <p className="text-sm text-muted-foreground">{data.reason}</p>}
@@ -1557,6 +1560,15 @@ function Updates() {
       </Card>
     </div>
   );
+}
+
+function renderChangelog(source: string) {
+  if (!source) return <p className="text-muted-foreground">Kein Changelog angegeben.</p>;
+  try {
+    return renderMarkdown(source);
+  } catch {
+    return <div role="alert"><p className="font-medium">Der Changelog konnte nicht formatiert werden.</p><pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words">{source}</pre></div>;
+  }
 }
 function Providers() {
   const { data, error } = useAPI<any[]>("/api/v1/settings/providers");
