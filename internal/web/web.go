@@ -1386,7 +1386,13 @@ func (a *App) persistUsagePrice(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 	var saveErr error
-	if id == "" {
+	if user, ok := currentUser(r.Context()); ok {
+		if id == "" {
+			saveErr = a.store.SaveUsagePriceWithAudit(r.Context(), p, user.ID)
+		} else {
+			saveErr = a.store.UpdateUsagePriceWithAudit(r.Context(), p, user.ID)
+		}
+	} else if id == "" {
 		saveErr = a.store.SaveUsagePrice(r.Context(), p)
 	} else {
 		saveErr = a.store.UpdateUsagePrice(r.Context(), p)
@@ -1395,29 +1401,20 @@ func (a *App) persistUsagePrice(w http.ResponseWriter, r *http.Request, id strin
 		http.Error(w, "Preis konnte nicht gespeichert werden: "+saveErr.Error(), 400)
 		return
 	}
-	if user, ok := currentUser(r.Context()); ok {
-		kind := "usage_price.created"
-		if id != "" {
-			kind = "usage_price.updated"
-		}
-		if err := a.store.RecordAudit(r.Context(), user.ID, kind, "usage_price", p.Version, map[string]string{"provider": p.Provider, "model": p.Model, "version": p.Version}); err != nil {
-			http.Error(w, "Preis wurde gespeichert, konnte aber nicht auditiert werden: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
 	http.Redirect(w, r, "/settings/prices", 303)
 }
 
 func (a *App) deleteUsagePrice(w http.ResponseWriter, r *http.Request) {
-	if err := a.store.DeleteUsagePrice(r.Context(), r.PathValue("id")); err != nil {
-		http.Error(w, "Preis konnte nicht gelöscht werden: "+err.Error(), 400)
-		return
-	}
+	id := r.PathValue("id")
+	var deleteErr error
 	if user, ok := currentUser(r.Context()); ok {
-		if err := a.store.RecordAudit(r.Context(), user.ID, "usage_price.deleted", "usage_price", r.PathValue("id"), nil); err != nil {
-			http.Error(w, "Preis wurde gelöscht, konnte aber nicht auditiert werden: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+		deleteErr = a.store.DeleteUsagePriceWithAudit(r.Context(), id, user.ID)
+	} else {
+		deleteErr = a.store.DeleteUsagePrice(r.Context(), id)
+	}
+	if deleteErr != nil {
+		http.Error(w, "Preis konnte nicht gelöscht werden: "+deleteErr.Error(), 400)
+		return
 	}
 	http.Redirect(w, r, "/settings/prices", 303)
 }

@@ -283,14 +283,72 @@ func (s *Store) SaveUsagePrice(ctx context.Context, p domain.UsagePrice) error {
 	return err
 }
 
+// SaveUsagePriceWithAudit keeps the catalog mutation and its audit record in
+// one transaction. A price must never become visible without its history.
+func (s *Store) SaveUsagePriceWithAudit(ctx context.Context, p domain.UsagePrice, actor string) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `INSERT INTO usage_price_catalog(provider,model,service_tier,valid_from,valid_until,input_microusd_per_million,output_microusd_per_million,cached_input_microusd_per_million,cache_write_microusd_per_million,reasoning_microusd_per_million,version) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, p.Provider, p.Model, p.ServiceTier, p.ValidFrom, p.ValidUntil, p.Input, p.Output, p.CachedInput, p.CacheWrite, p.Reasoning, p.Version); err != nil {
+		return err
+	}
+	if err = recordAudit(ctx, tx, actor, "usage_price.created", "usage_price", p.Version, map[string]string{"provider": p.Provider, "model": p.Model, "version": p.Version}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *Store) UpdateUsagePrice(ctx context.Context, p domain.UsagePrice) error {
 	_, err := s.DB.Exec(ctx, `UPDATE usage_price_catalog SET provider=$2,model=$3,service_tier=$4,valid_from=$5,valid_until=$6,input_microusd_per_million=$7,output_microusd_per_million=$8,cached_input_microusd_per_million=$9,cache_write_microusd_per_million=$10,reasoning_microusd_per_million=$11,version=$12 WHERE id=$1`, p.ID, p.Provider, p.Model, p.ServiceTier, p.ValidFrom, p.ValidUntil, p.Input, p.Output, p.CachedInput, p.CacheWrite, p.Reasoning, p.Version)
 	return err
 }
 
+// UpdateUsagePriceWithAudit rolls back the catalog update if its audit insert
+// or the final commit fails.
+func (s *Store) UpdateUsagePriceWithAudit(ctx context.Context, p domain.UsagePrice, actor string) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	result, err := tx.Exec(ctx, `UPDATE usage_price_catalog SET provider=$2,model=$3,service_tier=$4,valid_from=$5,valid_until=$6,input_microusd_per_million=$7,output_microusd_per_million=$8,cached_input_microusd_per_million=$9,cache_write_microusd_per_million=$10,reasoning_microusd_per_million=$11,version=$12 WHERE id=$1`, p.ID, p.Provider, p.Model, p.ServiceTier, p.ValidFrom, p.ValidUntil, p.Input, p.Output, p.CachedInput, p.CacheWrite, p.Reasoning, p.Version)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return pgx.ErrNoRows
+	}
+	if err = recordAudit(ctx, tx, actor, "usage_price.updated", "usage_price", p.ID, map[string]string{"provider": p.Provider, "model": p.Model, "version": p.Version}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *Store) DeleteUsagePrice(ctx context.Context, id string) error {
 	_, err := s.DB.Exec(ctx, `DELETE FROM usage_price_catalog WHERE id=$1`, id)
 	return err
+}
+
+// DeleteUsagePriceWithAudit makes deletion and its audit trail atomic.
+func (s *Store) DeleteUsagePriceWithAudit(ctx context.Context, id, actor string) error {
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = recordAudit(ctx, tx, actor, "usage_price.deleted", "usage_price", id, nil); err != nil {
+		return err
+	}
+	result, err := tx.Exec(ctx, `DELETE FROM usage_price_catalog WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return pgx.ErrNoRows
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) ResolveUsagePrice(ctx context.Context, provider, model, tier string, at time.Time) (domain.UsagePrice, error) {
