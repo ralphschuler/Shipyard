@@ -274,6 +274,38 @@ func TestApplyConcurrentRetriesObservePersistedAppliedState(t *testing.T) {
 	}
 }
 
+func TestRecordIntegrationConflictUsesQueueIDsWhenRunCannotBeLoaded(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "Queue conflict audit", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	task, err := s.CreateTask(ctx, board.ID, "Conflict task", "exercise conflict audit", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const missingRunID = "00000000-0000-0000-0000-000000000001"
+	worker := &Worker{Store: s}
+	_ = worker.recordIntegrationConflictByIDs(ctx, missingRunID, task.ID, managedCheckoutProblem("mit Remote-Stand nicht konfliktfrei rebasierbar", "shared.txt", "base=base-sha head=head-sha"))
+	updated, err := s.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(updated.ColumnName, "Needs action") {
+		t.Fatalf("conflict task column = %q, want Needs action", updated.ColumnName)
+	}
+	comments, err := s.Comments(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comments) != 1 || !strings.Contains(comments[0].Body, "shared.txt") || !strings.Contains(comments[0].Body, "base=base-sha") {
+		t.Fatalf("conflict audit comment = %#v", comments)
+	}
+}
+
 func TestProcessIntegrationQueueEndToEndRebasesPushesCreatesPRAndSyncsMerge(t *testing.T) {
 	s := workerIntegrationStore(t)
 	ctx := context.Background()
