@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"taskboard/internal/automation"
 	"taskboard/internal/mcp"
+	"taskboard/internal/release"
 	"taskboard/internal/store"
 	"taskboard/internal/updates"
 	"taskboard/internal/web"
@@ -86,7 +87,19 @@ func main() {
 		log.Fatalf("Datenbankmigration fehlgeschlagen: %v", err)
 	}
 
-	worker := &automation.Worker{Store: s}
+	worker := &automation.Worker{
+		Store: s,
+		ReleasePublisher: automation.ReleasePublisherFunc(func(ctx context.Context, request release.Request) (release.Result, error) {
+			if len(request.SecretValues) != 1 || request.SecretValues[0] == "" {
+				return release.Result{}, errors.New("GitHub-Secret fehlt")
+			}
+			// The token is supplied only for this request from the server-side
+			// secret lookup; it is never placed in configuration, logs, or the
+			// taskboard comment stream.
+			client := release.Client{Token: request.SecretValues[0]}
+			return release.Publish(ctx, request, release.GitPusher{}, client)
+		}),
+	}
 	worker.Start(ctx)
 
 	app := web.NewWithUpdateOrchestrator(s, worker, updates.NewProductionOrchestrator(s))

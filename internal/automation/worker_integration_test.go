@@ -4,15 +4,61 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"taskboard/internal/domain"
+	"taskboard/internal/release"
 	"taskboard/internal/store"
 	"testing"
 	"time"
 )
+
+type workerReleaseGitHub struct {
+	created []release.PullRequestInput
+	updated []release.PullRequestInput
+	current *release.PullRequest
+}
+
+func (g *workerReleaseGitHub) FindPR(context.Context, string, string, string, string, string) (*release.PullRequest, error) {
+	if g.current == nil {
+		return nil, nil
+	}
+	copy := *g.current
+	return &copy, nil
+}
+
+func (g *workerReleaseGitHub) CreatePR(_ context.Context, in release.PullRequestInput) (release.PullRequest, error) {
+	g.created = append(g.created, in)
+	g.current = &release.PullRequest{Number: 91, URL: "https://github.com/example/release-lifecycle/pull/91", Head: in.Head, Base: in.Base, Body: in.Body}
+	return *g.current, nil
+}
+
+func (g *workerReleaseGitHub) UpdatePR(_ context.Context, _ int, in release.PullRequestInput) (release.PullRequest, error) {
+	g.updated = append(g.updated, in)
+	g.current = &release.PullRequest{Number: 91, URL: "https://github.com/example/release-lifecycle/pull/91", Head: in.Head, Base: in.Base, Body: in.Body}
+	return *g.current, nil
+}
+
+func integrationGitOutput(t *testing.T, directory string, args ...string) string {
+	t.Helper()
+	command := exec.Command("git", append([]string{"-C", directory}, args...)...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
+	}
+	return strings.TrimSpace(string(output))
+}
+
+func integrationGitCommand(t *testing.T, args ...string) {
+	t.Helper()
+	command := exec.Command("git", args...)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, output)
+	}
+}
 
 func workerIntegrationStore(t *testing.T) *store.Store {
 	t.Helper()
@@ -56,6 +102,243 @@ func TestCheckProviderForAgentRejectsUnassignedSecret(t *testing.T) {
 	_, err = (&Worker{Store: s}).CheckProviderForAgent(ctx, "openai", agent.ID)
 	if err == nil || !strings.Contains(err.Error(), "kein aktives Secret") {
 		t.Fatalf("unassigned agent provider check error = %v", err)
+	}
+}
+
+func TestProcessKeepsTaskCompletedRetryableWhenReleasePublisherIsMissing(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "Missing release publisher", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	task, err := s.CreateTask(ctx, board.ID, "Retry release", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.DB.Exec(ctx, `INSERT INTO automation_events(type,task_id,board_id,payload)
+		VALUES('task.completed',$1,$2,'{}'::jsonb)`, task.ID, board.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	(&Worker{Store: s}).Process(ctx)
+
+	var processedAt *time.Time
+	var attempts int
+	var lastError string
+	if err = s.DB.QueryRow(ctx, `SELECT processed_at,attempts,last_error
+		FROM automation_events WHERE task_id=$1 AND type='task.completed'`, task.ID).
+		Scan(&processedAt, &attempts, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if processedAt != nil {
+		t.Fatal("task.completed was acknowledged without a release publisher")
+	}
+	if attempts != 1 {
+		t.Fatalf("missing release publisher attempts = %d, want 1", attempts)
+	}
+	if !strings.Contains(lastError, "Release-Agent blockiert") || !strings.Contains(lastError, "nicht konfiguriert") {
+		t.Fatalf("retry error does not expose the blocking reason: %q", lastError)
+	}
+}
+
+func TestProcessPublishesDoneTaskAndRetriesWithoutDuplicateSideEffects(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	t.Setenv("SHIPYARD_SECRET_KEY", "integration-release-secret-key")
+	t.Setenv("SHIPYARD_GITHUB_SECRET_ENV", "SHIPYARD_TEST_GITHUB_TOKEN")
+
+	board, err := s.CreateBoardWithTemplate(ctx, "Release lifecycle", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	source := t.TempDir()
+	project, err := s.CreateProject(ctx, "Release lifecycle project", "https://github.com/example/release-lifecycle.git", "master", source, []string{board.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask(ctx, board.ID, "Publish accepted delivery", "release integration", "high", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "Release lifecycle agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := s.CreateSecret(ctx, "integration", "release-lifecycle-token", "integration token", "SHIPYARD_TEST_GITHUB_TOKEN", "github_pat_integration_secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetSecretAgents(ctx, "integration", secret.ID, []string{agent.ID}); err != nil {
+		t.Fatal(err)
+	}
+
+	commit := "0123456789abcdef0123456789abcdef01234567"
+	var runID, eventID string
+	if err = s.DB.QueryRow(ctx, `INSERT INTO agent_runs(task_id,agent_id,status,prompt_snapshot,workspace_snapshot,target_project_id,source_workspace,accepted_commit_sha,applied_at,diff_summary,gate_status)
+		VALUES($1,$2,'succeeded','accepted delivery','managed checkout',$3,$4,$5,now(),'release summary','passed') RETURNING id`, task.ID, agent.ID, project.ID, source, commit).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DB.QueryRow(ctx, `INSERT INTO automation_events(type,task_id,board_id,payload)
+		VALUES('task.completed',$1,$2,'{}'::jsonb) RETURNING id`, task.ID, board.ID).Scan(&eventID); err != nil {
+		t.Fatal(err)
+	}
+
+	var requests []release.Request
+	worker := &Worker{
+		Store: s,
+		ReleasePublisher: ReleasePublisherFunc(func(_ context.Context, request release.Request) (release.Result, error) {
+			requests = append(requests, request)
+			return release.Result{PR: release.PullRequest{Number: 42, URL: "https://github.com/example/release-lifecycle/pull/42"}}, nil
+		}),
+	}
+	worker.Process(ctx)
+	if len(requests) != 1 {
+		t.Fatalf("publisher calls after first processing = %d, want 1", len(requests))
+	}
+	if requests[0].RunID != runID || requests[0].ProjectID != project.ID || requests[0].CommitSHA != commit {
+		t.Fatalf("publisher request lost durable identity: %#v", requests[0])
+	}
+	if len(requests[0].SecretValues) != 1 || requests[0].SecretValues[0] != "github_pat_integration_secret" {
+		t.Fatalf("publisher did not receive the assigned secret")
+	}
+
+	var processedAt *time.Time
+	if err = s.DB.QueryRow(ctx, "SELECT processed_at FROM automation_events WHERE id=$1", eventID).Scan(&processedAt); err != nil {
+		t.Fatal(err)
+	}
+	if processedAt == nil {
+		t.Fatal("successful task.completed event was not acknowledged")
+	}
+	publication, found, err := s.ReleasePublication(ctx, task.ID, project.ID, runID)
+	if err != nil || !found || publication.PRURL != "https://github.com/example/release-lifecycle/pull/42" {
+		t.Fatalf("publication = %#v found=%t err=%v", publication, found, err)
+	}
+	var auditCount, commentCount int
+	if err = s.DB.QueryRow(ctx, "SELECT count(*) FROM audit_events WHERE kind='release.pr.published' AND resource_id=$1", task.ID).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DB.QueryRow(ctx, "SELECT count(*) FROM task_comments WHERE task_id=$1 AND author='Release-Agent'", task.ID).Scan(&commentCount); err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 1 || commentCount != 1 {
+		t.Fatalf("side effects after first processing: audit=%d comments=%d", auditCount, commentCount)
+	}
+
+	if _, err = s.DB.Exec(ctx, `INSERT INTO automation_events(type,task_id,board_id,payload)
+		VALUES('task.completed',$1,$2,'{}'::jsonb)`, task.ID, board.ID); err != nil {
+		t.Fatal(err)
+	}
+	worker.Process(ctx)
+	if len(requests) != 1 {
+		t.Fatalf("publisher calls after retry = %d, want 1", len(requests))
+	}
+	var auditAfterRetry, commentsAfterRetry int
+	if err = s.DB.QueryRow(ctx, "SELECT count(*) FROM audit_events WHERE kind='release.pr.published' AND resource_id=$1", task.ID).Scan(&auditAfterRetry); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DB.QueryRow(ctx, "SELECT count(*) FROM task_comments WHERE task_id=$1 AND author='Release-Agent'", task.ID).Scan(&commentsAfterRetry); err != nil {
+		t.Fatal(err)
+	}
+	if auditAfterRetry != 1 || commentsAfterRetry != 1 {
+		t.Fatalf("retry duplicated side effects: audit=%d comments=%d", auditAfterRetry, commentsAfterRetry)
+	}
+}
+
+func TestProcessPublishesThroughReleasePublishAndGitPusher(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	t.Setenv("SHIPYARD_SECRET_KEY", "integration-release-secret-key")
+	t.Setenv("SHIPYARD_GITHUB_SECRET_ENV", "SHIPYARD_TEST_GITHUB_TOKEN")
+
+	board, err := s.CreateBoardWithTemplate(ctx, "Release publish adapter", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Integration Test")
+	runGit(t, source, "config", "user.email", "integration@example.invalid")
+	if err = os.WriteFile(filepath.Join(source, "README.md"), []byte("release publish integration\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "README.md")
+	runGit(t, source, "commit", "-m", "initial")
+	bare := filepath.Join(t.TempDir(), "remote.git")
+	integrationGitCommand(t, "init", "--bare", bare)
+	// Keep the configured remote canonical for the production repository check,
+	// while rewriting its transport to the disposable local bare repository.
+	runGit(t, source, "remote", "add", "origin", "https://github.com/example/release-lifecycle.git")
+	runGit(t, source, "config", "url.file://"+bare+".insteadOf", "https://github.com/example/release-lifecycle.git")
+	task, err := s.CreateTask(ctx, board.ID, "Publish through adapters", "release integration", "high", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch := taskIntegrationBranch(task.ID)
+	runGit(t, source, "checkout", "-b", branch)
+	commit := integrationGitOutput(t, source, "rev-parse", "HEAD")
+	project, err := s.CreateProject(ctx, "Release adapter project", "https://github.com/example/release-lifecycle.git", "master", source, []string{board.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "Release adapter agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := s.CreateSecret(ctx, "integration", "release-adapter-token", "integration token", "SHIPYARD_TEST_GITHUB_TOKEN", "github_pat_integration_secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetSecretAgents(ctx, "integration", secret.ID, []string{agent.ID}); err != nil {
+		t.Fatal(err)
+	}
+	var runID, eventID string
+	if err = s.DB.QueryRow(ctx, `INSERT INTO agent_runs(task_id,agent_id,status,prompt_snapshot,workspace_snapshot,target_project_id,source_workspace,accepted_commit_sha,applied_at,diff_summary,gate_status)
+		VALUES($1,$2,'succeeded','accepted delivery','managed checkout',$3,$4,$5,now(),'release summary','passed') RETURNING id`, task.ID, agent.ID, project.ID, source, commit).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DB.QueryRow(ctx, `INSERT INTO automation_events(type,task_id,board_id,payload)
+		VALUES('task.completed',$1,$2,'{}'::jsonb) RETURNING id`, task.ID, board.ID).Scan(&eventID); err != nil {
+		t.Fatal(err)
+	}
+	github := &workerReleaseGitHub{}
+	var requests []release.Request
+	worker := &Worker{Store: s, ReleasePublisher: ReleasePublisherFunc(func(ctx context.Context, request release.Request) (release.Result, error) {
+		requests = append(requests, request)
+		return release.Publish(ctx, request, release.GitPusher{}, github)
+	})}
+	worker.Process(ctx)
+	if len(requests) != 1 || requests[0].RunID != runID || requests[0].CommitSHA != commit {
+		t.Fatalf("release publish requests = %#v", requests)
+	}
+	if len(github.created) != 1 || len(github.updated) != 0 {
+		t.Fatalf("PR operations after first processing: created=%d updated=%d", len(github.created), len(github.updated))
+	}
+	if got := integrationGitOutput(t, bare, "show-ref", "--verify", "refs/heads/"+branch); got == "" {
+		t.Fatal("accepted branch was not pushed to the assigned bare remote")
+	}
+	var processedAt *time.Time
+	if err = s.DB.QueryRow(ctx, "SELECT processed_at FROM automation_events WHERE id=$1", eventID).Scan(&processedAt); err != nil {
+		t.Fatal(err)
+	}
+	if processedAt == nil {
+		t.Fatal("successful release event was not acknowledged")
+	}
+
+	if _, err = s.DB.Exec(ctx, `INSERT INTO automation_events(type,task_id,board_id,payload)
+		VALUES('task.completed',$1,$2,'{}'::jsonb)`, task.ID, board.ID); err != nil {
+		t.Fatal(err)
+	}
+	worker.Process(ctx)
+	if len(requests) != 1 || len(github.created) != 1 || len(github.updated) != 0 {
+		t.Fatalf("retry duplicated release side effects: requests=%d created=%d updated=%d", len(requests), len(github.created), len(github.updated))
+	}
+	publication, found, err := s.ReleasePublication(ctx, task.ID, project.ID, runID)
+	if err != nil || !found || publication.PRURL != "https://github.com/example/release-lifecycle/pull/91" {
+		t.Fatalf("publication = %#v found=%t err=%v", publication, found, err)
 	}
 }
 

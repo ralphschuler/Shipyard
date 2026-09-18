@@ -118,6 +118,19 @@ func TestTaskTargetInheritanceMigrationIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestReleasePublicationMigrationMakesFinalizationDurableAndUnique(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/049_release_publications.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"release_publications", "task_id", "project_id", "run_id", "UNIQUE(task_id, project_id, run_id)", "pr_url", "audit_recorded", "comment_recorded"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("release publication migration is missing %q", required)
+		}
+	}
+}
+
 func TestAutomationFingerprintMigrationHasAtomicDurableClaim(t *testing.T) {
 	body, err := migrationFiles.ReadFile("migrations/042_automation_event_fingerprints.sql")
 	if err != nil {
