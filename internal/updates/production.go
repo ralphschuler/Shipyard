@@ -230,6 +230,7 @@ type restartMonitorConfig struct {
 	poll         time.Duration
 	wait         time.Duration
 	client       *http.Client
+	restart      func(context.Context) error
 }
 
 // RunRestartMonitor is the small supervisor hand-off used by the production
@@ -246,6 +247,7 @@ func RunRestartMonitor(healthURL, buildInfoURL, binary, previous, version, commi
 		terminate:    func(context.Context) error { return terminateRunningBundle(binary) },
 		poll:         250 * time.Millisecond,
 		wait:         30 * time.Second,
+		restart:      func(context.Context) error { return execPreviousBundle(previous) },
 	})
 }
 
@@ -258,6 +260,9 @@ func monitorRestart(ctx context.Context, cfg restartMonitorConfig) error {
 	}
 	if cfg.terminate == nil {
 		cfg.terminate = func(context.Context) error { return terminateRunningBundle(cfg.binary) }
+	}
+	if cfg.restart == nil {
+		cfg.restart = func(context.Context) error { return execPreviousBundle(cfg.previous) }
 	}
 	client := cfg.client
 	if client == nil {
@@ -353,7 +358,22 @@ func rollbackAfterRestartError(cfg restartMonitorConfig, cause error) error {
 	if err := atomicWrite(cfg.binary, previous, 0755); err != nil {
 		return fmt.Errorf("%w; restore rollback bundle: %v", cause, err)
 	}
+	if err := cfg.restart(context.Background()); err != nil {
+		return fmt.Errorf("%w; restart rollback bundle: %v", cause, err)
+	}
 	return cause
+}
+
+// execPreviousBundle replaces the detached monitor with the restored service.
+// This is the supervisor-independent recovery path: after the old main process
+// has exited, it guarantees that the process serving the socket is the exact
+// atomically restored binary, even when the service manager cannot be invoked
+// from the restricted service account.
+func execPreviousBundle(previous string) error {
+	if strings.TrimSpace(previous) == "" {
+		return errors.New("rollback bundle path is empty")
+	}
+	return syscall.Exec(previous, []string{previous}, os.Environ())
 }
 
 // terminateRunningBundle stops the process that systemd started from the

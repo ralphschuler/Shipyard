@@ -506,6 +506,7 @@ func TestRestartMonitorWaitsForNewHealthAndRollsBackOnFailure(t *testing.T) {
 
 	phase = 3
 	terminated := false
+	restarted := false
 	err = monitorRestart(ctx, restartMonitorConfig{
 		healthURL:    "http://restart.test/healthz",
 		buildInfoURL: "http://restart.test/app/build-info.json",
@@ -520,6 +521,10 @@ func TestRestartMonitorWaitsForNewHealthAndRollsBackOnFailure(t *testing.T) {
 			terminated = true
 			return nil
 		},
+		restart: func(context.Context) error {
+			restarted = true
+			return nil
+		},
 	})
 	if err == nil {
 		t.Fatal("monitor must fail when the restarted service never becomes healthy")
@@ -527,8 +532,120 @@ func TestRestartMonitorWaitsForNewHealthAndRollsBackOnFailure(t *testing.T) {
 	if !terminated {
 		t.Fatal("monitor must terminate the failed restarted bundle before restoring it")
 	}
+	if !restarted {
+		t.Fatal("monitor must restart the restored bundle after rollback")
+	}
 	got, readErr := os.ReadFile(binary)
 	if readErr != nil || string(got) != "old-bundle" {
 		t.Fatalf("rollback bundle = %q, err = %v", got, readErr)
 	}
+}
+
+func TestRestartMonitorEndToEndRestartsPreviousBundleAndVerifiesIt(t *testing.T) {
+	if os.Getenv("TASKBOARD_RESTART_HELPER") == "1" {
+		serveRestartHelper(t)
+		return
+	}
+
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "candidate-bundle")
+	previous := filepath.Join(dir, "previous-bundle")
+	if err := os.WriteFile(binary, []byte("candidate"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(previous, []byte("previous"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	phase := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		status := http.StatusOK
+		body := `{"version":"v1.0.0","commit":"old-commit"}`
+		switch phase {
+		case 0:
+			phase = 1
+		case 1:
+			if r.URL.Path == "/healthz" {
+				status = http.StatusOK
+			} else {
+				body = `{"version":"v2.0.0","commit":"candidate"}`
+			}
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})
+	started := make(chan struct{})
+	client := &http.Client{Transport: transport}
+
+	terminated := false
+	restarted := false
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := monitorRestart(ctx, restartMonitorConfig{
+		healthURL:    "http://restart.test/healthz",
+		buildInfoURL: "http://restart.test/app/build-info.json",
+		binary:       binary,
+		previous:     previous,
+		version:      "v1.0.0",
+		commit:       "old-commit",
+		poll:         time.Millisecond,
+		wait:         100 * time.Millisecond,
+		client:       client,
+		terminate: func(context.Context) error {
+			terminated = true
+			return nil
+		},
+		restart: func(context.Context) error {
+			restarted = true
+			phase = 2
+			cmd := exec.Command(os.Args[0], "-test.run=TestRestartMonitorEndToEndRestartsPreviousBundleAndVerifiesIt")
+			cmd.Env = append(os.Environ(), "TASKBOARD_RESTART_HELPER=1", "TASKBOARD_RESTART_MARKER="+filepath.Join(dir, "started"))
+			if err := cmd.Start(); err != nil {
+				return err
+			}
+			close(started)
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("monitor must fail the candidate update")
+	}
+	if !terminated || !restarted {
+		t.Fatalf("rollback state: terminated=%v restarted=%v", terminated, restarted)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("restored bundle was not started")
+	}
+	if got, readErr := os.ReadFile(binary); readErr != nil || string(got) != "previous" {
+		t.Fatalf("restored binary = %q, err = %v", got, readErr)
+	}
+	if !waitForRestartHelper(t, filepath.Join(dir, "started")) {
+		t.Fatal("restored bundle did not become reachable")
+	}
+	if !endpointHealthy(context.Background(), client, "http://restart.test/healthz") || !buildInfoMatches(context.Background(), client, "http://restart.test/app/build-info.json", "v1.0.0", "old-commit") {
+		t.Fatal("restored bundle health/build metadata verification failed")
+	}
+}
+
+func serveRestartHelper(t *testing.T) {
+	marker := os.Getenv("TASKBOARD_RESTART_MARKER")
+	if marker != "" {
+		if err := os.WriteFile(marker, []byte("started"), 0600); err != nil {
+			os.Exit(2)
+		}
+	}
+}
+
+func waitForRestartHelper(t *testing.T, marker string) bool {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return false
 }
