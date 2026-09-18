@@ -13,12 +13,14 @@ Environment=TASKBOARD_ADDR=127.0.0.1:8080
 # Optional local secrets, e.g. TASKBOARD_PROXY_SSO_EMAIL and
 # TASKBOARD_PROXY_SSO_SECRET. Keep this file outside the repository.
 EnvironmentFile=-/etc/taskboard/taskboard.env
-ExecStart=/home/agent/taskboard/taskboard
+ExecStart=/home/agent/taskboard/deploy/taskboard-runner.sh
 Restart=on-failure
 RestartSec=3
 # The update monitor must survive the old main process exiting so it can
 # health-check the systemd-started bundle and restore it on failure.
-KillMode=process
+# The runner remains systemd's MainPID while the Go binary is restarted as a
+# child. Stop all descendants on an administrative service stop.
+KillMode=mixed
 NoNewPrivileges=true
 PrivateTmp=true
 # The worker needs network access (Postgres, Git hosts and model providers)

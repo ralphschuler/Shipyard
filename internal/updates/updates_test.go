@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -479,6 +481,36 @@ func TestProductionAdapterRestartValidatesInstalledBundle(t *testing.T) {
 	p := &productionAdapter{binary: filepath.Join(t.TempDir(), "missing-taskboard")}
 	if err := p.restart(context.Background(), Snapshot{}); err == nil {
 		t.Fatal("restart must reject a candidate that cannot validate its embedded bundle")
+	}
+}
+
+func TestRequestSupervisorRestartSignalsConfiguredSupervisor(t *testing.T) {
+	if os.Getenv("TASKBOARD_SUPERVISOR_SIGNAL_HELPER") == "1" {
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, syscall.SIGUSR1)
+		if marker := os.Getenv("TASKBOARD_SUPERVISOR_SIGNAL_READY"); marker != "" {
+			_ = os.WriteFile(marker, []byte("ready"), 0600)
+		}
+		<-signals
+		os.Exit(0)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestRequestSupervisorRestartSignalsConfiguredSupervisor")
+	ready := filepath.Join(t.TempDir(), "ready")
+	cmd.Env = append(os.Environ(), "TASKBOARD_SUPERVISOR_SIGNAL_HELPER=1", "TASKBOARD_SUPERVISOR_SIGNAL_READY="+ready)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill() }()
+	if !waitForRestartHelper(t, ready) {
+		t.Fatal("supervisor helper did not become ready")
+	}
+
+	if err := requestSupervisorRestartPID(context.Background(), cmd.Process.Pid); err != nil {
+		t.Fatalf("requestSupervisorRestart() error = %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("supervisor helper did not receive restart signal: %v", err)
 	}
 }
 

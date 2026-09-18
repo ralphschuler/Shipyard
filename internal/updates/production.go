@@ -259,10 +259,37 @@ func RunRestartMonitor(healthURL, buildInfoURL, appURL, binary, previous, versio
 		terminate:       func(context.Context) error { return terminateRunningBundle(binary) },
 		poll:            250 * time.Millisecond,
 		wait:            30 * time.Second,
-		// Killing the failed service main process below is the supervisor
-		// restart request. systemd then starts the atomically restored binary.
-		restart: func(context.Context) error { return nil },
+		restart:         requestSupervisorRestart,
 	})
+}
+
+// requestSupervisorRestart asks the service runner (the systemd MainPID) to
+// start the currently installed bundle. The monitor is intentionally a child
+// process, not the service MainPID, so systemd always supervises the runner.
+func requestSupervisorRestart(ctx context.Context) error {
+	pidText := strings.TrimSpace(os.Getenv("TASKBOARD_SUPERVISOR_PID"))
+	if pidText == "" {
+		return errors.New("supervisor pid is not configured")
+	}
+	pid, err := strconv.Atoi(pidText)
+	if err != nil || pid <= 1 {
+		return errors.New("supervisor pid is invalid")
+	}
+	return requestSupervisorRestartPID(ctx, pid)
+}
+
+func requestSupervisorRestartPID(ctx context.Context, pid int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("find supervisor: %w", err)
+	}
+	if err := process.Signal(syscall.SIGUSR1); err != nil {
+		return fmt.Errorf("signal supervisor: %w", err)
+	}
+	return nil
 }
 
 func monitorRestart(ctx context.Context, cfg restartMonitorConfig) error {

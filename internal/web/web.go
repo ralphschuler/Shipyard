@@ -58,6 +58,19 @@ func ValidateEmbeddedApp(expectedVersion, expectedCommit string) error {
 	return nil
 }
 
+// EmbeddedAppHandler exposes only the immutable production app surface for
+// bundle smoke tests. It intentionally avoids the database-backed App setup,
+// while using the same embedded filesystem and route shape as Register.
+func EmbeddedAppHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /app/", http.StripPrefix("/app/", http.FileServerFS(appDist)))
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","database":"embedded-test"}`))
+	})
+	return mux
+}
+
 type App struct {
 	store        *store.Store
 	memory       *memory.Store

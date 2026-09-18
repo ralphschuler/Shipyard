@@ -49,6 +49,10 @@ var (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--embedded-app-http" {
+		address := envOrDefault("TASKBOARD_ADDR", defaultAddress)
+		log.Fatal(http.ListenAndServe(address, web.EmbeddedAppHandler()))
+	}
 	if len(os.Args) == 4 && os.Args[1] == "--validate-embedded-app" {
 		if err := web.ValidateEmbeddedApp(os.Args[2], os.Args[3]); err != nil {
 			log.Print(err)
