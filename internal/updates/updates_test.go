@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -128,6 +129,24 @@ func TestValidateArtifactURLRequiresConfiguredGitHubRepository(t *testing.T) {
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func TestTerminateRunningBundleStopsCandidateProcess(t *testing.T) {
+	if os.Getenv("TASKBOARD_BUNDLE_HELPER") == "1" {
+		select {}
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestTerminateRunningBundleStopsCandidateProcess")
+	cmd.Env = append(os.Environ(), "TASKBOARD_BUNDLE_HELPER=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := terminateRunningBundle(os.Args[0]); err != nil {
+		_ = cmd.Process.Kill()
+		t.Fatalf("terminate candidate process: %v", err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("candidate process remained running after rollback termination")
+	}
+}
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
@@ -486,6 +505,7 @@ func TestRestartMonitorWaitsForNewHealthAndRollsBackOnFailure(t *testing.T) {
 	}
 
 	phase = 3
+	terminated := false
 	err = monitorRestart(ctx, restartMonitorConfig{
 		healthURL:    "http://restart.test/healthz",
 		buildInfoURL: "http://restart.test/app/build-info.json",
@@ -496,9 +516,16 @@ func TestRestartMonitorWaitsForNewHealthAndRollsBackOnFailure(t *testing.T) {
 		poll:         1 * time.Millisecond,
 		wait:         5 * time.Millisecond,
 		client:       client,
+		terminate: func(context.Context) error {
+			terminated = true
+			return nil
+		},
 	})
 	if err == nil {
 		t.Fatal("monitor must fail when the restarted service never becomes healthy")
+	}
+	if !terminated {
+		t.Fatal("monitor must terminate the failed restarted bundle before restoring it")
 	}
 	got, readErr := os.ReadFile(binary)
 	if readErr != nil || string(got) != "old-bundle" {

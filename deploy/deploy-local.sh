@@ -22,6 +22,8 @@ build_time="${TASKBOARD_BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 export TASKBOARD_VERSION="$build_version"
 export TASKBOARD_COMMIT_SHA="$build_commit"
 export TASKBOARD_BUILD_TIME="$build_time"
+export TASKBOARD_EXPECTED_VERSION="$build_version"
+export TASKBOARD_EXPECTED_COMMIT="$build_commit"
 if [[ "${TASKBOARD_SKIP_UPDATE_CONFIG_CHECK:-0}" != "1" ]]; then
   if [[ ! -e "$update_env_file" ]]; then
     sudo -n install -o agent -g agent -m 600 deploy/taskboard.env.example "$update_env_file"

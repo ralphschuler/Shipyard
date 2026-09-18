@@ -17,7 +17,7 @@ require() {
   fi
 }
 
-for command in curl psql pg_restore systemctl stat date awk mktemp sha256sum cmp; do
+for command in curl psql pg_restore systemctl stat date awk mktemp sha256sum cmp jq; do
 	require "$command"
 done
 if [[ "${TASKBOARD_VERIFY_BWRAP:-1}" == "1" ]]; then
@@ -55,9 +55,18 @@ case "$app_index" in
   *'<div id="root">'*) ;;
   *) printf 'embedded app index is missing the application root\n' >&2; exit 1 ;;
 esac
-case "$app_build_info" in
-  *'"version":""'*|*'"commit":""'*) printf 'embedded app build metadata is incomplete\n' >&2; exit 1 ;;
-esac
+expected_version="${TASKBOARD_EXPECTED_VERSION:-${TASKBOARD_VERSION:-}}"
+expected_commit="${TASKBOARD_EXPECTED_COMMIT:-${TASKBOARD_COMMIT_SHA:-}}"
+if [[ -z "$expected_version" || -z "$expected_commit" ]]; then
+  printf 'expected backend build metadata is required (TASKBOARD_EXPECTED_VERSION and TASKBOARD_EXPECTED_COMMIT)\n' >&2
+  exit 1
+fi
+actual_version="$(jq -er '.version | strings | select(length > 0)' <<<"$app_build_info")"
+actual_commit="$(jq -er '.commit | strings | select(length > 0)' <<<"$app_build_info")"
+if [[ "$actual_version" != "$expected_version" || "$actual_commit" != "$expected_commit" ]]; then
+  printf 'embedded app metadata mismatch: version=%s/%s commit=%s/%s\n' "$actual_version" "$expected_version" "$actual_commit" "$expected_commit" >&2
+  exit 1
+fi
 
 if [[ "${TASKBOARD_VERIFY_UPDATE_CONFIG:-1}" == "1" ]]; then
   TASKBOARD_ENV_FILE="$update_env_file" "$(dirname "$0")/validate-update-config.sh"

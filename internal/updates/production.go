@@ -13,8 +13,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"taskboard/internal/store"
 	"time"
 )
@@ -224,6 +226,7 @@ type restartMonitorConfig struct {
 	previous     string
 	version      string
 	commit       string
+	terminate    func(context.Context) error
 	poll         time.Duration
 	wait         time.Duration
 	client       *http.Client
@@ -240,6 +243,7 @@ func RunRestartMonitor(healthURL, buildInfoURL, binary, previous, version, commi
 		previous:     previous,
 		version:      version,
 		commit:       commit,
+		terminate:    func(context.Context) error { return terminateRunningBundle(binary) },
 		poll:         250 * time.Millisecond,
 		wait:         30 * time.Second,
 	})
@@ -251,6 +255,9 @@ func monitorRestart(ctx context.Context, cfg restartMonitorConfig) error {
 	}
 	if cfg.wait <= 0 {
 		cfg.wait = 30 * time.Second
+	}
+	if cfg.terminate == nil {
+		cfg.terminate = func(context.Context) error { return terminateRunningBundle(cfg.binary) }
 	}
 	client := cfg.client
 	if client == nil {
@@ -336,6 +343,9 @@ func buildInfoMatches(ctx context.Context, client *http.Client, endpoint, versio
 }
 
 func rollbackAfterRestartError(cfg restartMonitorConfig, cause error) error {
+	if err := cfg.terminate(context.Background()); err != nil {
+		cause = fmt.Errorf("%w; terminate failed bundle: %v", cause, err)
+	}
 	previous, err := os.ReadFile(cfg.previous)
 	if err != nil {
 		return fmt.Errorf("%w; read rollback bundle: %v", cause, err)
@@ -344,6 +354,54 @@ func rollbackAfterRestartError(cfg restartMonitorConfig, cause error) error {
 		return fmt.Errorf("%w; restore rollback bundle: %v", cause, err)
 	}
 	return cause
+}
+
+// terminateRunningBundle stops the process that systemd started from the
+// candidate binary. The monitor is exec'd from the same binary, so it skips
+// itself. Stopping the failed process before restoring the file is essential:
+// a running process keeps serving its in-memory embedded assets after the
+// on-disk binary has been rolled back.
+func terminateRunningBundle(binary string) error {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return fmt.Errorf("read process table: %w", err)
+	}
+	var processes []*os.Process
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid == os.Getpid() {
+			continue
+		}
+		executable, err := os.Readlink(filepath.Join("/proc", entry.Name(), "exe"))
+		if err != nil || filepath.Clean(executable) != filepath.Clean(binary) {
+			continue
+		}
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			continue
+		}
+		if err := process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return fmt.Errorf("stop process %d: %w", pid, err)
+		}
+		processes = append(processes, process)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(processes) > 0 && time.Now().Before(deadline) {
+		remaining := processes[:0]
+		for _, process := range processes {
+			if err := process.Signal(syscall.Signal(0)); err == nil {
+				remaining = append(remaining, process)
+			}
+		}
+		processes = remaining
+		if len(processes) > 0 {
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+	for _, process := range processes {
+		_ = process.Signal(syscall.SIGKILL)
+	}
+	return nil
 }
 
 func (p *productionAdapter) rollback(_ context.Context, _ Snapshot) error {
