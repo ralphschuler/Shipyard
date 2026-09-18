@@ -1731,6 +1731,22 @@ func codexOptionArgs(raw string) ([]string, error) {
 	return args, nil
 }
 
+func codexAgentOptionArgs(raw, effort string) ([]string, error) {
+	args, err := codexOptionArgs(raw)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(effort) == "" {
+		return nil, errors.New("Agent benötigt eine Reasoning-Effort-Auswahl")
+	}
+	switch strings.TrimSpace(effort) {
+	case "low", "medium", "high", "xhigh":
+	default:
+		return nil, errors.New("Agent reasoning_effort muss low, medium, high oder xhigh sein")
+	}
+	return append(args, "--config", "model_reasoning_effort="+strconv.Quote(strings.TrimSpace(effort))), nil
+}
+
 // ValidateProviderOptions rejects provider-specific settings that would make a
 // later run fail before it is persisted. Providers without a local CLI adapter
 // deliberately keep their JSON options extensible.
@@ -1806,6 +1822,43 @@ func cliInvocation(provider domain.ProviderSetting, prompt string) (string, []st
 		return command, append(args, "-"), prompt, nil
 	}
 	return command, append(args, prompt), "", nil
+}
+
+func cliInvocationForAgent(provider domain.ProviderSetting, agent domain.Agent, prompt string) (string, []string, string, error) {
+	if strings.TrimSpace(agent.Model) == "" || strings.TrimSpace(agent.ReasoningEffort) == "" {
+		return "", nil, "", errors.New("Agent pausiert: Modell und Reasoning-Effort müssen ausgewählt werden")
+	}
+	provider.Model = agent.Model
+	provider.Options = removeProviderEffort(provider.Options)
+	command, args, stdin, err := cliInvocation(provider, prompt)
+	if err != nil {
+		return "", nil, "", err
+	}
+	if provider.Provider == "codex" {
+		effortArgs, effortErr := codexAgentOptionArgs(provider.Options, agent.ReasoningEffort)
+		if effortErr != nil {
+			return "", nil, "", effortErr
+		}
+		// cliInvocation has already validated provider options. Append the
+		// agent-owned effort only after that validation to keep the boundaries
+		// explicit and deterministic.
+		args = append(args[:len(args)-1], effortArgs...)
+		args = append(args, "-")
+	}
+	return command, args, stdin, nil
+}
+
+func removeProviderEffort(raw string) string {
+	var values map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &values) != nil {
+		return raw
+	}
+	delete(values, "reasoning_effort")
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return "{}"
+	}
+	return string(encoded)
 }
 
 // withWorkingDirectory adds a provider-level working directory without ever
@@ -2685,6 +2738,16 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		_ = w.finish(ctx, run, "failed")
 		return
 	}
+	if strings.TrimSpace(agent.Model) == "" || strings.TrimSpace(agent.ReasoningEffort) == "" {
+		reason := "Agent pausiert: Modell und Reasoning-Effort müssen über Discovery ausgewählt werden"
+		w.persistIncompleteUsage(ctx, run, provider.Provider, "", "agent_selection_required")
+		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
+		_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Ausführung pausiert: Agent-Auswahl fehlt; Provider-Modell wird nicht als Fallback verwendet.")
+		_ = w.finish(ctx, run, "failed")
+		return
+	}
+	provider.Model = agent.Model
+	_ = w.Store.AddRunLog(ctx, run.ID, "info", fmt.Sprintf("Agent-Auswahl: Modell=%s Effort=%s Eskalationsstufe=0 Policy=%s Discovery=agent-selection Fallback=none Budget=not-evaluated", agent.Model, agent.ReasoningEffort, policyVersion(agent)))
 	secretValues, secretErr := w.Store.SecretValuesForAgent(ctx, run.AgentID)
 	if secretErr != nil {
 		w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "secret_load_failed")
@@ -2718,7 +2781,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		apiCalls, nativeCostMicrousd = usage.APICalls, usage.NativeCostMicrousd
 		serviceTier = usage.ServiceTier
 	} else {
-		command, args, stdin, commandErr := cliInvocation(provider, prompt)
+		command, args, stdin, commandErr := cliInvocationForAgent(provider, agent, prompt)
 		if commandErr != nil {
 			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "adapter_configuration_error")
 			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", commandErr.Error())
@@ -3067,6 +3130,16 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		}
 	}
 	_ = w.finish(ctx, run, "succeeded")
+}
+
+func policyVersion(agent domain.Agent) string {
+	var policy struct {
+		Version string `json:"version"`
+	}
+	if json.Unmarshal([]byte(agent.EscalationPolicy), &policy) == nil && strings.TrimSpace(policy.Version) != "" {
+		return policy.Version
+	}
+	return "none"
 }
 
 func validateRunTargetProject(run domain.AgentRun) error {

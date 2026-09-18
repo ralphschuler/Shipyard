@@ -2292,7 +2292,7 @@ func defaultString(v, d string) string {
 	return v
 }
 func (s *Store) Agents(c context.Context) ([]domain.Agent, error) {
-	r, e := s.DB.Query(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,enabled,max_parallel_runs,created_at FROM agents WHERE retired_at IS NULL ORDER BY name")
+	r, e := s.DB.Query(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,model,reasoning_effort,escalation_policy::text,enabled,max_parallel_runs,created_at FROM agents WHERE retired_at IS NULL ORDER BY name")
 	if e != nil {
 		return nil, e
 	}
@@ -2301,7 +2301,7 @@ func (s *Store) Agents(c context.Context) ([]domain.Agent, error) {
 }
 func (s *Store) GetAgent(c context.Context, id string) (domain.Agent, error) {
 	var a domain.Agent
-	e := s.DB.QueryRow(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,enabled,max_parallel_runs,created_at FROM agents WHERE id=$1", id).Scan(&a.ID, &a.Name, &a.Description, &a.Adapter, &a.Prompt, &a.PromptPrefix, &a.PromptSuffix, &a.Enabled, &a.MaxParallelRuns, &a.CreatedAt)
+	e := s.DB.QueryRow(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,model,reasoning_effort,escalation_policy::text,enabled,max_parallel_runs,created_at FROM agents WHERE id=$1", id).Scan(&a.ID, &a.Name, &a.Description, &a.Adapter, &a.Prompt, &a.PromptPrefix, &a.PromptSuffix, &a.Model, &a.ReasoningEffort, &a.EscalationPolicy, &a.Enabled, &a.MaxParallelRuns, &a.CreatedAt)
 	return a, e
 }
 func (s *Store) CreateAgent(c context.Context, name, desc, prefix, prompt, suffix string, max int) (domain.Agent, error) {
@@ -2309,7 +2309,7 @@ func (s *Store) CreateAgent(c context.Context, name, desc, prefix, prompt, suffi
 	if max < 1 {
 		max = 1
 	}
-	e := s.DB.QueryRow(c, "INSERT INTO agents(name,description,prompt_prefix,prompt,prompt_suffix,max_parallel_runs) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,enabled,max_parallel_runs,created_at", strings.TrimSpace(name), desc, prefix, prompt, suffix, max).Scan(&a.ID, &a.Name, &a.Description, &a.Adapter, &a.Prompt, &a.PromptPrefix, &a.PromptSuffix, &a.Enabled, &a.MaxParallelRuns, &a.CreatedAt)
+	e := s.DB.QueryRow(c, "INSERT INTO agents(name,description,prompt_prefix,prompt,prompt_suffix,max_parallel_runs) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,model,reasoning_effort,escalation_policy::text,enabled,max_parallel_runs,created_at", strings.TrimSpace(name), desc, prefix, prompt, suffix, max).Scan(&a.ID, &a.Name, &a.Description, &a.Adapter, &a.Prompt, &a.PromptPrefix, &a.PromptSuffix, &a.Model, &a.ReasoningEffort, &a.EscalationPolicy, &a.Enabled, &a.MaxParallelRuns, &a.CreatedAt)
 	return a, e
 }
 func (s *Store) UpdateAgent(c context.Context, id, name, desc, prefix, prompt, suffix string, max int, enabled bool) error {
@@ -2318,6 +2318,26 @@ func (s *Store) UpdateAgent(c context.Context, id, name, desc, prefix, prompt, s
 	}
 	_, err := s.DB.Exec(c, "UPDATE agents SET name=$2,description=$3,prompt_prefix=$4,prompt=$5,prompt_suffix=$6,max_parallel_runs=$7,enabled=$8 WHERE id=$1 AND retired_at IS NULL", id, strings.TrimSpace(name), desc, prefix, prompt, suffix, max, enabled)
 	return err
+}
+
+func (s *Store) UpdateAgentSelection(c context.Context, id, model, effort, policy string) error {
+	if strings.TrimSpace(model) == "" || !validReasoningEffort(effort) {
+		return errors.New("Agent benötigt eine gültige Modell- und Effort-Auswahl")
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(defaultString(strings.TrimSpace(policy), "{}")), &parsed); err != nil {
+		return errors.New("Eskalationspolicy muss gültiges JSON sein")
+	}
+	_, err := s.DB.Exec(c, "UPDATE agents SET model=$2,reasoning_effort=$3,escalation_policy=$4::jsonb WHERE id=$1 AND retired_at IS NULL", id, strings.TrimSpace(model), strings.TrimSpace(effort), defaultString(strings.TrimSpace(policy), "{}"))
+	return err
+}
+
+func validReasoningEffort(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "low", "medium", "high", "xhigh":
+		return true
+	}
+	return false
 }
 
 func (s *Store) AgentPromptPolicy(c context.Context) (string, string, error) {
@@ -3226,7 +3246,7 @@ func (s *Store) Schedules(c context.Context) ([]domain.Schedule, error) {
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[domain.Schedule])
 }
 func (s *Store) Providers(c context.Context) ([]domain.ProviderSetting, error) {
-	rows, err := s.DB.Query(c, "SELECT id,provider,enabled,model,command,secret_env,base_url,options::text,updated_at FROM provider_settings ORDER BY provider")
+	rows, err := s.DB.Query(c, "SELECT id,provider,enabled,model,command,secret_env,base_url,options::text,discovery_source,discovery_error,discovery_at,updated_at FROM provider_settings ORDER BY provider")
 	if err != nil {
 		return nil, err
 	}
@@ -3242,12 +3262,14 @@ func (s *Store) SaveProvider(c context.Context, provider, model, command, env, b
 	if !json.Valid([]byte(options)) || json.Unmarshal([]byte(options), &object) != nil {
 		return errors.New("Provider-Optionen müssen ein JSON-Objekt sein")
 	}
-	_, err := s.DB.Exec(c, "UPDATE provider_settings SET enabled=$2,model=$3,command=$4,secret_env=$5,base_url=$6,options=$7::jsonb,updated_at=now() WHERE provider=$1", provider, enabled, model, command, env, base, options)
+	// model is retained only for migration/API compatibility. It is not
+	// changed by provider saves and is never used to select a new run.
+	_, err := s.DB.Exec(c, "UPDATE provider_settings SET enabled=$2,command=$3,secret_env=$4,base_url=$5,options=$6::jsonb,updated_at=now() WHERE provider=$1", provider, enabled, command, env, base, options)
 	return err
 }
 func (s *Store) Provider(c context.Context, provider string) (domain.ProviderSetting, error) {
 	var p domain.ProviderSetting
-	err := s.DB.QueryRow(c, "SELECT id,provider,enabled,model,command,secret_env,base_url,options::text,updated_at FROM provider_settings WHERE provider=$1", provider).Scan(&p.ID, &p.Provider, &p.Enabled, &p.Model, &p.Command, &p.SecretEnv, &p.BaseURL, &p.Options, &p.UpdatedAt)
+	err := s.DB.QueryRow(c, "SELECT id,provider,enabled,model,command,secret_env,base_url,options::text,discovery_source,discovery_error,discovery_at,updated_at FROM provider_settings WHERE provider=$1", provider).Scan(&p.ID, &p.Provider, &p.Enabled, &p.Model, &p.Command, &p.SecretEnv, &p.BaseURL, &p.Options, &p.DiscoverySource, &p.DiscoveryError, &p.DiscoveryAt, &p.UpdatedAt)
 	return p, err
 }
 func (s *Store) PendingEvents(c context.Context) ([]domain.AutomationEvent, error) {
