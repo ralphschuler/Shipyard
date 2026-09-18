@@ -33,10 +33,14 @@ type Orchestrator struct {
 	Migrate        func(context.Context, Snapshot) error
 	// Switch receives the exact bytes returned by DownloadAndVerify. A
 	// deployment adapter must install these bytes, never re-download by URL.
-	Switch   func(context.Context, Snapshot, []byte) error
-	Restart  func(context.Context, Snapshot) error
-	Health   func(context.Context, Snapshot) error
-	Rollback func(context.Context, Snapshot) error
+	Switch  func(context.Context, Snapshot, []byte) error
+	Restart func(context.Context, Snapshot) error
+	Health  func(context.Context, Snapshot) error
+	// RestartVerifiesHealth means Restart waits for the new supervisor process
+	// and verifies its complete bundle. The old process must not be accepted by
+	// the generic post-restart health step in that case.
+	RestartVerifiesHealth bool
+	Rollback              func(context.Context, Snapshot) error
 	// AfterSuccess runs after the HTTP response has been written. Production
 	// adapters use this hook for a deferred service restart so the process does
 	// not terminate before the browser receives the installation result.
@@ -52,7 +56,7 @@ func (o Orchestrator) Install(ctx context.Context, snapshot Snapshot, report fun
 	}
 	// Rollback is part of the safety contract, not an optional enhancement. A
 	// missing recovery path must be detected before backup or any mutation.
-	if o.Backup == nil || o.DownloadAndVerify == nil || o.VerifyArtifact == nil || o.Verify == nil || o.Migrate == nil || o.Switch == nil || o.Restart == nil || o.Health == nil || o.Rollback == nil {
+	if o.Backup == nil || o.DownloadAndVerify == nil || o.VerifyArtifact == nil || o.Verify == nil || o.Migrate == nil || o.Switch == nil || o.Restart == nil || (!o.RestartVerifiesHealth && o.Health == nil) || o.Rollback == nil {
 		return errors.New("update installation is not fully configured for recovery")
 	}
 	var artifact []byte
@@ -61,7 +65,13 @@ func (o Orchestrator) Install(ctx context.Context, snapshot Snapshot, report fun
 		fn    func(context.Context, Snapshot) error
 	}{
 		{"backup", o.Backup}, {"verify", o.Verify}, {"migrate", o.Migrate},
-		{"switch", nil}, {"restart", o.Restart}, {"healthcheck", o.Health},
+		{"switch", nil}, {"restart", o.Restart},
+	}
+	if !o.RestartVerifiesHealth {
+		steps = append(steps, struct {
+			phase string
+			fn    func(context.Context, Snapshot) error
+		}{"healthcheck", o.Health})
 	}
 	for _, step := range steps {
 		if err := ctx.Err(); err != nil {

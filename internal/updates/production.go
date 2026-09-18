@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -38,6 +40,7 @@ type productionAdapter struct {
 	databaseURL  string
 	healthURL    string
 	buildInfoURL string
+	appURL       string
 	writeMu      sync.Mutex
 }
 
@@ -59,6 +62,7 @@ func NewProductionOrchestrator(s *store.Store) *Orchestrator {
 		databaseURL:  envOr("DATABASE_URL", "postgres://taskboard:taskboard@localhost:5432/taskboard?sslmode=disable"),
 		healthURL:    productionHealthURL,
 		buildInfoURL: "http://127.0.0.1:8080/app/build-info.json",
+		appURL:       "http://127.0.0.1:8080/app/",
 	}
 	return &Orchestrator{
 		Backup:            p.backup,
@@ -69,10 +73,11 @@ func NewProductionOrchestrator(s *store.Store) *Orchestrator {
 		Switch:            p.switchBinary,
 		// Restart validates the newly installed executable. The supervisor
 		// restart itself is deferred until after the HTTP response.
-		Restart:      p.restart,
-		Health:       p.health,
-		Rollback:     p.rollback,
-		AfterSuccess: p.afterSuccess,
+		Restart:               p.restart,
+		Health:                p.health,
+		RestartVerifiesHealth: true,
+		Rollback:              p.rollback,
+		AfterSuccess:          p.afterSuccess,
 	}
 }
 
@@ -194,7 +199,8 @@ func (p *productionAdapter) restart(ctx context.Context, snapshot Snapshot) erro
 	// writing the successful update response.
 	healthURL := envOr(p.healthURL, productionHealthURL)
 	buildInfoURL := envOr(p.buildInfoURL, "http://127.0.0.1:8080/app/build-info.json")
-	monitor := exec.Command(p.binary, "--monitor-restart", healthURL, buildInfoURL, p.binary, p.previous, snapshot.Release.Version, snapshot.Release.Commit)
+	appURL := envOr(p.appURL, "http://127.0.0.1:8080/app/")
+	monitor := exec.Command(p.binary, "--monitor-restart", healthURL, buildInfoURL, appURL, p.binary, p.previous, snapshot.Release.Version, snapshot.Release.Commit, snapshot.Current.Version, snapshot.Current.Commit)
 	monitor.Stdout = io.Discard
 	monitor.Stderr = io.Discard
 	if err := monitor.Start(); err != nil {
@@ -220,34 +226,42 @@ func (p *productionAdapter) health(ctx context.Context, _ Snapshot) error {
 }
 
 type restartMonitorConfig struct {
-	healthURL    string
-	buildInfoURL string
-	binary       string
-	previous     string
-	version      string
-	commit       string
-	terminate    func(context.Context) error
-	poll         time.Duration
-	wait         time.Duration
-	client       *http.Client
-	restart      func(context.Context) error
+	healthURL       string
+	buildInfoURL    string
+	appURL          string
+	binary          string
+	previous        string
+	version         string
+	commit          string
+	previousVersion string
+	previousCommit  string
+	terminate       func(context.Context) error
+	poll            time.Duration
+	wait            time.Duration
+	client          *http.Client
+	restart         func(context.Context) error
 }
 
 // RunRestartMonitor is the small supervisor hand-off used by the production
 // binary. It returns an error so the CLI can exit with the service's
 // Restart=on-failure status after restoring the previous bundle.
-func RunRestartMonitor(healthURL, buildInfoURL, binary, previous, version, commit string) error {
+func RunRestartMonitor(healthURL, buildInfoURL, appURL, binary, previous, version, commit, previousVersion, previousCommit string) error {
 	return monitorRestart(context.Background(), restartMonitorConfig{
-		healthURL:    healthURL,
-		buildInfoURL: buildInfoURL,
-		binary:       binary,
-		previous:     previous,
-		version:      version,
-		commit:       commit,
-		terminate:    func(context.Context) error { return terminateRunningBundle(binary) },
-		poll:         250 * time.Millisecond,
-		wait:         30 * time.Second,
-		restart:      func(context.Context) error { return execPreviousBundle(previous) },
+		healthURL:       healthURL,
+		buildInfoURL:    buildInfoURL,
+		appURL:          appURL,
+		binary:          binary,
+		previous:        previous,
+		version:         version,
+		commit:          commit,
+		previousVersion: previousVersion,
+		previousCommit:  previousCommit,
+		terminate:       func(context.Context) error { return terminateRunningBundle(binary) },
+		poll:            250 * time.Millisecond,
+		wait:            30 * time.Second,
+		// Killing the failed service main process below is the supervisor
+		// restart request. systemd then starts the atomically restored binary.
+		restart: func(context.Context) error { return nil },
 	})
 }
 
@@ -262,12 +276,13 @@ func monitorRestart(ctx context.Context, cfg restartMonitorConfig) error {
 		cfg.terminate = func(context.Context) error { return terminateRunningBundle(cfg.binary) }
 	}
 	if cfg.restart == nil {
-		cfg.restart = func(context.Context) error { return execPreviousBundle(cfg.previous) }
+		cfg.restart = func(context.Context) error { return nil }
 	}
 	client := cfg.client
 	if client == nil {
 		client = &http.Client{Timeout: 2 * time.Second}
 	}
+	cfg.client = client
 	deadline := time.NewTimer(cfg.wait)
 	defer deadline.Stop()
 
@@ -289,7 +304,7 @@ func monitorRestart(ctx context.Context, cfg restartMonitorConfig) error {
 		if err := ctx.Err(); err != nil {
 			return rollbackAfterRestartError(cfg, err)
 		}
-		if endpointHealthy(ctx, client, cfg.healthURL) && buildInfoMatches(ctx, client, cfg.buildInfoURL, cfg.version, cfg.commit) {
+		if bundleMatches(ctx, client, cfg.healthURL, cfg.buildInfoURL, cfg.appURL, cfg.version, cfg.commit) {
 			return nil
 		}
 		if !waitForMonitorTick(ctx, deadline, cfg.poll) {
@@ -347,6 +362,65 @@ func buildInfoMatches(ctx context.Context, client *http.Client, endpoint, versio
 	return info.Version == version && info.Commit == commit
 }
 
+var appAssetReference = regexp.MustCompile(`(?:src|href)="([^"]+)"`)
+var fingerprintedAsset = regexp.MustCompile(`-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$`)
+
+func bundleMatches(ctx context.Context, client *http.Client, healthURL, buildInfoURL, appURL, version, commit string) bool {
+	if !endpointHealthy(ctx, client, healthURL) || !buildInfoMatches(ctx, client, buildInfoURL, version, commit) {
+		return false
+	}
+	if strings.TrimSpace(appURL) == "" {
+		return true
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, appURL, nil)
+	if err != nil {
+		return false
+	}
+	res, err := client.Do(req)
+	if err != nil || res.StatusCode != http.StatusOK {
+		if res != nil {
+			res.Body.Close()
+		}
+		return false
+	}
+	index, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil || !strings.Contains(string(index), `<div id="root">`) {
+		return false
+	}
+	refs := appAssetReference.FindAllSubmatch(index, -1)
+	if len(refs) == 0 {
+		return false
+	}
+	base, err := url.Parse(appURL)
+	if err != nil {
+		return false
+	}
+	for _, ref := range refs {
+		asset, err := url.Parse(string(ref[1]))
+		if err != nil || asset.IsAbs() || asset.Host != "" {
+			return false
+		}
+		if !fingerprintedAsset.MatchString(filepath.Base(asset.Path)) {
+			return false
+		}
+		assetURL := base.ResolveReference(asset)
+		assetReq, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL.String(), nil)
+		if err != nil {
+			return false
+		}
+		assetRes, err := client.Do(assetReq)
+		if err != nil || assetRes.StatusCode != http.StatusOK {
+			if assetRes != nil {
+				assetRes.Body.Close()
+			}
+			return false
+		}
+		assetRes.Body.Close()
+	}
+	return true
+}
+
 func rollbackAfterRestartError(cfg restartMonitorConfig, cause error) error {
 	if err := cfg.terminate(context.Background()); err != nil {
 		cause = fmt.Errorf("%w; terminate failed bundle: %v", cause, err)
@@ -361,19 +435,22 @@ func rollbackAfterRestartError(cfg restartMonitorConfig, cause error) error {
 	if err := cfg.restart(context.Background()); err != nil {
 		return fmt.Errorf("%w; restart rollback bundle: %v", cause, err)
 	}
-	return cause
-}
-
-// execPreviousBundle replaces the detached monitor with the restored service.
-// This is the supervisor-independent recovery path: after the old main process
-// has exited, it guarantees that the process serving the socket is the exact
-// atomically restored binary, even when the service manager cannot be invoked
-// from the restricted service account.
-func execPreviousBundle(previous string) error {
-	if strings.TrimSpace(previous) == "" {
-		return errors.New("rollback bundle path is empty")
+	if cfg.previousVersion != "" || cfg.previousCommit != "" {
+		verifyCtx, cancel := context.WithTimeout(context.Background(), cfg.wait)
+		defer cancel()
+		rollbackDeadline := time.NewTimer(cfg.wait)
+		defer rollbackDeadline.Stop()
+		for {
+			if bundleMatches(verifyCtx, cfg.client, cfg.healthURL, cfg.buildInfoURL, cfg.appURL, cfg.previousVersion, cfg.previousCommit) {
+				return cause
+			}
+			if !waitForMonitorTick(verifyCtx, rollbackDeadline, cfg.poll) {
+				break
+			}
+		}
+		return fmt.Errorf("%w; restored supervisor bundle failed health/app verification", cause)
 	}
-	return syscall.Exec(previous, []string{previous}, os.Environ())
+	return cause
 }
 
 // terminateRunningBundle stops the process that systemd started from the

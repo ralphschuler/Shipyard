@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -369,6 +370,29 @@ func TestOrchestratorPassesVerifiedArtifactToSwitch(t *testing.T) {
 	}
 }
 
+func TestOrchestratorDoesNotHealthCheckTheOldProcessAfterVerifiedRestart(t *testing.T) {
+	healthCalled := false
+	noop := func(context.Context, Snapshot) error { return nil }
+	o := Orchestrator{
+		Backup: noop, DownloadAndVerify: func(context.Context, string, string) ([]byte, error) { return []byte("artifact"), nil },
+		VerifyArtifact: func(context.Context, Snapshot, []byte) error { return nil },
+		Verify:         noop, Migrate: noop, Switch: func(context.Context, Snapshot, []byte) error { return nil },
+		Restart: noop,
+		Health: func(context.Context, Snapshot) error {
+			healthCalled = true
+			return errors.New("old process must not be accepted")
+		},
+		RestartVerifiesHealth: true,
+		Rollback:              noop,
+	}
+	if err := o.Install(context.Background(), Snapshot{Status: "update_available", Installable: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if healthCalled {
+		t.Fatal("generic healthcheck must not validate the old process after a verified restart")
+	}
+}
+
 func TestOrchestratorRequiresArtifactSignatureVerificationBeforeMutation(t *testing.T) {
 	backupCalled := false
 	o := Orchestrator{
@@ -626,6 +650,84 @@ func TestRestartMonitorEndToEndRestartsPreviousBundleAndVerifiesIt(t *testing.T)
 	}
 	if !endpointHealthy(context.Background(), client, "http://restart.test/healthz") || !buildInfoMatches(context.Background(), client, "http://restart.test/app/build-info.json", "v1.0.0", "old-commit") {
 		t.Fatal("restored bundle health/build metadata verification failed")
+	}
+}
+
+func TestRestartMonitorVerifiesEmbeddedAppAfterSupervisorRollback(t *testing.T) {
+	state := 0 // old process, candidate process, supervisor-restored old process
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			if state == 0 {
+				state = 1
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if state == 1 {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.URL.Path == "/app/build-info.json" {
+			if state == 1 {
+				_, _ = io.WriteString(w, `{"version":"v2.0.0","commit":"candidate"}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"version":"v1.0.0","commit":"old-commit"}`)
+			return
+		}
+		if r.URL.Path == "/app/" {
+			if state == 1 {
+				_, _ = io.WriteString(w, `<div id="root"><script src="/app/assets/app-candidate-12345678.js"></script></div>`)
+				return
+			}
+			_, _ = io.WriteString(w, `<div id="root"><script src="/app/assets/app-old-12345678.js"></script></div>`)
+			return
+		}
+		if r.URL.Path == "/app/assets/app-old-12345678.js" && state != 1 {
+			_, _ = io.WriteString(w, "old asset")
+			return
+		}
+		http.NotFound(w, r)
+	})
+	socketPath := filepath.Join(t.TempDir(), "taskboard.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Skipf("real HTTP supervisor test requires socket binding: %v", err)
+	}
+	server := &http.Server{Handler: handler}
+	go func() { _ = server.Serve(listener) }()
+	defer server.Close()
+	client := &http.Client{Transport: &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) {
+		return net.Dial("unix", socketPath)
+	}}}
+	baseURL := "http://taskboard.test"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	err = monitorRestart(ctx, restartMonitorConfig{
+		healthURL:       baseURL + "/healthz",
+		buildInfoURL:    baseURL + "/app/build-info.json",
+		appURL:          baseURL + "/app/",
+		version:         "v2.0.0",
+		commit:          "candidate",
+		previousVersion: "v1.0.0",
+		previousCommit:  "old-commit",
+		poll:            time.Millisecond,
+		wait:            100 * time.Millisecond,
+		client:          client,
+		terminate:       func(context.Context) error { return nil },
+		restart: func(context.Context) error {
+			state = 2
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("candidate with a missing fingerprint asset must roll back")
+	}
+	if state != 2 {
+		t.Fatalf("supervisor did not restore the previous process, state=%d", state)
 	}
 }
 

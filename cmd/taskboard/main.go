@@ -56,8 +56,8 @@ func main() {
 		}
 		return
 	}
-	if len(os.Args) == 8 && os.Args[1] == "--monitor-restart" {
-		if err := updates.RunRestartMonitor(os.Args[2], os.Args[3], os.Args[4], os.Args[5], os.Args[6], os.Args[7]); err != nil {
+	if len(os.Args) == 11 && os.Args[1] == "--monitor-restart" {
+		if err := updates.RunRestartMonitor(os.Args[2], os.Args[3], os.Args[4], os.Args[5], os.Args[6], os.Args[7], os.Args[8], os.Args[9], os.Args[10]); err != nil {
 			log.Print(err)
 			os.Exit(75)
 		}
