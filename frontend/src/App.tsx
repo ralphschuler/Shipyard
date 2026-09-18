@@ -160,7 +160,11 @@ function endpointUsesChange(endpoint: string, change: LiveChange) {
 export default function App() {
   const [route, setRoute] = useState(routeFromHash);
   const { data: appearance } = useAPI<any>("/api/v1/settings/appearance");
-  const { data: boards = [] } = useAPI<BoardNavItem[]>("/api/v1/boards");
+  const { data: boardsResponse } = useAPI<BoardNavItem[]>("/api/v1/boards");
+  // Keep the shell usable while a mocked or older API returns an unexpected
+  // envelope.  The board list endpoint normally returns an array, but a
+  // malformed response must not take down every route in the application.
+  const boards = Array.isArray(boardsResponse) ? boardsResponse : [];
   const [language, setLanguage] = useState<Language>(() => normalizeLanguage(localStorage.getItem("shipyard-language")));
   const t = (key: string) => translate(language, key);
   const [dark, setDark] = useState(
@@ -321,6 +325,13 @@ export default function App() {
   };
   const navigateNav = (index: number, event: React.KeyboardEvent<HTMLElement>) => {
     let next = index;
+    if ((event.key === "ArrowDown" || event.key === "ArrowRight") && index === boardsNavIndex && !boardsOpen) {
+      setBoardsOpen(true);
+      next = boardsNavIndex + 1;
+      event.preventDefault();
+      requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-nav-index="${next}"]`)?.focus());
+      return;
+    }
     const total = nav.length + (boardsOpen ? boards.length + 1 : 0);
     if (event.key === "ArrowDown" || event.key === "ArrowRight") next = (index + 1) % total;
     else if (event.key === "ArrowUp" || event.key === "ArrowLeft") next = (index - 1 + total) % total;
@@ -374,7 +385,7 @@ export default function App() {
               return (
                 <div key={item.path} className="space-y-1">
                   {item.name === "boards" ? (
-                    <button
+            <button
                       type="button"
                       aria-expanded={boardsOpen}
                       aria-controls="board-subnavigation"
@@ -397,7 +408,6 @@ export default function App() {
                       onKeyDown={(event) => navigateNav(navIndex, event)}
                       data-nav-index={navIndex}
                       aria-current={selected ? "page" : undefined}
-                      aria-label={t(item.name)}
                       title={t(item.name)}
                       className={`shipyard-nav-item ${selected ? "is-active" : ""}`}
                     >
@@ -440,7 +450,7 @@ export default function App() {
           <button
             type="button"
             aria-label={t("navigationClose")}
-            className="fixed inset-0 z-10 bg-foreground/20 md:hidden"
+            className="fixed inset-y-0 right-0 left-72 z-10 bg-foreground/20 md:hidden"
             onClick={() => {
               setMobileNavOpen(false);
               requestAnimationFrame(() => mobileMenuButtonRef.current?.focus());
@@ -481,7 +491,7 @@ export default function App() {
           {route.match(/^\/boards\/[^/]+\/workflow$/) ? (
             <WorkflowEditorV2 id={route.split("/")[2]} />
           ) : route.startsWith("/boards/") ? (
-            <BoardDetail id={route.split("/")[2]} />
+            <BoardDetail key={route.split("/")[2]} id={route.split("/")[2]} />
           ) : route.startsWith("/tasks/") ? (
             <TaskDetail key={route.split("/")[2]} id={route.split("/")[2]} />
           ) : route.startsWith("/runs/") ? (
@@ -547,7 +557,10 @@ function useAPI<T>(endpoint: string) {
     };
     setData(undefined);
     setError(false);
-    load();
+    // Defer the initial request by one macrotask so React StrictMode's
+    // development-only setup/cleanup cycle cancels the first pass instead of
+    // issuing duplicate API requests.
+    timer = window.setTimeout(load, 0);
     const refresh = (event: Event) => {
       const change = (event as CustomEvent<LiveChange>).detail ?? {};
       if (!endpointUsesChange(endpoint, change)) return;
@@ -1533,6 +1546,7 @@ function Updates({ language }: { language: Language }) {
   const [installing, setInstalling] = useState(false);
   const [showSource, setShowSource] = useState(false);
   const [checking, setChecking] = useState(false);
+  const checkingRef = useRef(false);
   const [manualData, setManualData] = useState<UpdateData | undefined>();
   const [checkError, setCheckError] = useState<{ message: string; checkedAt: string }>();
   const result = (manualData || data) as UpdateData | undefined;
@@ -1541,6 +1555,7 @@ function Updates({ language }: { language: Language }) {
   const displayStatus = checkError ? "unavailable" : result.status;
   const release = checkError ? {} : result.release || {};
   const releaseURL = typeof release.url === "string" ? safeMarkdownURL(release.url) : undefined;
+  const reason = typeof result.reason === "string" ? result.reason : undefined;
   const available = displayStatus === "update_available" && result.installable;
   const checkFailed = Boolean(checkError) || !["up_to_date", "update_available"].includes(result.status);
   const checkedAt = checkError ? new Date(checkError.checkedAt) : result.checked_at ? new Date(result.checked_at) : undefined;
@@ -1549,10 +1564,14 @@ function Updates({ language }: { language: Language }) {
     : t("notAvailable");
   const verifyLabel = release.verified && release.compatible ? "Verifiziert und kompatibel" : "Nicht zur Installation freigegeben";
   const checkNow = async () => {
-    if (checking) return;
+    if (checking || checkingRef.current) return;
+    checkingRef.current = true;
     setChecking(true);
     setMessage("");
     try {
+      // Give React one paint to expose the busy state even when a mocked or
+      // cached endpoint resolves synchronously.
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
       const response = await fetch("/api/v1/settings/updates", { credentials: "same-origin", cache: "no-store" });
       const payload = await response.json().catch(() => null);
       if (!response.ok || !isUpdateData(payload)) throw new Error(t("updatesCheckFailed"));
@@ -1564,6 +1583,7 @@ function Updates({ language }: { language: Language }) {
         checkedAt: new Date().toISOString(),
       });
     } finally {
+      checkingRef.current = false;
       setChecking(false);
     }
   };
@@ -1597,15 +1617,15 @@ function Updates({ language }: { language: Language }) {
             </Button>
           </div>
           <p className="sr-only" role="status" aria-live="polite">
-            {checking ? t("updatesChecking") : checkFailed ? (checkError?.message || result.reason || t("updatesCheckFailed")) : displayStatus === "update_available" ? t("updatesAvailable") : t("updatesUpToDate")}
+            {checking ? t("updatesChecking") : checkFailed ? (checkError?.message || reason || t("updatesCheckFailed")) : displayStatus === "update_available" ? t("updatesAvailable") : t("updatesUpToDate")}
           </p>
           <p className="text-sm text-muted-foreground" aria-label={t("updatesLastChecked")}>{t("updatesLastChecked")}: {checkedLabel}</p>
           <p className={checkFailed ? "rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive" : "sr-only"} role={checkFailed ? "alert" : undefined} aria-live="polite">
-            {checkFailed ? (checkError?.message || result.reason || t("updatesCheckFailed")) : ""}
+            {checkFailed ? (checkError?.message || reason || t("updatesCheckFailed")) : ""}
           </p>
           <div className="grid gap-4 sm:grid-cols-2">
-            <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesCurrentVersion")}</p><p className="mt-1 text-xl font-semibold">{result.current.version}</p><p className="font-mono text-xs text-muted-foreground">{result.current.commit}</p><p className="mt-3 text-sm">Build: {result.current.builtAt || t("notAvailable")}</p></div>
-            <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesStatus")}</p><p className="mt-1 text-xl font-semibold">{displayStatus === "up_to_date" ? t("updatesUpToDate") : displayStatus === "update_available" ? t("updatesAvailable") : t("updatesFailed")}</p><p className="mt-3 text-sm text-muted-foreground">Quelle: {result.source.provider} · {result.source.repository}</p></div>
+            <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesCurrentVersion")}</p><p className="mt-1 text-xl font-semibold">{String(result.current.version)}</p><p className="font-mono text-xs text-muted-foreground">{String(result.current.commit)}</p><p className="mt-3 text-sm">Build: {typeof result.current.builtAt === "string" ? result.current.builtAt : t("notAvailable")}</p></div>
+            <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesStatus")}</p><p className="mt-1 text-xl font-semibold">{displayStatus === "up_to_date" ? t("updatesUpToDate") : displayStatus === "update_available" ? t("updatesAvailable") : t("updatesFailed")}</p><p className="mt-3 text-sm text-muted-foreground">Quelle: {String(result.source.provider)} · {String(result.source.repository)}</p></div>
           </div>
         </CardContent>
       </Card>
@@ -1619,7 +1639,7 @@ function Updates({ language }: { language: Language }) {
             {showSource ? <section aria-label="Changelog-Quelltext" className="max-h-[34rem] overflow-auto rounded-md bg-muted p-3 text-sm"><pre className="whitespace-pre-wrap break-words">{release.changelog || "Kein Changelog angegeben."}</pre></section> : <section aria-label="Changelog" className="max-h-[34rem] overflow-auto rounded-md bg-muted p-4 text-sm">{renderChangelog(release.changelog)}</section>}
             <div className="flex flex-wrap items-center gap-2"><Button disabled={!available || installing} onClick={install}>{installing ? "Update wird vorbereitet …" : "Update installieren"}</Button>{releaseURL && <a className="text-sm underline" href={releaseURL} target="_blank" rel="noreferrer noopener">Auf GitHub ansehen</a>}</div>
             {progress.length > 0 && <ol className="grid gap-2 rounded-md border p-3 text-sm" aria-label="Update-Fortschritt">{progress.map((step, index) => <li key={`${step.phase}-${index}`} className="flex items-center justify-between gap-3"><span>{step.phase}</span><span className="text-muted-foreground">{step.status === "succeeded" ? "Abgeschlossen" : step.status === "failed" ? "Fehlgeschlagen" : "Läuft"}</span></li>)}</ol>}
-            {result.reason && <p className="text-sm text-muted-foreground">{result.reason}</p>}
+            {reason && <p className="text-sm text-muted-foreground">{reason}</p>}
           </> : <p className="text-sm text-muted-foreground">Es wurde kein kompatibles Release gemeldet. Ein Installationsbutton ist deshalb nicht verfügbar.</p>}
           {message && <p className="text-sm text-destructive" role="alert" aria-live="assertive">{message}</p>}
         </CardContent>
@@ -2890,13 +2910,14 @@ function BoardDetail({ id }: { id: string }) {
   const refresh = () => refreshData();
   if (error) return <Failure />;
   if (!data) return <Loading />;
-  const visibleTasks = data.Tasks.filter((task: any) => matchesBoardFilters(task, data.Board.ID, data.Columns, filters, debouncedSearch));
+  const board = data.Board || data;
+  const visibleTasks = data.Tasks.filter((task: any) => matchesBoardFilters(task, board.ID, data.Columns, filters, debouncedSearch));
   const activeFilters = [
     ["search", filters.search ? `Suche: ${filters.search}` : ""],
     ["column", data.Columns.find((column: any) => column.ID === filters.column)?.Name || ""],
     ["priority", filters.priority ? `Priorität: ${priorityLabel(filters.priority)}` : ""],
     ["label", data.Labels?.find((label: any) => label.ID === filters.label)?.Name || ""],
-    ["project", data.Projects?.find((project: any) => project.ID === filters.project)?.Name || ""],
+    ["project", filters.project ? `Projekt: ${data.Projects?.find((project: any) => project.ID === filters.project)?.Name || filters.project}` : ""],
   ].filter(([, label]) => label) as [keyof BoardFilters, string][];
   const updateFilter = (key: keyof BoardFilters, value: string) => setFilters((current) => ({ ...current, [key]: value }));
   const resetFilters = () => {
@@ -2953,7 +2974,7 @@ function BoardDetail({ id }: { id: string }) {
   };
   return (
     <>
-      <h1 className="mb-4 text-2xl font-semibold">{data.Board.Name}</h1>
+      <h1 className="mb-4 text-2xl font-semibold">{board.Name}</h1>
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <a
           className="text-sm text-muted-foreground hover:text-foreground"
@@ -3064,7 +3085,7 @@ function BoardDetail({ id }: { id: string }) {
         </div>
       </div>
       {message && <p className="mb-3 text-sm text-destructive">{message}</p>}
-      <section className="mb-5 rounded-xl border bg-card p-4" aria-label="Board-Filter">
+      {data.Tasks.length > 0 && <section className="mb-5 rounded-xl border bg-card p-4" aria-label="Board-Filter">
         <div className="flex flex-wrap items-end gap-3">
           <label className="min-w-56 flex-1 text-sm font-medium">
             Aufgaben suchen
@@ -3112,7 +3133,7 @@ function BoardDetail({ id }: { id: string }) {
           <strong>{visibleTasks.length} {visibleTasks.length === 1 ? "Aufgabe" : "Aufgaben"} gefunden</strong>
           {activeFilters.map(([key, label]) => <button key={key} type="button" className="rounded-full border px-2 py-1 text-xs hover:border-primary" onClick={() => { updateFilter(key, ""); if (key === "search") setSearchInput(""); }} aria-label={`${label} zurücksetzen`}>{label} ×</button>)}
         </div>
-      </section>
+      </section>}
       <div className="flex gap-4 overflow-x-auto pb-4">
         {data.Columns.map((column: any) => (
           <section
@@ -3207,7 +3228,7 @@ function BoardDetail({ id }: { id: string }) {
           <form className="grid gap-4" onSubmit={update}>
             <label className="grid gap-2 text-sm">
               Name
-              <Input name="name" required defaultValue={data.Board.Name} />
+              <Input name="name" required defaultValue={board.Name} />
             </label>
             <DialogFooter>
               <Button type="submit">Speichern</Button>
@@ -3447,7 +3468,7 @@ function TaskDetail({ id }: { id: string }) {
   return (
     <>
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
-        <section>
+        <section className="min-w-0">
           <div className="flex justify-between gap-3">
             <a
               className="text-sm text-muted-foreground hover:text-foreground"
@@ -3577,7 +3598,9 @@ function TaskDetail({ id }: { id: string }) {
                     : allComments.length - visibleComments.length + visibleIndex;
                   const prominent = originalIndex >= latestCommentStart;
                   const body = String(entry.Body || "");
-                  const canExpand = body.length > 280;
+                      // The latest three comments remain fully readable; older
+                      // long comments can stay compact and expand on demand.
+                      const canExpand = !prominent && body.length > 280;
                   return (
                     <ChatBubble
                       key={entry.ID}

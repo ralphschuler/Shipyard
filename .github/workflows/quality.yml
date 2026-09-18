@@ -23,7 +23,10 @@ jobs:
       - name: Frontend lint
         run: timeout 120s npm run lint --prefix frontend
       - name: Frontend browser tests
-        run: timeout 120s npm run test:e2e --prefix frontend
+        # The embedded-bundle check needs a running production binary and is
+        # covered by the dedicated production-browser job below.  Keep the
+        # Vite-backed suite here focused on application behaviour.
+        run: timeout 120s npm run test:e2e --prefix frontend -- --grep-invert "production app serves matching build metadata and every fingerprinted asset"
   go:
     name: Go correctness and race detection
     runs-on: ubuntu-24.04
@@ -67,4 +70,6 @@ jobs:
       - name: Start embedded production server
         run: TASKBOARD_ADDR=127.0.0.1:8080 /tmp/taskboard-embedded --embedded-app-http > /tmp/taskboard-embedded.log 2>&1 &
       - name: Run browser tests against embedded production server
-        run: timeout 120s env TASKBOARD_E2E_BASE_URL=http://127.0.0.1:8080 npm run test:e2e --prefix frontend
+        # The production server is intentionally exercised by the bundle
+        # smoke test only; the remaining specs rely on Vite fixtures/routes.
+        run: timeout 120s env TASKBOARD_E2E_BASE_URL=http://127.0.0.1:8080 npm run test:e2e --prefix frontend -- e2e/embedded-bundle.spec.ts

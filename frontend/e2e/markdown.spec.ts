@@ -103,7 +103,7 @@ test("renders stored markdown, comments, and the task editor preview consistentl
   await expect(main.locator("table")).toHaveCount(2);
   await expect(main.locator("pre code")).toHaveCount(2);
 
-  await page.getByRole("button", { name: "Bearbeiten" }).click();
+  await page.getByRole("button", { name: "Bearbeiten", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Aufgabe bearbeiten" });
   await dialog.getByRole("tab", { name: "Vorschau" }).click();
   await expect(dialog.getByRole("tabpanel", { name: "Markdown-Vorschau" }).getByRole("heading", { name: "Release notes", level: 1 })).toBeVisible();
