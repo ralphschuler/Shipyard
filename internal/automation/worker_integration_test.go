@@ -118,7 +118,7 @@ func TestProcessPublishesDoneTaskAndRetriesWithoutDuplicateSideEffects(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := s.CreateAgent(ctx, "Release lifecycle agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", source, 1)
+	agent, err := s.CreateAgent(ctx, "Release lifecycle agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
