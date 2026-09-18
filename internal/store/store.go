@@ -2854,6 +2854,48 @@ func (s *Store) IntegrationJobs(c context.Context, limit int) ([]domain.Integrat
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[domain.IntegrationJob])
 }
 
+func (s *Store) ReleasePublication(c context.Context, taskID, projectID, runID string) (domain.ReleasePublication, bool, error) {
+	var p domain.ReleasePublication
+	err := s.DB.QueryRow(c, `SELECT task_id::text,project_id::text,run_id::text,repository_url,source_branch,target_branch,commit_sha,pr_number,pr_url,comment_body,audit_recorded,comment_recorded
+		FROM release_publications WHERE task_id=$1 AND project_id=$2 AND run_id=$3`, taskID, projectID, runID).Scan(
+		&p.TaskID, &p.ProjectID, &p.RunID, &p.RepositoryURL, &p.SourceBranch, &p.TargetBranch, &p.CommitSHA, &p.PRNumber, &p.PRURL, &p.CommentBody, &p.AuditRecorded, &p.CommentRecorded)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.ReleasePublication{}, false, nil
+	}
+	return p, err == nil, err
+}
+
+// FinalizeReleasePublication atomically records the external PR and the two
+// taskboard side effects. A retry for the same task/project/run is a no-op.
+func (s *Store) FinalizeReleasePublication(c context.Context, p domain.ReleasePublication, metadata map[string]string) (bool, error) {
+	tx, err := s.DB.Begin(c)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(c)
+	tag, err := tx.Exec(c, `INSERT INTO release_publications(task_id,project_id,run_id,repository_url,source_branch,target_branch,commit_sha,pr_number,pr_url,comment_body,audit_recorded,comment_recorded)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE,TRUE) ON CONFLICT(task_id,project_id,run_id) DO NOTHING`, p.TaskID, p.ProjectID, p.RunID, p.RepositoryURL, p.SourceBranch, p.TargetBranch, p.CommitSHA, p.PRNumber, p.PRURL, p.CommentBody)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() == 0 {
+		if err := tx.Commit(c); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if err = recordAudit(c, tx, "", "release.pr.published", "task", p.TaskID, metadata); err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(c, "INSERT INTO task_comments(task_id,author,body) VALUES($1,'Release-Agent',$2)", p.TaskID, p.CommentBody); err != nil {
+		return false, err
+	}
+	if err = tx.Commit(c); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 // AcceptedRunCommitSHAs is the trust boundary for follow-up delivery runs.
 // Only commits recorded by a successful acceptance for this exact managed
 // checkout are allowed to remain ahead of origin.

@@ -2201,7 +2201,7 @@ func (w *Worker) publishCompletedTask(ctx context.Context, event domain.Automati
 	var accepted domain.AgentRun
 	var delivery domain.RunDelivery
 	for _, candidate := range runs {
-		if candidate.Status != "succeeded" || candidate.TargetProject != "" && candidate.TargetProject != target.ProjectID {
+		if !runMatchesReleaseTarget(candidate, target.ProjectID) {
 			continue
 		}
 		candidateDelivery, deliveryErr := w.Store.RunDelivery(ctx, candidate.ID)
@@ -2212,6 +2212,11 @@ func (w *Worker) publishCompletedTask(ctx context.Context, event domain.Automati
 	}
 	if accepted.ID == "" {
 		return errors.New("kein erfolgreich akzeptierter Run für das Repository-Ziel vorhanden")
+	}
+	if _, alreadyPublished, publicationErr := w.Store.ReleasePublication(ctx, event.TaskID, target.ProjectID, accepted.ID); publicationErr != nil {
+		return errors.New("Release-Publikationsstatus konnte nicht geprüft werden")
+	} else if alreadyPublished {
+		return nil
 	}
 	source, err := w.Store.RunSource(ctx, accepted.ID)
 	if err != nil || filepath.Clean(source) != filepath.Clean(target.LocalPath) {
@@ -2243,17 +2248,23 @@ func (w *Worker) publishCompletedTask(ctx context.Context, event domain.Automati
 		return err
 	}
 	comment := releaseAuditComment(request, result)
-	if err := w.Store.RecordAudit(ctx, "", "release.pr.published", "task", event.TaskID, map[string]string{
+	_, err = w.Store.FinalizeReleasePublication(ctx, domain.ReleasePublication{
+		TaskID: event.TaskID, ProjectID: request.ProjectID, RunID: request.RunID, RepositoryURL: request.RepositoryURL,
+		SourceBranch: request.SourceBranch, TargetBranch: request.TargetBranch, CommitSHA: request.CommitSHA,
+		PRNumber: result.PR.Number, PRURL: result.PR.URL, CommentBody: comment,
+	}, map[string]string{
 		"task_id": event.TaskID, "project_id": request.ProjectID, "run_id": request.RunID,
 		"repository": request.RepositoryURL, "source_branch": request.SourceBranch, "target_branch": request.TargetBranch,
 		"commit": request.CommitSHA, "pr_url": result.PR.URL, "updated": strconv.FormatBool(result.Updated),
-	}); err != nil {
-		return errors.New("Release-Audit konnte nicht geschrieben werden")
-	}
-	if err := w.Store.AddComment(ctx, event.TaskID, "Release-Agent", comment); err != nil {
-		return errors.New("Release-Kommentar konnte nicht geschrieben werden")
+	})
+	if err != nil {
+		return errors.New("Release-Publikation konnte nicht dauerhaft abgeschlossen werden")
 	}
 	return nil
+}
+
+func runMatchesReleaseTarget(run domain.AgentRun, projectID string) bool {
+	return run.Status == "succeeded" && strings.TrimSpace(projectID) != "" && strings.TrimSpace(run.TargetProject) == strings.TrimSpace(projectID)
 }
 
 func releaseAuditComment(request release.Request, result release.Result) string {

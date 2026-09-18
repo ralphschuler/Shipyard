@@ -34,19 +34,20 @@ from a server-side secret assignment. It does not read service environment
 variables, only accepts the canonical `https://api.github.com` API endpoint,
 and does not include the token or HTTP response body in errors. Known secret
 values and common token/key patterns are redacted from PR summaries and
-adapter errors. The repository
-currently has no canonical
-Done-release event payload or release-agent secret assignment, so worker
-wiring is intentionally not guessed: missing configuration must block the
-run. Merge, force-push, release publication, and deployment are absent from
-this package's interfaces.
+adapter errors. The automation worker is the canonical Done-release entry point. It loads the
+repository target, accepted run, and assigned GitHub secret server-side and
+blocks if any binding is missing. Merge, force-push, release publication, and
+deployment are absent from this package's interfaces.
 
 ## Done lifecycle
 
 For `task.completed`, the automation worker requires exactly one effective
-repository target and a successful, already-applied run whose source checkout
-matches that target. The GitHub token is loaded only through
+repository target and a successful, already-applied run whose non-empty
+`TargetProject` exactly matches that target and whose source checkout matches
+it. The GitHub token is loaded only through
 `SHIPYARD_GITHUB_SECRET_ENV` and the accepted run's active agent assignment.
-Missing evidence blocks the event and leaves it retryable. Successful runs
-write an audit event and task comment with the direct PR URL, branches, commit,
-checks, and manual-review requirement.
+Missing evidence blocks the event and leaves it retryable. A successful
+publication is durably keyed by task/project/run; the transaction records the
+audit event and task comment together, so retries do not duplicate either.
+The comment contains the direct PR URL, branches, commit, checks, and
+manual-review requirement.

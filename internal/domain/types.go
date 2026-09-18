@@ -239,6 +239,11 @@ type IntegrationJob struct {
 	ClaimedUntil                                             *time.Time
 	CreatedAt, UpdatedAt                                     time.Time
 }
+type ReleasePublication struct {
+	TaskID, ProjectID, RunID, RepositoryURL, SourceBranch, TargetBranch, CommitSHA, PRURL, CommentBody string
+	PRNumber                                                                                           int
+	AuditRecorded, CommentRecorded                                                                     bool
+}
 type UsageReport struct {
 	Provider, Model, ServiceTier, Status, CostSource, PriceVersion string
 	APICalls, InputTokens, OutputTokens, CachedInputTokens         *int64

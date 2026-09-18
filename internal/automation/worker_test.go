@@ -29,6 +29,18 @@ func TestReleaseAuditCommentContainsDirectPRLinkAndChecks(t *testing.T) {
 	}
 }
 
+func TestAcceptedRunMustBelongToAssignedProject(t *testing.T) {
+	if runMatchesReleaseTarget(domain.AgentRun{Status: "succeeded", TargetProject: ""}, "project-1") {
+		t.Fatal("an accepted run without a project binding must be rejected")
+	}
+	if runMatchesReleaseTarget(domain.AgentRun{Status: "succeeded", TargetProject: "project-2"}, "project-1") {
+		t.Fatal("an accepted run for another project must be rejected")
+	}
+	if !runMatchesReleaseTarget(domain.AgentRun{Status: "succeeded", TargetProject: "project-1"}, "project-1") {
+		t.Fatal("an accepted run for the assigned project must be accepted")
+	}
+}
+
 func TestMeasuredUsagePointerPreservesKnownZero(t *testing.T) {
 	if value := measuredUsagePointer(0, false); value != nil {
 		t.Fatalf("unknown usage must remain nil, got %v", *value)
