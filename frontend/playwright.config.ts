@@ -12,7 +12,9 @@ export default defineConfig({
     baseURL: productionBaseURL || "http://127.0.0.1:4173",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
-    video: "retain-on-failure",
+    // CI runners may not have Playwright's optional ffmpeg bundle. Traces and
+    // screenshots still preserve failure diagnostics without requiring video.
+    video: "off",
     ...devices["Desktop Chrome"],
     launchOptions: {
       executablePath: process.env.CHROMIUM_PATH || "/usr/bin/chromium",

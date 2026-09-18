@@ -740,7 +740,7 @@ func TestRestartMonitorEndToEndRestartsPreviousBundleAndVerifiesIt(t *testing.T)
 }
 
 func TestRestartMonitorVerifiesEmbeddedAppAfterSupervisorRollback(t *testing.T) {
-	state := 0 // old process, candidate process, supervisor-restored old process
+	state := 0 // old process, stopping, candidate process, supervisor-restored old process
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" {
 			if state == 0 {
@@ -749,14 +749,15 @@ func TestRestartMonitorVerifiesEmbeddedAppAfterSupervisorRollback(t *testing.T) 
 				return
 			}
 			if state == 1 {
-				w.WriteHeader(http.StatusOK)
+				state = 2
+				w.WriteHeader(http.StatusServiceUnavailable)
 				return
 			}
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 		if r.URL.Path == "/app/build-info.json" {
-			if state == 1 {
+			if state == 2 {
 				_, _ = io.WriteString(w, `{"version":"v2.0.0","commit":"candidate"}`)
 				return
 			}
@@ -764,14 +765,14 @@ func TestRestartMonitorVerifiesEmbeddedAppAfterSupervisorRollback(t *testing.T) 
 			return
 		}
 		if r.URL.Path == "/app/" {
-			if state == 1 {
+			if state == 2 {
 				_, _ = io.WriteString(w, `<div id="root"><script src="/app/assets/app-candidate-12345678.js"></script></div>`)
 				return
 			}
 			_, _ = io.WriteString(w, `<div id="root"><script src="/app/assets/app-old-12345678.js"></script></div>`)
 			return
 		}
-		if r.URL.Path == "/app/assets/app-old-12345678.js" && state != 1 {
+		if r.URL.Path == "/app/assets/app-old-12345678.js" && state != 2 {
 			_, _ = io.WriteString(w, "old asset")
 			return
 		}
@@ -804,8 +805,9 @@ func TestRestartMonitorVerifiesEmbeddedAppAfterSupervisorRollback(t *testing.T) 
 		wait:            100 * time.Millisecond,
 		client:          client,
 		terminate:       func(context.Context) error { return nil },
+		start:           func(context.Context) error { return nil },
 		restart: func(context.Context) error {
-			state = 2
+			state = 3
 			return nil
 		},
 	})
