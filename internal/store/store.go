@@ -1592,7 +1592,7 @@ func (s *Store) CreateTask(c context.Context, b, title, desc, priority, start, d
 	return t, tx.Commit(c)
 }
 func (s *Store) Tasks(c context.Context, b string) ([]domain.Task, error) {
-	r, e := s.DB.Query(c, `SELECT t.id,t.board_id,t.column_id,c.name,t.title,t.description,t.priority,t.start_date,t.due_date,t.completed_at,t.created_at,(c.column_type='done') FROM tasks t JOIN workflow_columns c ON c.id=t.column_id WHERE t.board_id=$1 ORDER BY t.created_at DESC`, b)
+	r, e := s.DB.Query(c, `SELECT t.id,t.board_id,t.column_id,c.name,t.title,t.description,t.priority,t.start_date,t.due_date,t.completed_at,t.created_at,(c.column_type='done'),t.rework_count FROM tasks t JOIN workflow_columns c ON c.id=t.column_id WHERE t.board_id=$1 ORDER BY t.created_at DESC`, b)
 	if e != nil {
 		return nil, e
 	}
@@ -1600,7 +1600,7 @@ func (s *Store) Tasks(c context.Context, b string) ([]domain.Task, error) {
 	tasks := []domain.Task{}
 	for r.Next() {
 		var task domain.Task
-		if e := r.Scan(&task.ID, &task.BoardID, &task.ColumnID, &task.ColumnName, &task.Title, &task.Description, &task.Priority, &task.StartDate, &task.DueDate, &task.CompletedAt, &task.CreatedAt, &task.IsTerminal); e != nil {
+		if e := r.Scan(&task.ID, &task.BoardID, &task.ColumnID, &task.ColumnName, &task.Title, &task.Description, &task.Priority, &task.StartDate, &task.DueDate, &task.CompletedAt, &task.CreatedAt, &task.IsTerminal, &task.ReworkCount); e != nil {
 			return nil, e
 		}
 		tasks = append(tasks, task)
@@ -1617,7 +1617,7 @@ func (s *Store) Tasks(c context.Context, b string) ([]domain.Task, error) {
 }
 func (s *Store) GetTask(c context.Context, id string) (domain.Task, error) {
 	var t domain.Task
-	e := s.DB.QueryRow(c, `SELECT t.id,t.board_id,t.column_id,c.name,t.title,t.description,t.priority,t.start_date,t.due_date,t.completed_at,t.created_at,(c.column_type='done') FROM tasks t JOIN workflow_columns c ON c.id=t.column_id WHERE t.id=$1`, id).Scan(&t.ID, &t.BoardID, &t.ColumnID, &t.ColumnName, &t.Title, &t.Description, &t.Priority, &t.StartDate, &t.DueDate, &t.CompletedAt, &t.CreatedAt, &t.IsTerminal)
+	e := s.DB.QueryRow(c, `SELECT t.id,t.board_id,t.column_id,c.name,t.title,t.description,t.priority,t.start_date,t.due_date,t.completed_at,t.created_at,(c.column_type='done'),t.rework_count FROM tasks t JOIN workflow_columns c ON c.id=t.column_id WHERE t.id=$1`, id).Scan(&t.ID, &t.BoardID, &t.ColumnID, &t.ColumnName, &t.Title, &t.Description, &t.Priority, &t.StartDate, &t.DueDate, &t.CompletedAt, &t.CreatedAt, &t.IsTerminal, &t.ReworkCount)
 	if e != nil {
 		return t, e
 	}
@@ -3306,6 +3306,15 @@ func (s *Store) CreateRunsForEvent(c context.Context, event domain.AutomationEve
 	if e != nil {
 		return nil, e
 	}
+	if qaReturn, changeAvailable := reviewReturn(event.Payload); qaReturn && changeAvailable {
+		if _, e = tx.Exec(c, "UPDATE tasks SET rework_count=rework_count+1,updated_at=now() WHERE id=$1", event.TaskID); e != nil {
+			return nil, e
+		}
+		if _, e = tx.Exec(c, `INSERT INTO audit_events(kind,resource_type,resource_id,metadata)
+			VALUES('task.rework.incremented','task',$1,jsonb_build_object('reason','explicit_review_return','event_id',$2::text))`, event.TaskID, event.ID); e != nil {
+			return nil, e
+		}
+	}
 	var cooldown int
 	if e = tx.QueryRow(c, "SELECT cooldown_minutes FROM automation_rules WHERE id=$1", rule.ID).Scan(&cooldown); e != nil {
 		return nil, e
@@ -3374,6 +3383,17 @@ func canonicalAutomationPayloadValue(raw json.RawMessage) any {
 		return map[string]any{}
 	}
 	return canonicalAutomationPayload(value)
+}
+
+func reviewReturn(raw json.RawMessage) (qaReturn, changeAvailable bool) {
+	var payload struct {
+		QAReturn        bool `json:"qa_return"`
+		ChangeAvailable bool `json:"change_available"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return false, false
+	}
+	return payload.QAReturn, payload.ChangeAvailable
 }
 
 func (s *Store) MarkEventProcessed(c context.Context, id string) error {
