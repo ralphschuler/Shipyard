@@ -71,13 +71,13 @@ func NewProductionOrchestrator(s *store.Store) *Orchestrator {
 		Verify:            p.verify,
 		Migrate:           p.migrate,
 		Switch:            p.switchBinary,
-		// Restart validates the newly installed executable. The supervisor
-		// restart itself is deferred until after the HTTP response.
+		// Restart validates and synchronously monitors the supervisor handoff.
+		// A successful install is never reported while the old process is still
+		// serving or before the candidate bundle has been verified.
 		Restart:               p.restart,
 		Health:                p.health,
 		RestartVerifiesHealth: true,
 		Rollback:              p.rollback,
-		AfterSuccess:          p.afterSuccess,
 	}
 }
 
@@ -192,19 +192,18 @@ func (p *productionAdapter) restart(ctx context.Context, snapshot Snapshot) erro
 	if err := cmd.Run(); err != nil {
 		return errors.New("new release failed embedded app validation")
 	}
-	// A detached monitor waits for the old process to relinquish the socket,
-	// verifies the health and build identity of the process started by systemd,
-	// and restores the complete previous binary bundle on failure. The monitor
-	// must not inherit the request context: the HTTP handler cancels it after
-	// writing the successful update response.
+	// The monitor asks the stable supervisor runner to replace the old child,
+	// waits for the old process to disappear, verifies the complete candidate
+	// bundle, and restores the previous binary on failure. Run it synchronously:
+	// returning from Restart before this result would report a false success.
 	healthURL := envOr(p.healthURL, productionHealthURL)
 	buildInfoURL := envOr(p.buildInfoURL, "http://127.0.0.1:8080/app/build-info.json")
 	appURL := envOr(p.appURL, "http://127.0.0.1:8080/app/")
 	monitor := exec.Command(p.binary, "--monitor-restart", healthURL, buildInfoURL, appURL, p.binary, p.previous, snapshot.Release.Version, snapshot.Release.Commit, snapshot.Current.Version, snapshot.Current.Commit)
 	monitor.Stdout = io.Discard
 	monitor.Stderr = io.Discard
-	if err := monitor.Start(); err != nil {
-		return errors.New("new release restart monitor could not start")
+	if err := monitor.Run(); err != nil {
+		return errors.New("new release restart monitor failed")
 	}
 	return nil
 }
@@ -240,6 +239,7 @@ type restartMonitorConfig struct {
 	wait            time.Duration
 	client          *http.Client
 	restart         func(context.Context) error
+	start           func(context.Context) error
 }
 
 // RunRestartMonitor is the small supervisor hand-off used by the production
@@ -260,6 +260,7 @@ func RunRestartMonitor(healthURL, buildInfoURL, appURL, binary, previous, versio
 		poll:            250 * time.Millisecond,
 		wait:            30 * time.Second,
 		restart:         requestSupervisorRestart,
+		start:           requestSupervisorRestart,
 	})
 }
 
@@ -305,6 +306,9 @@ func monitorRestart(ctx context.Context, cfg restartMonitorConfig) error {
 	if cfg.restart == nil {
 		cfg.restart = func(context.Context) error { return nil }
 	}
+	if cfg.start == nil {
+		cfg.start = func(context.Context) error { return nil }
+	}
 	client := cfg.client
 	if client == nil {
 		client = &http.Client{Timeout: 2 * time.Second}
@@ -312,6 +316,9 @@ func monitorRestart(ctx context.Context, cfg restartMonitorConfig) error {
 	cfg.client = client
 	deadline := time.NewTimer(cfg.wait)
 	defer deadline.Stop()
+	if err := cfg.start(ctx); err != nil {
+		return rollbackAfterRestartError(cfg, fmt.Errorf("request supervisor restart: %w", err))
+	}
 
 	// First observe the old service going away. A healthy response here is
 	// still the old process and must never count as update success.
@@ -539,15 +546,4 @@ func (p *productionAdapter) rollback(_ context.Context, _ Snapshot) error {
 		return fmt.Errorf("restore rollback binary: %w", err)
 	}
 	return nil
-}
-
-func (p *productionAdapter) afterSuccess() {
-	// taskboard.service has NoNewPrivileges=true, so a process-local sudo or
-	// systemd-run cannot elevate to restart itself. Restart=on-failure is already
-	// part of the hardened unit; exit only after net/http has flushed the success
-	// response and let systemd start the atomically installed binary.
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		os.Exit(75)
-	}()
 }

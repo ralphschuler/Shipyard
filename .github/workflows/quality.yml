@@ -47,3 +47,24 @@ jobs:
         run: timeout 120s go test -shuffle=on -count=3 ./...
       - name: Race detector
         run: timeout 120s go test -race ./...
+
+  production-browser:
+    name: Embedded production browser tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build embedded production binary
+        run: timeout 120s npm ci --prefix frontend && timeout 120s npm run build --prefix frontend && timeout 120s go build -o /tmp/taskboard-embedded ./cmd/taskboard
+      - name: Start embedded production server
+        run: TASKBOARD_ADDR=127.0.0.1:8080 /tmp/taskboard-embedded --embedded-app-http > /tmp/taskboard-embedded.log 2>&1 &
+      - name: Run browser tests against embedded production server
+        run: timeout 120s env TASKBOARD_E2E_BASE_URL=http://127.0.0.1:8080 npm run test:e2e --prefix frontend

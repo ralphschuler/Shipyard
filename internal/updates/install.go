@@ -41,9 +41,9 @@ type Orchestrator struct {
 	// the generic post-restart health step in that case.
 	RestartVerifiesHealth bool
 	Rollback              func(context.Context, Snapshot) error
-	// AfterSuccess runs after the HTTP response has been written. Production
-	// adapters use this hook for a deferred service restart so the process does
-	// not terminate before the browser receives the installation result.
+	// AfterSuccess is reserved for adapters whose restart is intentionally
+	// outside Install. Production adapters leave it unset because Restart must
+	// synchronously verify the supervisor-started bundle before Install returns.
 	AfterSuccess func()
 }
 

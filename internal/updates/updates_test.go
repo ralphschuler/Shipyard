@@ -484,6 +484,31 @@ func TestProductionAdapterRestartValidatesInstalledBundle(t *testing.T) {
 	}
 }
 
+func TestProductionAdapterRestartWaitsForMonitorResult(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "taskboard")
+	started := filepath.Join(dir, "monitor-started")
+	release := filepath.Join(dir, "release-monitor")
+	marker := filepath.Join(dir, "monitor-finished")
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\n--validate-embedded-app) exit 0 ;;\n--monitor-restart) : > %q; while [ ! -f %q ]; do sleep 0.01; done; : > %q; exit 0 ;;\n*) exit 2 ;;\nesac\n", started, release, marker)
+	if err := os.WriteFile(binary, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	p := &productionAdapter{binary: binary, previous: filepath.Join(dir, "previous")}
+	go func() {
+		if !waitForRestartHelper(t, started) {
+			return
+		}
+		_ = os.WriteFile(release, []byte("release"), 0600)
+	}()
+	if err := p.restart(context.Background(), Snapshot{Release: Release{Version: "v2", Commit: "candidate"}}); err != nil {
+		t.Fatalf("restart() error = %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("monitor completion was not observed: %v", err)
+	}
+}
+
 func TestRequestSupervisorRestartSignalsConfiguredSupervisor(t *testing.T) {
 	if os.Getenv("TASKBOARD_SUPERVISOR_SIGNAL_HELPER") == "1" {
 		signals := make(chan os.Signal, 1)
