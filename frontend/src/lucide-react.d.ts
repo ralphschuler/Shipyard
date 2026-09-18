@@ -7,6 +7,8 @@ declare module "lucide-react" {
   export const Activity: ComponentType<any>;
   export const Bot: ComponentType<any>;
   export const Boxes: ComponentType<any>;
+  export const BrainCircuit: ComponentType<any>;
+  export const Check: ComponentType<any>;
   export const CheckIcon: ComponentType<any>;
   export const ChevronDown: ComponentType<any>;
   export const ChevronRightIcon: ComponentType<any>;
@@ -14,6 +16,7 @@ declare module "lucide-react" {
   export const FolderGit2: ComponentType<any>;
   export const Gauge: ComponentType<any>;
   export const GitCompareArrows: ComponentType<any>;
+  export const Download: ComponentType<any>;
   export const LayoutDashboard: ComponentType<any>;
   export const LoaderCircle: ComponentType<any>;
   export const Menu: ComponentType<any>;
@@ -22,7 +25,10 @@ declare module "lucide-react" {
   export const Play: ComponentType<any>;
   export const ShieldAlert: ComponentType<any>;
   export const ShieldCheck: ComponentType<any>;
+  export const Search: ComponentType<any>;
   export const Sun: ComponentType<any>;
+  export const Trash2: ComponentType<any>;
   export const Wrench: ComponentType<any>;
+  export const X: ComponentType<any>;
   export const XIcon: ComponentType<any>;
 }

@@ -1498,7 +1498,7 @@ type UpdateData = {
   current: { version: string; commit: string; builtAt?: string };
   source: { provider: string; repository: string; branch: string };
   status: "up_to_date" | "update_available" | "unavailable" | "unverified" | string;
-  release?: { version?: string; commit?: string; publishedAt?: string; changelog?: string; url?: string; verified?: boolean; compatible?: boolean; migrationRequired?: boolean };
+  release?: { version?: string; commit?: string; publishedAt?: string; changelog?: string; changelogSource?: string; url?: string; verified?: boolean; compatible?: boolean; migrationRequired?: boolean };
   installable?: boolean;
   reason?: string;
   checked_at?: string;
@@ -1628,7 +1628,7 @@ function Updates({ language }: { language: Language }) {
   );
 }
 
-function renderChangelog(source: string) {
+function renderChangelog(source = "") {
   if (!source) return <p className="text-muted-foreground">Kein Changelog angegeben.</p>;
   try {
     return renderMarkdown(source);
