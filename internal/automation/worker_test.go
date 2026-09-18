@@ -113,6 +113,95 @@ func TestRepositoryApplyLockSerializesConcurrentDelivery(t *testing.T) {
 	secondUnlock()
 }
 
+func TestEnsureTaskBranchFetchesCurrentDefaultBeforeCreation(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, t.TempDir(), "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+
+	// Advance the remote in a separate clone so the local origin/master is stale.
+	other := filepath.Join(t.TempDir(), "other")
+	runGit(t, t.TempDir(), "clone", remote, other)
+	runGit(t, other, "config", "user.name", "Test")
+	runGit(t, other, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(other, "remote.txt"), []byte("remote\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, other, "add", "remote.txt")
+	runGit(t, other, "commit", "-m", "remote advance")
+	runGit(t, other, "push", "origin", "master")
+
+	branch, err := ensureTaskBranch(context.Background(), source, "task-from-current-remote")
+	if err != nil {
+		t.Fatalf("ensure task branch: %v", err)
+	}
+	if branch != "task/task-from-current-remote" {
+		t.Fatalf("branch = %q", branch)
+	}
+	if _, err := gitOutput(context.Background(), source, "show", branch+":remote.txt"); err != nil {
+		t.Fatalf("task branch was not based on the current remote default: %v", err)
+	}
+}
+
+func TestIntegrationPRMergedRequiresMergedState(t *testing.T) {
+	if integrationPRMerged([]byte(`{"state":"OPEN","mergedAt":null}`)) {
+		t.Fatal("open pull request reported as merged")
+	}
+	if !integrationPRMerged([]byte(`{"state":"MERGED","mergedAt":"2026-09-17T16:00:00Z"}`)) {
+		t.Fatal("merged pull request was not recognized")
+	}
+}
+
+func TestIntegrationPRClosedWithoutMergeRequiresReplacement(t *testing.T) {
+	if integrationPRNeedsReplacement([]byte(`{"state":"OPEN","mergedAt":null}`)) {
+		t.Fatal("open pull request should remain pending")
+	}
+	if integrationPRNeedsReplacement([]byte(`{"state":"MERGED","mergedAt":"2026-09-17T16:00:00Z"}`)) {
+		t.Fatal("merged pull request should be synchronized, not replaced")
+	}
+	if !integrationPRNeedsReplacement([]byte(`{"state":"CLOSED","mergedAt":null}`)) {
+		t.Fatal("closed unmerged pull request should be replaced")
+	}
+}
+
+func TestReusablePRRequiresOpenOrMergedState(t *testing.T) {
+	closed := []byte(`{"number":7,"url":"https://example.test/pr/7","state":"CLOSED","mergedAt":null}`)
+	if pr := reusablePR(closed); pr.Number != 0 {
+		t.Fatalf("closed pull request was reused: %#v", pr)
+	}
+	open := []byte(`{"number":8,"url":"https://example.test/pr/8","state":"OPEN","mergedAt":null,"headRefOid":"open-head"}`)
+	if pr := reusablePR(open); pr.Number != 8 || pr.URL == "" {
+		t.Fatalf("open pull request was not reused: %#v", pr)
+	}
+}
+
+func TestReusablePRRequiresCurrentHead(t *testing.T) {
+	mergedAt := "2026-09-17T16:00:00Z"
+	pr := integrationPR{Number: 9, URL: "https://example.test/pr/9", State: "MERGED", MergedAt: &mergedAt, HeadRefOID: "new-head"}
+	if candidate := reusablePRCandidate(pr, "old-head"); candidate.Number != 0 {
+		t.Fatalf("historical merged pull request was reused: %#v", candidate)
+	}
+	if candidate := reusablePRCandidate(pr, "new-head"); candidate.Number != 9 {
+		t.Fatalf("current merged pull request was not reusable: %#v", candidate)
+	}
+}
+
+func TestIntegrationDefaultBranchUsesPersistedProjectConfiguration(t *testing.T) {
+	project := domain.Project{DefaultBranch: "configured-default"}
+	if got := integrationDefaultBranch(project, "checked-out-branch"); got != "configured-default" {
+		t.Fatalf("configured default branch = %q", got)
+	}
+}
+
 func TestRunCommitExistsProvidesIdempotentDeliveryMarker(t *testing.T) {
 	source := t.TempDir()
 	runGit(t, source, "init", "-b", "main")
@@ -413,6 +502,19 @@ func TestApplyRunPatchToTaskBranchKeepsSourceCleanAndRebasesRemote(t *testing.T)
 	}
 }
 
+func TestIntegrationPushArgsNeverTargetsDefaultBranch(t *testing.T) {
+	args, err := integrationPushArgs("task/example", "master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(args, " ") != "push --force-with-lease origin task/example:task/example" {
+		t.Fatalf("push args = %q", strings.Join(args, " "))
+	}
+	if _, err := integrationPushArgs("master", "master"); err == nil {
+		t.Fatal("default branch must never be a task push target")
+	}
+}
+
 func TestApplyRunPatchAcceptsTwoSequentialRunWorktrees(t *testing.T) {
 	source := t.TempDir()
 	runGit(t, source, "init", "-b", "master")
@@ -539,6 +641,104 @@ func TestApplyRunPatchReportsThreeWayConflictAndPreservesDiff(t *testing.T) {
 	if err := removeRunWorktree(context.Background(), "conflicting-run", source, worktree); err != nil {
 		t.Fatalf("conflict cleanup: %v", err)
 	}
+}
+
+func TestApplyRunPatchToTaskBranchReportsPatchFilesBeforeApply(t *testing.T) {
+	patch := "diff --git a/shared.txt b/shared.txt\nindex 1234567..7654321 100644\n--- a/shared.txt\n+++ b/shared.txt\n@@ -1 +1 @@\n-base\n+run\n"
+	files := patchFiles(patch)
+	if !reflect.DeepEqual(files, []string{"shared.txt"}) {
+		t.Fatalf("patch files = %#v, want shared.txt", files)
+	}
+	if got := strings.Join(files, "\n"); got == "" {
+		t.Fatal("conflict diagnostics must retain patch paths before git apply mutates the worktree")
+	}
+}
+
+func TestApplyRunPatchToTaskBranchReportsConflictFiles(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	shared := filepath.Join(source, "shared.txt")
+	if err := os.WriteFile(shared, []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "shared.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, source, "remote", "add", "origin", remote)
+	runGit(t, source, "push", "-u", "origin", "master")
+	taskID := "conflict-task"
+	branch, err := ensureTaskBranch(context.Background(), source, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	branchWorktree := filepath.Join(t.TempDir(), "task-branch")
+	runGit(t, source, "worktree", "add", branchWorktree, branch)
+	if err := os.WriteFile(filepath.Join(branchWorktree, "shared.txt"), []byte("task branch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, branchWorktree, "add", "shared.txt")
+	runGit(t, branchWorktree, "commit", "-m", "task branch change")
+	runGit(t, source, "worktree", "remove", "--force", branchWorktree)
+
+	runWorktree := filepath.Join(t.TempDir(), "run")
+	runGit(t, source, "worktree", "add", runWorktree, "HEAD")
+	if err := os.WriteFile(filepath.Join(runWorktree, "shared.txt"), []byte("run change\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, runWorktree, "add", "shared.txt")
+	_, err = applyRunPatchToTaskBranch(context.Background(), source, runWorktree, "conflict-run", taskID)
+	if err == nil || !strings.Contains(err.Error(), "shared.txt") || !strings.Contains(err.Error(), "Task-Branch") {
+		t.Fatalf("task branch conflict diagnosis = %v", err)
+	}
+	runGit(t, source, "worktree", "remove", "--force", runWorktree)
+}
+
+func TestApplyRunPatchToTaskBranchUsesThreeWayForExistingRebasedFile(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "README.md")
+	runGit(t, source, "commit", "-m", "initial")
+
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, source, "remote", "add", "origin", remote)
+	runGit(t, source, "push", "-u", "origin", "master")
+	taskID := "existing-file-task"
+	branch, err := ensureTaskBranch(context.Background(), source, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	branchWorktree := filepath.Join(t.TempDir(), "task-branch")
+	runGit(t, source, "worktree", "add", branchWorktree, branch)
+	if err := os.WriteFile(filepath.Join(branchWorktree, "migrations-048.sql"), []byte("migration\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, branchWorktree, "add", "migrations-048.sql")
+	runGit(t, branchWorktree, "commit", "-m", "rebase already introduced migration")
+	runGit(t, source, "worktree", "remove", "--force", branchWorktree)
+
+	runWorktree := filepath.Join(t.TempDir(), "run")
+	runGit(t, source, "worktree", "add", runWorktree, "HEAD")
+	if err := os.WriteFile(filepath.Join(runWorktree, "migrations-048.sql"), []byte("migration\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, runWorktree, "add", "migrations-048.sql")
+	if _, err := applyRunPatchToTaskBranch(context.Background(), source, runWorktree, "existing-file-run", taskID); err != nil {
+		t.Fatalf("existing rebased file should use the three-way path: %v", err)
+	}
+	if _, err := gitOutput(context.Background(), source, "show", branch+":migrations-048.sql"); err != nil {
+		t.Fatalf("three-way integration did not retain existing file: %v", err)
+	}
+	runGit(t, source, "worktree", "remove", "--force", runWorktree)
 }
 
 func TestApplyRunPatchBlocksDirtyCheckoutWithoutChangingIt(t *testing.T) {

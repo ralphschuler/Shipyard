@@ -104,6 +104,20 @@ func TestAcceptedDeliveryCommitMigrationStoresGitObjectIdentity(t *testing.T) {
 	}
 }
 
+func TestTaskTargetInheritanceMigrationIsIdempotent(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/048_task_target_inheritance.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	if !strings.Contains(text, "ADD COLUMN IF NOT EXISTS target_source") {
+		t.Fatal("task target inheritance migration must tolerate a pre-existing target_source column")
+	}
+	if !strings.Contains(text, "CREATE INDEX IF NOT EXISTS task_repository_targets_inherited") {
+		t.Fatal("task target inheritance migration must tolerate a pre-existing index")
+	}
+}
+
 func TestAutomationFingerprintMigrationHasAtomicDurableClaim(t *testing.T) {
 	body, err := migrationFiles.ReadFile("migrations/042_automation_event_fingerprints.sql")
 	if err != nil {
@@ -113,6 +127,19 @@ func TestAutomationFingerprintMigrationHasAtomicDurableClaim(t *testing.T) {
 	for _, required := range []string{"automation_event_claims", "fingerprint TEXT NOT NULL UNIQUE", "status TEXT NOT NULL", "attempts INTEGER", "batch_id UUID", "canonical_automation_payload", "legacy:' || b.id::text", "legacy:run:' || r.id::text", "agent_runs", "ON CONFLICT (fingerprint) DO NOTHING"} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("fingerprint migration is missing %q", required)
+		}
+	}
+}
+
+func TestGitIntegrationQueueMigrationSupportsLeasedClaims(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/042_git_integration_queue.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"claimed_until TIMESTAMPTZ", "status IN ('queued','running','pushed','pr_open')", "repository_integration_queue_claim"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("git integration queue migration is missing %q", required)
 		}
 	}
 }

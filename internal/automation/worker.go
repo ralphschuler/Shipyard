@@ -74,6 +74,7 @@ const defaultMaxAutomationEventAttempts = 3
 const maxWebhookDeliveryAttempts = 5
 const worktreeRetention = 7 * 24 * time.Hour
 const worktreeCleanupInterval = 15 * time.Minute
+const integrationQueueInterval = 5 * time.Second
 
 const tmuxSocket = "taskboard"
 
@@ -891,6 +892,260 @@ func taskIntegrationBranch(taskID string) string {
 	return "task/" + strings.TrimSpace(taskID)
 }
 
+func integrationPushArgs(branch, defaultBranch string) ([]string, error) {
+	branch = strings.TrimSpace(branch)
+	defaultBranch = strings.TrimSpace(defaultBranch)
+	if branch == "" || strings.HasPrefix(branch, "-") || branch == defaultBranch || !strings.HasPrefix(branch, "task/") {
+		return nil, errors.New("ungültiges oder unsicheres Integrationsziel")
+	}
+	if defaultBranch == "" || strings.HasPrefix(defaultBranch, "-") {
+		return nil, errors.New("ungültiger Default-Branch")
+	}
+	return []string{"push", "--force-with-lease", "origin", branch + ":" + branch}, nil
+}
+
+func integrationPRMerged(output []byte) bool {
+	var state struct {
+		State    string  `json:"state"`
+		MergedAt *string `json:"mergedAt"`
+	}
+	return json.Unmarshal(output, &state) == nil && strings.EqualFold(state.State, "MERGED") && state.MergedAt != nil && strings.TrimSpace(*state.MergedAt) != ""
+}
+
+func integrationPRNeedsReplacement(output []byte) bool {
+	var state struct {
+		State    string  `json:"state"`
+		MergedAt *string `json:"mergedAt"`
+	}
+	if json.Unmarshal(output, &state) != nil {
+		return false
+	}
+	return strings.EqualFold(state.State, "CLOSED") && (state.MergedAt == nil || strings.TrimSpace(*state.MergedAt) == "")
+}
+
+type integrationPR struct {
+	Number     int     `json:"number"`
+	URL        string  `json:"url"`
+	State      string  `json:"state"`
+	MergedAt   *string `json:"mergedAt"`
+	HeadRefOID string  `json:"headRefOid"`
+}
+
+func reusablePR(output []byte) integrationPR {
+	var pr integrationPR
+	if json.Unmarshal(output, &pr) != nil {
+		return integrationPR{}
+	}
+	return reusablePRCandidate(pr, pr.HeadRefOID)
+}
+
+func reusablePRCandidate(pr integrationPR, currentHead string) integrationPR {
+	if pr.Number == 0 || strings.TrimSpace(pr.URL) == "" {
+		return integrationPR{}
+	}
+	if strings.TrimSpace(currentHead) == "" || !strings.EqualFold(strings.TrimSpace(pr.HeadRefOID), strings.TrimSpace(currentHead)) {
+		return integrationPR{}
+	}
+	if strings.EqualFold(pr.State, "OPEN") {
+		return pr
+	}
+	if strings.EqualFold(pr.State, "MERGED") && pr.MergedAt != nil && strings.TrimSpace(*pr.MergedAt) != "" {
+		return pr
+	}
+	return integrationPR{}
+}
+
+func integrationDefaultBranch(project domain.Project, checkedOutBranch string) string {
+	if configured := strings.TrimSpace(project.DefaultBranch); configured != "" {
+		return configured
+	}
+	return strings.TrimSpace(checkedOutBranch)
+}
+
+// processIntegrationQueue is deliberately restartable: every step is stored
+// before the next external Git operation. A transient push/PR failure leaves
+// the job visible and eligible for a later poll instead of losing delivery.
+func (w *Worker) processIntegrationQueue(ctx context.Context) error {
+	jobs, err := w.Store.IntegrationJobs(ctx, 20)
+	if err != nil {
+		return err
+	}
+	var failures []error
+	for _, job := range jobs {
+		if err := w.processIntegrationJob(ctx, job); err != nil {
+			if isIntegrationConflict(err) {
+				conflictErr := integrationConflictWithState(job, err)
+				recordErr := w.recordIntegrationConflictByIDs(ctx, job.RunID, job.TaskID, conflictErr)
+				updateErr := w.Store.UpdateIntegration(ctx, job.ID, "failed", "conflict", job.BaseSHA, job.HeadSHA, job.PRURL, conflictErr.Error(), job.PRNumber, job.Attempts+1)
+				if recordErr != nil || updateErr != nil {
+					persistErr := errors.Join(recordErr, updateErr)
+					if retryErr := w.Store.UpdateIntegration(ctx, job.ID, "failed", "conflict", job.BaseSHA, job.HeadSHA, job.PRURL, persistErr.Error(), job.PRNumber, job.Attempts+1); retryErr != nil {
+						persistErr = errors.Join(persistErr, retryErr)
+					}
+					failures = append(failures, fmt.Errorf("Integrationskonflikt für Queue-Job %s konnte nicht vollständig protokolliert werden: %w", job.ID, persistErr))
+				}
+				continue
+			}
+			updateErr := w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, err.Error(), job.PRNumber, job.Attempts+1)
+			if updateErr != nil {
+				failures = append(failures, fmt.Errorf("Integrationsfehler für Queue-Job %s: %w", job.ID, errors.Join(err, updateErr)))
+			} else {
+				failures = append(failures, fmt.Errorf("Integrationsfehler für Queue-Job %s: %w", job.ID, err))
+			}
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func integrationConflictWithState(job domain.IntegrationJob, integrationErr error) error {
+	return fmt.Errorf("base=%s head=%s: %w", strings.TrimSpace(job.BaseSHA), strings.TrimSpace(job.HeadSHA), integrationErr)
+}
+
+func (w *Worker) processIntegrationJob(ctx context.Context, job domain.IntegrationJob) error {
+	unlock, err := lockRepository(ctx, job.RepositoryPath)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if job.Step == "done" && job.Status == "pr_open" {
+		remote, remoteErr := gitOutput(ctx, job.RepositoryPath, "remote", "get-url", "origin")
+		if remoteErr != nil {
+			return fmt.Errorf("Remote-URL für Merge-Prüfung konnte nicht gelesen werden: %w", remoteErr)
+		}
+		out, viewErr := exec.CommandContext(ctx, "gh", "-R", remote, "pr", "view", job.Branch, "--json", "state,mergedAt").CombinedOutput()
+		if viewErr != nil {
+			return fmt.Errorf("PR-Status konnte nicht gelesen werden: %s", strings.TrimSpace(string(out)))
+		}
+		if integrationPRNeedsReplacement(out) {
+			// A closed, unmerged PR cannot receive new commits. Clear its
+			// metadata and revisit the PR step so the next attempt creates a
+			// replacement for the current task-branch head.
+			return w.Store.UpdateIntegration(ctx, job.ID, "pushed", "pr", job.BaseSHA, job.HeadSHA, "", "", 0, job.Attempts)
+		}
+		if !integrationPRMerged(out) {
+			return w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts)
+		}
+		if current := repositoryBranch(ctx, job.RepositoryPath); current != job.DefaultBranch {
+			return fmt.Errorf("verwalteter Checkout steht auf %q statt auf Default-Branch %q", current, job.DefaultBranch)
+		}
+		if err := syncManagedCheckout(ctx, job.RepositoryPath, job.DefaultBranch, job.HeadSHA); err != nil {
+			return fmt.Errorf("verwalteter Checkout konnte nach Merge nicht synchronisiert werden: %w", err)
+		}
+		if err := w.Store.SetRunIntegration(ctx, job.RunID, job.Branch, job.BaseSHA, job.HeadSHA, "merged", job.PRURL, job.PRNumber); err != nil {
+			return err
+		}
+		job.Status = "succeeded"
+		return w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts)
+	}
+	integrationPath := filepath.Join(taskIntegrationDirectory(job.RepositoryPath), "queue-"+job.ID)
+	if err := os.MkdirAll(filepath.Dir(integrationPath), 0o700); err != nil {
+		return err
+	}
+	if err := removeIntegrationWorktree(ctx, job.RepositoryPath, integrationPath); err != nil {
+		return err
+	}
+	if out, addErr := exec.CommandContext(ctx, "git", "-C", job.RepositoryPath, "worktree", "add", integrationPath, job.Branch).CombinedOutput(); addErr != nil {
+		return fmt.Errorf("Queue-Integrations-Worktree konnte nicht angelegt werden: %s", strings.TrimSpace(string(out)))
+	}
+	defer func() { _ = removeIntegrationWorktree(context.Background(), job.RepositoryPath, integrationPath) }()
+	if job.Step == "fetch" || job.Status == "queued" {
+		if _, err = gitOutput(ctx, job.RepositoryPath, "fetch", "--no-tags", "origin", job.DefaultBranch); err != nil {
+			return fmt.Errorf("Fetch fehlgeschlagen: %w", err)
+		}
+		job.BaseSHA, err = gitOutput(ctx, job.RepositoryPath, "rev-parse", "origin/"+job.DefaultBranch)
+		if err != nil {
+			return fmt.Errorf("Remote-Basis konnte nicht gelesen werden: %w", err)
+		}
+		job.Step, job.Status = "rebase", "running"
+		if err = w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts); err != nil {
+			return err
+		}
+		if err = w.Store.SetRunIntegration(ctx, job.RunID, job.Branch, job.BaseSHA, job.HeadSHA, job.Status, job.PRURL, job.PRNumber); err != nil {
+			return err
+		}
+	}
+	if job.Step == "rebase" {
+		if _, err = gitOutput(ctx, integrationPath, "rebase", "origin/"+job.DefaultBranch); err != nil {
+			files := gitConflictFiles(ctx, integrationPath)
+			_ = exec.CommandContext(context.Background(), "git", "-C", integrationPath, "rebase", "--abort").Run()
+			return managedCheckoutProblem("in der Task-Branch nicht konfliktfrei rebasierbar", files, fmt.Sprintf("base=%s head=%s: Rebase für %s fehlgeschlagen: %v", job.BaseSHA, job.HeadSHA, job.Branch, err))
+		}
+		job.HeadSHA, err = gitOutput(ctx, integrationPath, "rev-parse", "HEAD")
+		if err != nil {
+			return err
+		}
+		job.Step = "push"
+		if err = w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts); err != nil {
+			return err
+		}
+		if err = w.Store.SetRunIntegration(ctx, job.RunID, job.Branch, job.BaseSHA, job.HeadSHA, job.Status, job.PRURL, job.PRNumber); err != nil {
+			return err
+		}
+	}
+	if job.Step == "push" {
+		args, argsErr := integrationPushArgs(job.Branch, job.DefaultBranch)
+		if argsErr != nil {
+			return argsErr
+		}
+		if _, err = gitOutput(ctx, integrationPath, args...); err != nil {
+			return fmt.Errorf("Push fehlgeschlagen: %w", err)
+		}
+		job.Step, job.Status = "pr", "pushed"
+		if err = w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts); err != nil {
+			return err
+		}
+	}
+	if job.Step == "pr" {
+		// gh is the configured provider boundary. It uses the operator's
+		// existing credential setup and never receives credentials from task data.
+		remote, remoteErr := gitOutput(ctx, job.RepositoryPath, "remote", "get-url", "origin")
+		if remoteErr != nil {
+			return fmt.Errorf("Remote-URL für PR konnte nicht gelesen werden: %w", remoteErr)
+		}
+		out, ghErr := exec.CommandContext(ctx, "gh", "-R", remote, "pr", "list", "--head", job.Branch, "--base", job.DefaultBranch, "--state", "all", "--json", "number,url,state,mergedAt,headRefOid", "--limit", "20").CombinedOutput()
+		if ghErr == nil {
+			var existing []integrationPR
+			if json.Unmarshal(out, &existing) == nil {
+				for _, candidate := range existing {
+					if reusable := reusablePRCandidate(candidate, job.HeadSHA); reusable.Number > 0 {
+						job.PRNumber, job.PRURL = reusable.Number, reusable.URL
+						break
+					}
+				}
+			}
+		}
+		if job.PRNumber == 0 {
+			out, ghErr = exec.CommandContext(ctx, "gh", "-R", remote, "pr", "create", "--base", job.DefaultBranch, "--head", job.Branch, "--fill").CombinedOutput()
+			if ghErr == nil {
+				// gh pr create prints the URL, while gh pr view provides the
+				// stable number/URL shape persisted by Shipyard.
+				out, ghErr = exec.CommandContext(ctx, "gh", "-R", remote, "pr", "view", job.Branch, "--json", "number,url").CombinedOutput()
+			}
+		}
+		if ghErr != nil {
+			return fmt.Errorf("PR-Aktualisierung fehlgeschlagen: %s", strings.TrimSpace(string(out)))
+		}
+		if job.PRNumber == 0 {
+			var pr struct {
+				Number int    `json:"number"`
+				URL    string `json:"url"`
+			}
+			if json.Unmarshal(out, &pr) != nil || pr.Number == 0 || pr.URL == "" {
+				return errors.New("gh lieferte keine gültigen PR-Metadaten")
+			}
+			job.PRNumber, job.PRURL = pr.Number, pr.URL
+		}
+		if err = w.Store.SetRunIntegration(ctx, job.RunID, job.Branch, job.BaseSHA, job.HeadSHA, "pr_open", job.PRURL, job.PRNumber); err != nil {
+			return err
+		}
+		// Keep the row pending until the provider confirms the merge. This makes
+		// managed-checkout synchronization restartable and observable.
+		job.Step, job.Status = "done", "pr_open"
+		return w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, "", job.PRNumber, job.Attempts)
+	}
+	return nil
+}
+
 func taskIntegrationDirectory(source string) string {
 	if configured := strings.TrimSpace(os.Getenv("TASKBOARD_INTEGRATION_ROOT")); configured != "" {
 		return filepath.Clean(configured)
@@ -925,13 +1180,21 @@ func trustedManagedCommit(ctx context.Context, path, sha string, accepted map[st
 // of one task. It deliberately starts from the fetched remote default branch
 // when available, so a local managed checkout can never seed a stale task
 // branch after another task has been merged remotely.
-func ensureTaskBranch(ctx context.Context, source, taskID string) (string, error) {
+func ensureTaskBranch(ctx context.Context, source, taskID string, configuredDefault ...string) (string, error) {
 	branch := taskIntegrationBranch(taskID)
 	if _, err := gitOutput(ctx, source, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
 		return branch, nil
 	}
 	base := "HEAD"
 	defaultBranch := repositoryBranch(ctx, source)
+	if len(configuredDefault) > 0 {
+		defaultBranch = integrationDefaultBranch(domain.Project{DefaultBranch: configuredDefault[0]}, defaultBranch)
+	}
+	// The task branch must start from the current configured default branch,
+	// not from a stale remote-tracking ref left by an earlier run.
+	if _, err := gitOutput(ctx, source, "fetch", "--no-tags", "origin", defaultBranch); err != nil {
+		return "", fmt.Errorf("aktueller Remote-Default-Branch konnte nicht gefetcht werden: %w", err)
+	}
 	if _, err := gitOutput(ctx, source, "rev-parse", "--verify", "origin/"+defaultBranch); err == nil {
 		base = "origin/" + defaultBranch
 	}
@@ -957,11 +1220,64 @@ func removeIntegrationWorktree(ctx context.Context, source, path string) error {
 	return nil
 }
 
+// patchFiles extracts paths from a reviewable git patch before apply is run.
+// `git apply --check` is intentionally non-mutating, so looking at the
+// worktree afterwards cannot provide conflict paths. The patch itself is the
+// durable source of that diagnostic.
+func patchFiles(patch string) []string {
+	seen := make(map[string]bool)
+	files := make([]string, 0)
+	add := func(path string) {
+		path = strings.TrimSpace(path)
+		if path == "" || path == "/dev/null" || seen[path] {
+			return
+		}
+		path = strings.TrimPrefix(path, "a/")
+		path = strings.TrimPrefix(path, "b/")
+		if path != "" && !seen[path] {
+			seen[path] = true
+			files = append(files, path)
+		}
+	}
+	for _, line := range strings.Split(patch, "\n") {
+		if strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "--- ") {
+			add(strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "+++ "), "--- ")))
+			continue
+		}
+		if strings.HasPrefix(line, "diff --git ") {
+			if marker := strings.Index(line, " b/"); marker >= 0 {
+				add(line[marker+3:])
+			}
+		}
+	}
+	return files
+}
+
+func gitConflictFiles(ctx context.Context, directory string) string {
+	if files, err := gitOutput(ctx, directory, "diff", "--name-only", "--diff-filter=U"); err == nil && strings.TrimSpace(files) != "" {
+		return files
+	}
+	status, err := gitOutput(ctx, directory, "status", "--porcelain")
+	if err != nil {
+		return ""
+	}
+	var files []string
+	for _, line := range strings.Split(status, "\n") {
+		if len(line) < 4 || (line[0] != 'U' && line[1] != 'U') {
+			continue
+		}
+		if path := strings.TrimSpace(line[3:]); path != "" {
+			files = append(files, path)
+		}
+	}
+	return strings.Join(files, "\n")
+}
+
 // applyRunPatchToTaskBranch integrates one isolated run into the durable task
 // branch. The managed source checkout is never modified, which means two
 // tasks can be accepted independently even while the remote default branch
 // advances between their runs.
-func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, taskID string) (string, error) {
+func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, taskID string, configuredDefault ...string) (string, error) {
 	if dirty, checkErr := exec.CommandContext(ctx, "git", "-C", source, "status", "--porcelain").Output(); checkErr != nil {
 		return "", checkErr
 	} else if strings.TrimSpace(string(dirty)) != "" {
@@ -975,6 +1291,9 @@ func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, 
 		return "", errors.New("dieser Run enthält keine übernehmbaren Änderungen")
 	}
 	defaultBranch := repositoryBranch(ctx, source)
+	if len(configuredDefault) > 0 {
+		defaultBranch = integrationDefaultBranch(domain.Project{DefaultBranch: configuredDefault[0]}, defaultBranch)
+	}
 	remoteRef := "origin/" + defaultBranch
 	if _, err := gitOutput(ctx, source, "fetch", "--no-tags", "origin", defaultBranch); err != nil {
 		// Local-only repositories are supported for tests and development. A
@@ -983,7 +1302,7 @@ func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, 
 			return "", fmt.Errorf("Remote-Stand konnte vor der Task-Integration nicht gelesen werden: %w", err)
 		}
 	}
-	branch, err := ensureTaskBranch(ctx, source, taskID)
+	branch, err := ensureTaskBranch(ctx, source, taskID, defaultBranch)
 	if err != nil {
 		return "", err
 	}
@@ -1001,26 +1320,39 @@ func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, 
 	defer func() { _ = removeIntegrationWorktree(context.Background(), source, integrationPath) }()
 	if _, err := gitOutput(ctx, integrationPath, "rev-parse", "--verify", remoteRef); err == nil {
 		if out, rebaseErr := exec.CommandContext(ctx, "git", "-C", integrationPath, "rebase", remoteRef).CombinedOutput(); rebaseErr != nil {
-			files, _ := gitOutput(ctx, integrationPath, "diff", "--name-only", "--diff-filter=U")
+			files := gitConflictFiles(ctx, integrationPath)
+			baseSHA, _ := gitOutput(ctx, source, "rev-parse", remoteRef)
+			headSHA, _ := gitOutput(ctx, integrationPath, "rev-parse", "HEAD")
 			_ = exec.CommandContext(context.Background(), "git", "-C", integrationPath, "rebase", "--abort").Run()
-			return "", managedCheckoutProblem("mit dem aktuellen Remote-Stand nicht konfliktfrei rebasierbar", files, strings.TrimSpace(string(out)))
+			return "", managedCheckoutProblem("mit dem aktuellen Remote-Stand nicht konfliktfrei rebasierbar", files, fmt.Sprintf("base=%s head=%s: %s", baseSHA, headSHA, strings.TrimSpace(string(out))))
 		}
 	}
-	check := exec.CommandContext(ctx, "git", "-C", integrationPath, "apply", "--check", "-")
-	check.Stdin = strings.NewReader(string(diff))
-	if out, checkErr := check.CombinedOutput(); checkErr != nil {
-		files, _ := gitOutput(ctx, integrationPath, "diff", "--name-only", "HEAD")
-		return "", managedCheckoutProblem("in der Task-Branch nicht konfliktfrei übernehmbar", files, strings.TrimSpace(string(out)))
-	}
+	// Do not preflight with `git apply --check`: it cannot model the three-way
+	// base and rejects additions that are already present after a rebase. The
+	// three-way apply below is the single source of truth for applicability.
 	apply := exec.CommandContext(ctx, "git", "-C", integrationPath, "apply", "--3way", "-")
 	apply.Stdin = strings.NewReader(string(diff))
 	if out, applyErr := apply.CombinedOutput(); applyErr != nil {
-		files, _ := gitOutput(ctx, integrationPath, "diff", "--name-only", "HEAD")
+		files := strings.Join(patchFiles(string(diff)), "\n")
+		baseSHA, _ := gitOutput(ctx, source, "rev-parse", remoteRef)
+		headSHA, _ := gitOutput(ctx, integrationPath, "rev-parse", "HEAD")
 		_ = exec.CommandContext(context.Background(), "git", "-C", integrationPath, "reset", "--hard", "HEAD").Run()
-		return "", managedCheckoutProblem("in einem Drei-Wege-Konflikt", files, strings.TrimSpace(string(out)))
+		return "", managedCheckoutProblem("in der Task-Branch in einem Drei-Wege-Konflikt", files, fmt.Sprintf("base=%s head=%s: %s", baseSHA, headSHA, strings.TrimSpace(string(out))))
 	}
 	if out, addErr := exec.CommandContext(ctx, "git", "-C", integrationPath, "add", "-A").CombinedOutput(); addErr != nil {
 		return "", errors.New(strings.TrimSpace(string(out)))
+	}
+	if status, statusErr := gitOutput(ctx, integrationPath, "status", "--porcelain"); statusErr != nil {
+		return "", fmt.Errorf("Task-Branch-Status konnte nach Drei-Wege-Apply nicht verifiziert werden: %w", statusErr)
+	} else if strings.TrimSpace(status) == "" {
+		// A rebased branch may already contain the exact change. Treat the
+		// successful three-way no-op as idempotent instead of attempting an
+		// empty audit commit.
+		commitSHA, headErr := gitOutput(ctx, integrationPath, "rev-parse", "HEAD")
+		if headErr != nil {
+			return "", fmt.Errorf("bestehender Task-Branch-Commit konnte nicht verifiziert werden: %w", headErr)
+		}
+		return commitSHA, nil
 	}
 	commit := exec.CommandContext(ctx, "git", "-C", integrationPath, "-c", "user.name=Taskboard", "-c", "user.email=taskboard@local", "commit", "-m", "taskboard: accept run "+runID)
 	if out, commitErr := commit.CombinedOutput(); commitErr != nil {
@@ -1031,6 +1363,14 @@ func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, 
 		return "", fmt.Errorf("Task-Integrationscommit konnte nicht verifiziert werden: %w", err)
 	}
 	return commitSHA, nil
+}
+
+func isIntegrationConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "konfliktfrei") || strings.Contains(message, "drei-wege-konflikt") || strings.Contains(message, "three-way conflict")
 }
 
 func syncManagedCheckout(ctx context.Context, path, branch string, acceptedCommitSHAs ...string) error {
@@ -1639,6 +1979,20 @@ func (w *Worker) Start(ctx context.Context) {
 			}
 		}
 	}()
+	go func() {
+		tick := time.NewTicker(integrationQueueInterval)
+		defer tick.Stop()
+		for {
+			if err := w.processIntegrationQueue(ctx); err != nil {
+				log.Printf("integration queue: %v", err)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+		}
+	}()
 }
 
 func (w *Worker) cleanupExpiredWorktrees(ctx context.Context) {
@@ -1833,6 +2187,17 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	if err != nil || source == "" {
 		return errors.New("Quell-Workspace für diesen Run nicht verfügbar")
 	}
+	project := domain.Project{}
+	if run.TargetProject != "" {
+		project, err = w.Store.Project(ctx, run.TargetProject)
+		if err != nil {
+			return fmt.Errorf("Projektkonfiguration für Integrations-Branch konnte nicht gelesen werden: %w", err)
+		}
+	}
+	defaultBranch := integrationDefaultBranch(project, repositoryBranch(ctx, source))
+	if defaultBranch == "" {
+		return errors.New("kein konfigurierter Default-Branch für die Integration verfügbar")
+	}
 	unlock, err := lockRepository(ctx, source)
 	if err != nil {
 		return fmt.Errorf("Repository-Übernahme konnte nicht gesperrt werden: %w", err)
@@ -1856,7 +2221,7 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	if err != nil || worktree == "" {
 		return errors.New("Worktree für diesen Run nicht verfügbar")
 	}
-	taskBranch, branchErr := ensureTaskBranch(ctx, source, run.TaskID)
+	taskBranch, branchErr := ensureTaskBranch(ctx, source, run.TaskID, defaultBranch)
 	if branchErr != nil {
 		return branchErr
 	}
@@ -1879,11 +2244,32 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 			}
 		}
 	}
+	// A rebase rewrites the accepted commit SHA. Recover by the durable run
+	// marker and exact patch even when the previously persisted SHA is no
+	// longer an ancestor of the task branch; otherwise a retry would apply the
+	// same delivery a second time.
+	if !alreadyCommitted {
+		recoveredSHA, recoveryErr := findUnpersistedTaskBranchCommit(ctx, source, taskBranch, worktree, runID)
+		if recoveryErr != nil {
+			return fmt.Errorf("rebasierter Task-Branch-Commit konnte nicht geprüft werden: %w", recoveryErr)
+		}
+		if recoveredSHA != "" {
+			commitSHA := recoveredSHA
+			alreadyCommitted = true
+			_ = w.Store.AddRunLog(ctx, runID, "warning", "Rebasierter Task-Branch-Commit anhand von Run-ID und vollständigem Diff wiedererkannt.")
+			delivery.AcceptedCommitSHA = commitSHA
+		}
+	}
 	commitSHA := delivery.AcceptedCommitSHA
 	if !alreadyCommitted {
 		var applyErr error
-		commitSHA, applyErr = applyRunPatchToTaskBranch(ctx, source, worktree, runID, run.TaskID)
+		commitSHA, applyErr = applyRunPatchToTaskBranch(ctx, source, worktree, runID, run.TaskID, defaultBranch)
 		if applyErr != nil {
+			if isIntegrationConflict(applyErr) {
+				if recordErr := w.recordIntegrationConflict(ctx, run, applyErr); recordErr != nil {
+					return fmt.Errorf("%w; Konfliktdiagnose konnte nicht vollständig persistiert werden: %v", applyErr, recordErr)
+				}
+			}
 			return applyErr
 		}
 	} else {
@@ -1891,6 +2277,17 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	}
 	if commitSHA == "" {
 		return errors.New("Task-Branch-Commit konnte nicht verifiziert werden")
+	}
+	baseSHA, baseErr := gitOutput(ctx, source, "rev-parse", "origin/"+defaultBranch)
+	if baseErr == nil {
+		_ = w.Store.AddRunLog(ctx, runID, "info", "Integrations-Basis-SHA: "+strings.TrimSpace(baseSHA))
+	}
+	_ = w.Store.AddRunLog(ctx, runID, "info", "Integrations-Head-SHA: "+strings.TrimSpace(commitSHA))
+	if err := w.Store.SetRunIntegration(ctx, runID, taskBranch, strings.TrimSpace(baseSHA), strings.TrimSpace(commitSHA), "queued", "", 0); err != nil {
+		return err
+	}
+	if _, err := w.Store.EnqueueIntegration(ctx, domain.IntegrationJob{RepositoryPath: source, RunID: runID, TaskID: run.TaskID, Branch: taskBranch, DefaultBranch: defaultBranch, BaseSHA: strings.TrimSpace(baseSHA), HeadSHA: strings.TrimSpace(commitSHA)}); err != nil {
+		return fmt.Errorf("Integrationswarteschlange konnte nicht angelegt werden: %w", err)
 	}
 	applied, err := w.Store.MarkRunApplied(ctx, runID, commitSHA)
 	if err != nil {
@@ -1938,6 +2335,30 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	}
 	_ = w.Store.AddComment(ctx, run.TaskID, "Taskboard", "Änderungen übernommen; Erfolgs-Transition wurde ausgeführt.")
 	return nil
+}
+
+// recordIntegrationConflict keeps a failed delivery actionable without
+// changing its succeeded/gated state. Once the operator resolves the branch
+// conflict, the same Apply action can be retried against the preserved run.
+func (w *Worker) recordIntegrationConflict(ctx context.Context, run domain.AgentRun, integrationErr error) error {
+	return w.recordIntegrationConflictByIDs(ctx, run.ID, run.TaskID, integrationErr)
+}
+
+func (w *Worker) recordIntegrationConflictByIDs(ctx context.Context, runID, taskID string, integrationErr error) error {
+	message := "Übernahme blockiert: " + integrationErr.Error()
+	var persistErrors []error
+	if err := w.Store.AddRunLog(ctx, runID, "error", message); err != nil {
+		persistErrors = append(persistErrors, fmt.Errorf("Run-Protokoll: %w", err))
+	}
+	moved, err := w.Store.MoveTaskToNeedsActionForHumanDecision(ctx, taskID)
+	if err != nil {
+		persistErrors = append(persistErrors, fmt.Errorf("Needs-action-Transition: %w", err))
+	} else if !moved {
+		persistErrors = append(persistErrors, errors.New("Needs-action-Transition wurde nicht ausgeführt"))
+	} else if err := w.Store.AddComment(ctx, taskID, "Taskboard", message+"\n\nBetroffene Dateien, Base-/Head-SHA und nächste Schritte stehen im Run-Protokoll bzw. in der Integrationswarteschlange. Nach manueller Konfliktlösung kann die Übernahme erneut gestartet werden."); err != nil {
+		persistErrors = append(persistErrors, fmt.Errorf("Task-Kommentar: %w", err))
+	}
+	return errors.Join(persistErrors...)
 }
 
 // Diff returns the reviewable patch from the isolated worktree. It never reads
