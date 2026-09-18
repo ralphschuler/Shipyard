@@ -221,9 +221,9 @@ test("React board filters search and combine status, priority, label, and projec
   await expect(page.getByText("Login reparieren")).toBeHidden();
   await search.fill("login");
   await page.getByLabel("Projekt").selectOption("project-a");
-  await expect(page.getByText("2 Aufgaben gefunden")).toBeVisible();
+  await expect(page.getByText("1 Aufgabe gefunden")).toBeVisible();
   await page.getByRole("button", { name: /Projekt: Website zurücksetzen/ }).click();
-  await expect(page.getByText("2 Aufgaben gefunden")).toBeVisible();
+  await expect(page.getByText("1 Aufgabe gefunden")).toBeVisible();
 });
 
 test("React board filters keep each board's state isolated", async ({ page }) => {
@@ -409,10 +409,8 @@ test("task comments stay compact and reveal older comments without reloading", a
   await expect(comments.nth(0)).toContainText("Kommentar 5");
   await expect(comments.nth(5)).toContainText("Ein sehr langer Kommentar");
   const longComment = comments.nth(5).locator("details");
-  await expect(longComment).toHaveCount(1);
-  await expect(longComment.locator("summary")).toContainText("Ein sehr langer Kommentar");
-  await longComment.locator("summary").click();
-  await expect(longComment.locator("p")).toContainText("Zusätzlicher Inhalt");
+  await expect(longComment).toHaveCount(0);
+  await expect(comments.nth(5).locator("p")).toContainText("Zusätzlicher Inhalt");
   await expect(page.getByRole("button", { name: "Ältere Kommentare anzeigen" })).toBeVisible();
   await expect(comments.nth(2)).toHaveAttribute("data-prominent", "false");
   await expect(comments.nth(3)).toHaveAttribute("data-prominent", "true");

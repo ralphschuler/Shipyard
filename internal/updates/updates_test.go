@@ -6,12 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestLoadLocalChangelogUsesConfiguredFileAndEnforcesSizeLimit(t *testing.T) {
@@ -127,6 +132,53 @@ func TestValidateArtifactURLRequiresConfiguredGitHubRepository(t *testing.T) {
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func TestTerminateRunningBundleStopsCandidateProcess(t *testing.T) {
+	if os.Getenv("TASKBOARD_BUNDLE_HELPER") == "1" {
+		select {}
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=TestTerminateRunningBundleStopsCandidateProcess")
+	cmd.Env = append(os.Environ(), "TASKBOARD_BUNDLE_HELPER=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := terminateRunningBundle(os.Args[0]); err != nil {
+		_ = cmd.Process.Kill()
+		t.Fatalf("terminate candidate process: %v", err)
+	}
+	if err := cmd.Wait(); err == nil {
+		t.Fatal("candidate process remained running after rollback termination")
+	}
+}
+
+func TestTaskboardRunnerStaysAliveForRollbackHandoff(t *testing.T) {
+	dir := t.TempDir()
+	fakeBinary := filepath.Join(dir, "clean-exit-child.sh")
+	if err := os.WriteFile(fakeBinary, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	runner := filepath.Join("..", "..", "deploy", "taskboard-runner.sh")
+	cmd := exec.Command("sh", runner)
+	cmd.Env = append(os.Environ(), "TASKBOARD_BINARY="+fakeBinary)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("runner exited after clean child exit: %v", err)
+	}
+	if err := cmd.Process.Signal(syscall.SIGUSR1); err != nil {
+		t.Fatalf("runner rejected supervisor restart handoff: %v", err)
+	}
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("runner exited during rollback handoff: %v", err)
+	}
+}
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
@@ -349,6 +401,29 @@ func TestOrchestratorPassesVerifiedArtifactToSwitch(t *testing.T) {
 	}
 }
 
+func TestOrchestratorDoesNotHealthCheckTheOldProcessAfterVerifiedRestart(t *testing.T) {
+	healthCalled := false
+	noop := func(context.Context, Snapshot) error { return nil }
+	o := Orchestrator{
+		Backup: noop, DownloadAndVerify: func(context.Context, string, string) ([]byte, error) { return []byte("artifact"), nil },
+		VerifyArtifact: func(context.Context, Snapshot, []byte) error { return nil },
+		Verify:         noop, Migrate: noop, Switch: func(context.Context, Snapshot, []byte) error { return nil },
+		Restart: noop,
+		Health: func(context.Context, Snapshot) error {
+			healthCalled = true
+			return errors.New("old process must not be accepted")
+		},
+		RestartVerifiesHealth: true,
+		Rollback:              noop,
+	}
+	if err := o.Install(context.Background(), Snapshot{Status: "update_available", Installable: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if healthCalled {
+		t.Fatal("generic healthcheck must not validate the old process after a verified restart")
+	}
+}
+
 func TestOrchestratorRequiresArtifactSignatureVerificationBeforeMutation(t *testing.T) {
 	backupCalled := false
 	o := Orchestrator{
@@ -405,4 +480,362 @@ func TestOrchestratorBlocksBusyRunsAndDoesNotMutate(t *testing.T) {
 	if err == nil || called {
 		t.Fatalf("error = %v, backup called = %v", err, called)
 	}
+}
+
+func TestProductionAdapterSwitchAndRollbackKeepOneBinaryBundle(t *testing.T) {
+	dir := t.TempDir()
+	p := &productionAdapter{binary: filepath.Join(dir, "taskboard"), previous: filepath.Join(dir, "taskboard.previous-update")}
+	oldBundle := []byte("old-backend-with-old-embedded-assets")
+	newBundle := []byte("new-backend-with-new-embedded-assets")
+	if err := os.WriteFile(p.binary, oldBundle, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.switchBinary(context.Background(), Snapshot{}, newBundle); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(p.binary)
+	if err != nil || string(got) != string(newBundle) {
+		t.Fatalf("installed bundle = %q, err = %v", got, err)
+	}
+	if err := p.rollback(context.Background(), Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = os.ReadFile(p.binary)
+	if err != nil || string(got) != string(oldBundle) {
+		t.Fatalf("rolled back bundle = %q, err = %v", got, err)
+	}
+}
+
+func TestProductionAdapterRestartValidatesInstalledBundle(t *testing.T) {
+	p := &productionAdapter{binary: filepath.Join(t.TempDir(), "missing-taskboard")}
+	if err := p.restart(context.Background(), Snapshot{}); err == nil {
+		t.Fatal("restart must reject a candidate that cannot validate its embedded bundle")
+	}
+}
+
+func TestProductionAdapterRestartWaitsForMonitorResult(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "taskboard")
+	started := filepath.Join(dir, "monitor-started")
+	release := filepath.Join(dir, "release-monitor")
+	marker := filepath.Join(dir, "monitor-finished")
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\n--validate-embedded-app) exit 0 ;;\n--monitor-restart) : > %q; while [ ! -f %q ]; do sleep 0.01; done; : > %q; exit 0 ;;\n*) exit 2 ;;\nesac\n", started, release, marker)
+	if err := os.WriteFile(binary, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	p := &productionAdapter{binary: binary, previous: filepath.Join(dir, "previous")}
+	go func() {
+		if !waitForRestartHelper(t, started) {
+			return
+		}
+		_ = os.WriteFile(release, []byte("release"), 0600)
+	}()
+	if err := p.restart(context.Background(), Snapshot{Release: Release{Version: "v2", Commit: "candidate"}}); err != nil {
+		t.Fatalf("restart() error = %v", err)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("monitor completion was not observed: %v", err)
+	}
+}
+
+func TestRequestSupervisorRestartSignalsConfiguredSupervisor(t *testing.T) {
+	if os.Getenv("TASKBOARD_SUPERVISOR_SIGNAL_HELPER") == "1" {
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, syscall.SIGUSR1)
+		if marker := os.Getenv("TASKBOARD_SUPERVISOR_SIGNAL_READY"); marker != "" {
+			_ = os.WriteFile(marker, []byte("ready"), 0600)
+		}
+		<-signals
+		os.Exit(0)
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=TestRequestSupervisorRestartSignalsConfiguredSupervisor")
+	ready := filepath.Join(t.TempDir(), "ready")
+	cmd.Env = append(os.Environ(), "TASKBOARD_SUPERVISOR_SIGNAL_HELPER=1", "TASKBOARD_SUPERVISOR_SIGNAL_READY="+ready)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill() }()
+	if !waitForRestartHelper(t, ready) {
+		t.Fatal("supervisor helper did not become ready")
+	}
+
+	if err := requestSupervisorRestartPID(context.Background(), cmd.Process.Pid); err != nil {
+		t.Fatalf("requestSupervisorRestart() error = %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("supervisor helper did not receive restart signal: %v", err)
+	}
+}
+
+func TestRestartMonitorWaitsForNewHealthAndRollsBackOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "taskboard")
+	previous := filepath.Join(dir, "taskboard.previous-update")
+	if err := os.WriteFile(binary, []byte("new-bundle"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(previous, []byte("old-bundle"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	phase := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		status := http.StatusServiceUnavailable
+		body := ""
+		switch phase {
+		case 0:
+			phase = 1
+		case 1:
+			phase = 2
+			status = http.StatusOK
+		case 2:
+			status = http.StatusOK
+			if strings.HasSuffix(r.URL.Path, "build-info.json") {
+				body = `{"version":"v2.0.0","commit":"newcommit"}`
+			}
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := monitorRestart(ctx, restartMonitorConfig{
+		healthURL:    "http://restart.test/healthz",
+		buildInfoURL: "http://restart.test/app/build-info.json",
+		binary:       binary,
+		previous:     previous,
+		version:      "v2.0.0",
+		commit:       "newcommit",
+		poll:         1 * time.Millisecond,
+		client:       client,
+	})
+	if err != nil {
+		t.Fatalf("monitor succeeded unexpectedly: %v", err)
+	}
+
+	phase = 3
+	terminated := false
+	restarted := false
+	err = monitorRestart(ctx, restartMonitorConfig{
+		healthURL:    "http://restart.test/healthz",
+		buildInfoURL: "http://restart.test/app/build-info.json",
+		binary:       binary,
+		previous:     previous,
+		version:      "v2.0.0",
+		commit:       "newcommit",
+		poll:         1 * time.Millisecond,
+		wait:         5 * time.Millisecond,
+		client:       client,
+		terminate: func(context.Context) error {
+			terminated = true
+			return nil
+		},
+		restart: func(context.Context) error {
+			restarted = true
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("monitor must fail when the restarted service never becomes healthy")
+	}
+	if !terminated {
+		t.Fatal("monitor must terminate the failed restarted bundle before restoring it")
+	}
+	if !restarted {
+		t.Fatal("monitor must restart the restored bundle after rollback")
+	}
+	got, readErr := os.ReadFile(binary)
+	if readErr != nil || string(got) != "old-bundle" {
+		t.Fatalf("rollback bundle = %q, err = %v", got, readErr)
+	}
+}
+
+func TestRestartMonitorEndToEndRestartsPreviousBundleAndVerifiesIt(t *testing.T) {
+	if os.Getenv("TASKBOARD_RESTART_HELPER") == "1" {
+		serveRestartHelper(t)
+		return
+	}
+
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "candidate-bundle")
+	previous := filepath.Join(dir, "previous-bundle")
+	if err := os.WriteFile(binary, []byte("candidate"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(previous, []byte("previous"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	phase := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		status := http.StatusOK
+		body := `{"version":"v1.0.0","commit":"old-commit"}`
+		switch phase {
+		case 0:
+			phase = 1
+		case 1:
+			if r.URL.Path == "/healthz" {
+				status = http.StatusOK
+			} else {
+				body = `{"version":"v2.0.0","commit":"candidate"}`
+			}
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})
+	started := make(chan struct{})
+	client := &http.Client{Transport: transport}
+
+	terminated := false
+	restarted := false
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := monitorRestart(ctx, restartMonitorConfig{
+		healthURL:    "http://restart.test/healthz",
+		buildInfoURL: "http://restart.test/app/build-info.json",
+		binary:       binary,
+		previous:     previous,
+		version:      "v1.0.0",
+		commit:       "old-commit",
+		poll:         time.Millisecond,
+		wait:         100 * time.Millisecond,
+		client:       client,
+		terminate: func(context.Context) error {
+			terminated = true
+			return nil
+		},
+		restart: func(context.Context) error {
+			restarted = true
+			phase = 2
+			cmd := exec.Command(os.Args[0], "-test.run=TestRestartMonitorEndToEndRestartsPreviousBundleAndVerifiesIt")
+			cmd.Env = append(os.Environ(), "TASKBOARD_RESTART_HELPER=1", "TASKBOARD_RESTART_MARKER="+filepath.Join(dir, "started"))
+			if err := cmd.Start(); err != nil {
+				return err
+			}
+			close(started)
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("monitor must fail the candidate update")
+	}
+	if !terminated || !restarted {
+		t.Fatalf("rollback state: terminated=%v restarted=%v", terminated, restarted)
+	}
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("restored bundle was not started")
+	}
+	if got, readErr := os.ReadFile(binary); readErr != nil || string(got) != "previous" {
+		t.Fatalf("restored binary = %q, err = %v", got, readErr)
+	}
+	if !waitForRestartHelper(t, filepath.Join(dir, "started")) {
+		t.Fatal("restored bundle did not become reachable")
+	}
+	if !endpointHealthy(context.Background(), client, "http://restart.test/healthz") || !buildInfoMatches(context.Background(), client, "http://restart.test/app/build-info.json", "v1.0.0", "old-commit") {
+		t.Fatal("restored bundle health/build metadata verification failed")
+	}
+}
+
+func TestRestartMonitorVerifiesEmbeddedAppAfterSupervisorRollback(t *testing.T) {
+	state := 0 // old process, stopping, candidate process, supervisor-restored old process
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			if state == 0 {
+				state = 1
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			if state == 1 {
+				state = 2
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.URL.Path == "/app/build-info.json" {
+			if state == 2 {
+				_, _ = io.WriteString(w, `{"version":"v2.0.0","commit":"candidate"}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"version":"v1.0.0","commit":"old-commit"}`)
+			return
+		}
+		if r.URL.Path == "/app/" {
+			if state == 2 {
+				_, _ = io.WriteString(w, `<div id="root"><script src="/app/assets/app-candidate-12345678.js"></script></div>`)
+				return
+			}
+			_, _ = io.WriteString(w, `<div id="root"><script src="/app/assets/app-old-12345678.js"></script></div>`)
+			return
+		}
+		if r.URL.Path == "/app/assets/app-old-12345678.js" && state != 2 {
+			_, _ = io.WriteString(w, "old asset")
+			return
+		}
+		http.NotFound(w, r)
+	})
+	socketPath := filepath.Join(t.TempDir(), "taskboard.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Skipf("real HTTP supervisor test requires socket binding: %v", err)
+	}
+	server := &http.Server{Handler: handler}
+	go func() { _ = server.Serve(listener) }()
+	defer server.Close()
+	client := &http.Client{Transport: &http.Transport{DialContext: func(context.Context, string, string) (net.Conn, error) {
+		return net.Dial("unix", socketPath)
+	}}}
+	baseURL := "http://taskboard.test"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	err = monitorRestart(ctx, restartMonitorConfig{
+		healthURL:       baseURL + "/healthz",
+		buildInfoURL:    baseURL + "/app/build-info.json",
+		appURL:          baseURL + "/app/",
+		version:         "v2.0.0",
+		commit:          "candidate",
+		previousVersion: "v1.0.0",
+		previousCommit:  "old-commit",
+		poll:            time.Millisecond,
+		wait:            100 * time.Millisecond,
+		client:          client,
+		terminate:       func(context.Context) error { return nil },
+		start:           func(context.Context) error { return nil },
+		restart: func(context.Context) error {
+			state = 3
+			return nil
+		},
+	})
+	if err == nil {
+		t.Fatal("candidate with a missing fingerprint asset must roll back")
+	}
+	if state != 2 {
+		t.Fatalf("supervisor did not restore the previous process, state=%d", state)
+	}
+}
+
+func serveRestartHelper(t *testing.T) {
+	marker := os.Getenv("TASKBOARD_RESTART_MARKER")
+	if marker != "" {
+		if err := os.WriteFile(marker, []byte("started"), 0600); err != nil {
+			os.Exit(2)
+		}
+	}
+}
+
+func waitForRestartHelper(t *testing.T, marker string) bool {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(marker); err == nil {
+			return true
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return false
 }

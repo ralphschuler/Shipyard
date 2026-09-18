@@ -4,16 +4,21 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"taskboard/internal/store"
 	"time"
 )
@@ -33,6 +38,9 @@ type productionAdapter struct {
 	backupScript string
 	backupDir    string
 	databaseURL  string
+	healthURL    string
+	buildInfoURL string
+	appURL       string
 	writeMu      sync.Mutex
 }
 
@@ -52,6 +60,9 @@ func NewProductionOrchestrator(s *store.Store) *Orchestrator {
 		backupScript: filepath.Join(root, "deploy", "backup-postgres.sh"),
 		backupDir:    envOr("TASKBOARD_BACKUP_DIR", filepath.Join(root, "backups")),
 		databaseURL:  envOr("DATABASE_URL", "postgres://taskboard:taskboard@localhost:5432/taskboard?sslmode=disable"),
+		healthURL:    productionHealthURL,
+		buildInfoURL: "http://127.0.0.1:8080/app/build-info.json",
+		appURL:       "http://127.0.0.1:8080/app/",
 	}
 	return &Orchestrator{
 		Backup:            p.backup,
@@ -60,12 +71,13 @@ func NewProductionOrchestrator(s *store.Store) *Orchestrator {
 		Verify:            p.verify,
 		Migrate:           p.migrate,
 		Switch:            p.switchBinary,
-		// Restart is intentionally deferred until after the HTTP response. The
-		// helper runs as a transient systemd unit outside taskboard.service.
-		Restart:      p.restart,
-		Health:       p.health,
-		Rollback:     p.rollback,
-		AfterSuccess: p.afterSuccess,
+		// Restart validates and synchronously monitors the supervisor handoff.
+		// A successful install is never reported while the old process is still
+		// serving or before the candidate bundle has been verified.
+		Restart:               p.restart,
+		Health:                p.health,
+		RestartVerifiesHealth: true,
+		Rollback:              p.rollback,
 	}
 }
 
@@ -169,14 +181,35 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 	return os.Rename(tmpName, path)
 }
 
-func (p *productionAdapter) restart(context.Context, Snapshot) error {
-	// The actual restart is scheduled by AfterSuccess. Returning successfully
-	// here lets the API send its JSON response before systemd stops this process.
+func (p *productionAdapter) restart(ctx context.Context, snapshot Snapshot) error {
+	// The current process still owns the HTTP socket, so stopping it here would
+	// truncate the update response. Execute the newly installed binary in its
+	// isolated validation mode instead; this verifies the exact bundle that the
+	// supervisor will start, including its embedded app and build metadata.
+	cmd := exec.CommandContext(ctx, p.binary, "--validate-embedded-app", snapshot.Release.Version, snapshot.Release.Commit)
+	cmd.Stdout = io.Discard
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		return errors.New("new release failed embedded app validation")
+	}
+	// The monitor asks the stable supervisor runner to replace the old child,
+	// waits for the old process to disappear, verifies the complete candidate
+	// bundle, and restores the previous binary on failure. Run it synchronously:
+	// returning from Restart before this result would report a false success.
+	healthURL := envOr(p.healthURL, productionHealthURL)
+	buildInfoURL := envOr(p.buildInfoURL, "http://127.0.0.1:8080/app/build-info.json")
+	appURL := envOr(p.appURL, "http://127.0.0.1:8080/app/")
+	monitor := exec.Command(p.binary, "--monitor-restart", healthURL, buildInfoURL, appURL, p.binary, p.previous, snapshot.Release.Version, snapshot.Release.Commit, snapshot.Current.Version, snapshot.Current.Commit)
+	monitor.Stdout = io.Discard
+	monitor.Stderr = io.Discard
+	if err := monitor.Run(); err != nil {
+		return errors.New("new release restart monitor failed")
+	}
 	return nil
 }
 
 func (p *productionAdapter) health(ctx context.Context, _ Snapshot) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, productionHealthURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, envOr(p.healthURL, productionHealthURL), nil)
 	if err != nil {
 		return err
 	}
@@ -187,6 +220,317 @@ func (p *productionAdapter) health(ctx context.Context, _ Snapshot) error {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		return fmt.Errorf("healthcheck returned HTTP %d", res.StatusCode)
+	}
+	return nil
+}
+
+type restartMonitorConfig struct {
+	healthURL       string
+	buildInfoURL    string
+	appURL          string
+	binary          string
+	previous        string
+	version         string
+	commit          string
+	previousVersion string
+	previousCommit  string
+	terminate       func(context.Context) error
+	poll            time.Duration
+	wait            time.Duration
+	client          *http.Client
+	restart         func(context.Context) error
+	start           func(context.Context) error
+}
+
+// RunRestartMonitor is the small supervisor hand-off used by the production
+// binary. It returns an error so the CLI can exit with the service's
+// Restart=on-failure status after restoring the previous bundle.
+func RunRestartMonitor(healthURL, buildInfoURL, appURL, binary, previous, version, commit, previousVersion, previousCommit string) error {
+	return monitorRestart(context.Background(), restartMonitorConfig{
+		healthURL:       healthURL,
+		buildInfoURL:    buildInfoURL,
+		appURL:          appURL,
+		binary:          binary,
+		previous:        previous,
+		version:         version,
+		commit:          commit,
+		previousVersion: previousVersion,
+		previousCommit:  previousCommit,
+		terminate:       func(context.Context) error { return terminateRunningBundle(binary) },
+		poll:            250 * time.Millisecond,
+		wait:            30 * time.Second,
+		restart:         requestSupervisorRestart,
+		start:           requestSupervisorRestart,
+	})
+}
+
+// requestSupervisorRestart asks the service runner (the systemd MainPID) to
+// start the currently installed bundle. The monitor is intentionally a child
+// process, not the service MainPID, so systemd always supervises the runner.
+func requestSupervisorRestart(ctx context.Context) error {
+	pidText := strings.TrimSpace(os.Getenv("TASKBOARD_SUPERVISOR_PID"))
+	if pidText == "" {
+		return errors.New("supervisor pid is not configured")
+	}
+	pid, err := strconv.Atoi(pidText)
+	if err != nil || pid <= 1 {
+		return errors.New("supervisor pid is invalid")
+	}
+	return requestSupervisorRestartPID(ctx, pid)
+}
+
+func requestSupervisorRestartPID(ctx context.Context, pid int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("find supervisor: %w", err)
+	}
+	if err := process.Signal(syscall.SIGUSR1); err != nil {
+		return fmt.Errorf("signal supervisor: %w", err)
+	}
+	return nil
+}
+
+func monitorRestart(ctx context.Context, cfg restartMonitorConfig) error {
+	if cfg.poll <= 0 {
+		cfg.poll = 250 * time.Millisecond
+	}
+	if cfg.wait <= 0 {
+		cfg.wait = 30 * time.Second
+	}
+	if cfg.terminate == nil {
+		cfg.terminate = func(context.Context) error { return terminateRunningBundle(cfg.binary) }
+	}
+	if cfg.restart == nil {
+		cfg.restart = func(context.Context) error { return nil }
+	}
+	if cfg.start == nil {
+		cfg.start = func(context.Context) error { return nil }
+	}
+	client := cfg.client
+	if client == nil {
+		client = &http.Client{Timeout: 2 * time.Second}
+	}
+	cfg.client = client
+	deadline := time.NewTimer(cfg.wait)
+	defer deadline.Stop()
+	if err := cfg.start(ctx); err != nil {
+		return rollbackAfterRestartError(cfg, fmt.Errorf("request supervisor restart: %w", err))
+	}
+
+	// First observe the old service going away. A healthy response here is
+	// still the old process and must never count as update success.
+	for {
+		if err := ctx.Err(); err != nil {
+			return rollbackAfterRestartError(cfg, err)
+		}
+		if !endpointHealthy(ctx, client, cfg.healthURL) {
+			break
+		}
+		if !waitForMonitorTick(ctx, deadline, cfg.poll) {
+			return rollbackAfterRestartError(cfg, errors.New("old service did not stop"))
+		}
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return rollbackAfterRestartError(cfg, err)
+		}
+		if bundleMatches(ctx, client, cfg.healthURL, cfg.buildInfoURL, cfg.appURL, cfg.version, cfg.commit) {
+			return nil
+		}
+		if !waitForMonitorTick(ctx, deadline, cfg.poll) {
+			return rollbackAfterRestartError(cfg, errors.New("new service did not become healthy with matching build metadata"))
+		}
+	}
+}
+
+func waitForMonitorTick(ctx context.Context, deadline *time.Timer, poll time.Duration) bool {
+	timer := time.NewTimer(poll)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-deadline.C:
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func endpointHealthy(ctx context.Context, client *http.Client, endpoint string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer res.Body.Close()
+	return res.StatusCode == http.StatusOK
+}
+
+func buildInfoMatches(ctx context.Context, client *http.Client, endpoint, version, commit string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return false
+	}
+	var info struct {
+		Version string `json:"version"`
+		Commit  string `json:"commit"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&info); err != nil {
+		return false
+	}
+	return info.Version == version && info.Commit == commit
+}
+
+var appAssetReference = regexp.MustCompile(`(?:src|href)="([^"]+)"`)
+var fingerprintedAsset = regexp.MustCompile(`-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$`)
+
+func bundleMatches(ctx context.Context, client *http.Client, healthURL, buildInfoURL, appURL, version, commit string) bool {
+	if !endpointHealthy(ctx, client, healthURL) || !buildInfoMatches(ctx, client, buildInfoURL, version, commit) {
+		return false
+	}
+	if strings.TrimSpace(appURL) == "" {
+		return true
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, appURL, nil)
+	if err != nil {
+		return false
+	}
+	res, err := client.Do(req)
+	if err != nil || res.StatusCode != http.StatusOK {
+		if res != nil {
+			res.Body.Close()
+		}
+		return false
+	}
+	index, err := io.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil || !strings.Contains(string(index), `<div id="root">`) {
+		return false
+	}
+	refs := appAssetReference.FindAllSubmatch(index, -1)
+	if len(refs) == 0 {
+		return false
+	}
+	base, err := url.Parse(appURL)
+	if err != nil {
+		return false
+	}
+	for _, ref := range refs {
+		asset, err := url.Parse(string(ref[1]))
+		if err != nil || asset.IsAbs() || asset.Host != "" {
+			return false
+		}
+		if !fingerprintedAsset.MatchString(filepath.Base(asset.Path)) {
+			return false
+		}
+		assetURL := base.ResolveReference(asset)
+		assetReq, err := http.NewRequestWithContext(ctx, http.MethodGet, assetURL.String(), nil)
+		if err != nil {
+			return false
+		}
+		assetRes, err := client.Do(assetReq)
+		if err != nil || assetRes.StatusCode != http.StatusOK {
+			if assetRes != nil {
+				assetRes.Body.Close()
+			}
+			return false
+		}
+		assetRes.Body.Close()
+	}
+	return true
+}
+
+func rollbackAfterRestartError(cfg restartMonitorConfig, cause error) error {
+	if err := cfg.terminate(context.Background()); err != nil {
+		cause = fmt.Errorf("%w; terminate failed bundle: %v", cause, err)
+	}
+	previous, err := os.ReadFile(cfg.previous)
+	if err != nil {
+		return fmt.Errorf("%w; read rollback bundle: %v", cause, err)
+	}
+	if err := atomicWrite(cfg.binary, previous, 0755); err != nil {
+		return fmt.Errorf("%w; restore rollback bundle: %v", cause, err)
+	}
+	if err := cfg.restart(context.Background()); err != nil {
+		return fmt.Errorf("%w; restart rollback bundle: %v", cause, err)
+	}
+	if cfg.previousVersion != "" || cfg.previousCommit != "" {
+		verifyCtx, cancel := context.WithTimeout(context.Background(), cfg.wait)
+		defer cancel()
+		rollbackDeadline := time.NewTimer(cfg.wait)
+		defer rollbackDeadline.Stop()
+		for {
+			if bundleMatches(verifyCtx, cfg.client, cfg.healthURL, cfg.buildInfoURL, cfg.appURL, cfg.previousVersion, cfg.previousCommit) {
+				return cause
+			}
+			if !waitForMonitorTick(verifyCtx, rollbackDeadline, cfg.poll) {
+				break
+			}
+		}
+		return fmt.Errorf("%w; restored supervisor bundle failed health/app verification", cause)
+	}
+	return cause
+}
+
+// terminateRunningBundle stops the process that systemd started from the
+// candidate binary. The monitor is exec'd from the same binary, so it skips
+// itself. Stopping the failed process before restoring the file is essential:
+// a running process keeps serving its in-memory embedded assets after the
+// on-disk binary has been rolled back.
+func terminateRunningBundle(binary string) error {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return fmt.Errorf("read process table: %w", err)
+	}
+	var processes []*os.Process
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid == os.Getpid() {
+			continue
+		}
+		executable, err := os.Readlink(filepath.Join("/proc", entry.Name(), "exe"))
+		if err != nil || filepath.Clean(executable) != filepath.Clean(binary) {
+			continue
+		}
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			continue
+		}
+		if err := process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return fmt.Errorf("stop process %d: %w", pid, err)
+		}
+		processes = append(processes, process)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(processes) > 0 && time.Now().Before(deadline) {
+		remaining := processes[:0]
+		for _, process := range processes {
+			if err := process.Signal(syscall.Signal(0)); err == nil {
+				remaining = append(remaining, process)
+			}
+		}
+		processes = remaining
+		if len(processes) > 0 {
+			time.Sleep(25 * time.Millisecond)
+		}
+	}
+	for _, process := range processes {
+		_ = process.Signal(syscall.SIGKILL)
 	}
 	return nil
 }
@@ -202,15 +546,4 @@ func (p *productionAdapter) rollback(_ context.Context, _ Snapshot) error {
 		return fmt.Errorf("restore rollback binary: %w", err)
 	}
 	return nil
-}
-
-func (p *productionAdapter) afterSuccess() {
-	// taskboard.service has NoNewPrivileges=true, so a process-local sudo or
-	// systemd-run cannot elevate to restart itself. Restart=on-failure is already
-	// part of the hardened unit; exit only after net/http has flushed the success
-	// response and let systemd start the atomically installed binary.
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		os.Exit(75)
-	}()
 }

@@ -49,6 +49,24 @@ var (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "--embedded-app-http" {
+		address := envOrDefault("TASKBOARD_ADDR", defaultAddress)
+		log.Fatal(http.ListenAndServe(address, web.EmbeddedAppHandler()))
+	}
+	if len(os.Args) == 4 && os.Args[1] == "--validate-embedded-app" {
+		if err := web.ValidateEmbeddedApp(os.Args[2], os.Args[3]); err != nil {
+			log.Print(err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) == 11 && os.Args[1] == "--monitor-restart" {
+		if err := updates.RunRestartMonitor(os.Args[2], os.Args[3], os.Args[4], os.Args[5], os.Args[6], os.Args[7], os.Args[8], os.Args[9], os.Args[10]); err != nil {
+			log.Print(err)
+			os.Exit(75)
+		}
+		return
+	}
 	setBuildMetadata()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

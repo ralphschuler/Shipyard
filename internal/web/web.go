@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
@@ -30,8 +31,45 @@ import (
 	"time"
 )
 
-//go:embed templates/*.html static/*
+//go:embed templates/*.html static/* appdist/*
 var files embed.FS
+
+var appDist, _ = fs.Sub(files, "appdist")
+
+// ValidateEmbeddedApp is used by the update adapter before the supervisor
+// restarts the service. It deliberately reads only the embedded filesystem so
+// a stale checkout directory can never make a candidate look healthy.
+func ValidateEmbeddedApp(expectedVersion, expectedCommit string) error {
+	index, err := fs.ReadFile(appDist, "index.html")
+	if err != nil || !bytes.Contains(index, []byte(`<div id="root">`)) {
+		return errors.New("embedded app index is unavailable")
+	}
+	var buildInfo struct {
+		Version string `json:"version"`
+		Commit  string `json:"commit"`
+	}
+	info, err := fs.ReadFile(appDist, "build-info.json")
+	if err != nil || json.Unmarshal(info, &buildInfo) != nil || buildInfo.Version == "" || buildInfo.Commit == "" {
+		return errors.New("embedded app build metadata is incomplete")
+	}
+	if (expectedVersion != "" && buildInfo.Version != expectedVersion) || (expectedCommit != "" && buildInfo.Commit != expectedCommit) {
+		return errors.New("embedded app build metadata does not match the release")
+	}
+	return nil
+}
+
+// EmbeddedAppHandler exposes only the immutable production app surface for
+// bundle smoke tests. It intentionally avoids the database-backed App setup,
+// while using the same embedded filesystem and route shape as Register.
+func EmbeddedAppHandler() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("GET /app/", http.StripPrefix("/app/", http.FileServerFS(appDist)))
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok","database":"embedded-test"}`))
+	})
+	return mux
+}
 
 type App struct {
 	store        *store.Store
@@ -513,10 +551,10 @@ func NewWithUpdateOrchestrator(s *store.Store, worker *automation.Worker, orches
 	return app
 }
 func (a *App) Register(m *http.ServeMux) {
-	// The React/shadcn client is served as a protected preview during the
-	// migration. It shares the existing browser session and talks to /api/v1;
-	// legacy views stay available until their replacement is feature-complete.
-	m.Handle("GET /app/", http.StripPrefix("/app/", http.FileServer(http.Dir("frontend/dist"))))
+	// The React/shadcn client is part of this binary. Serving only the embedded
+	// release assets prevents a checkout's stale frontend/dist from surviving
+	// an update and keeps HTML, fingerprints, and backend metadata in lockstep.
+	m.Handle("GET /app/", http.StripPrefix("/app/", http.FileServerFS(appDist)))
 	m.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		// Keep the browser console clean without introducing a separately
 		// deployed asset; the actual icon remains embedded under /static.

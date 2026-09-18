@@ -8,6 +8,25 @@ permissions:
   contents: read
 
 jobs:
+  frontend:
+    name: Frontend build and browser tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend
+        run: cd frontend && timeout 120s npm ci && timeout 120s npm run build
+      - name: Frontend lint
+        run: timeout 120s npm run lint --prefix frontend
+      - name: Frontend browser tests
+        # The embedded-bundle check needs a running production binary and is
+        # covered by the dedicated production-browser job below.  Keep the
+        # Vite-backed suite here focused on application behaviour.
+        run: timeout 120s npm run test:e2e --prefix frontend -- --grep-invert "production app serves matching build metadata and every fingerprinted asset"
   go:
     name: Go correctness and race detection
     runs-on: ubuntu-24.04
@@ -18,9 +37,39 @@ jobs:
         with:
           go-version: stable
           check-latest: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build embedded frontend for Go tests
+        run: timeout 120s npm ci --prefix frontend && timeout 120s npm run build --prefix frontend
       - name: Vet
-        run: go vet ./...
+        run: timeout 120s go vet ./...
       - name: Unit and integration tests (shuffled)
-        run: go test -shuffle=on -count=3 ./...
+        run: timeout 120s go test -shuffle=on -count=3 ./...
       - name: Race detector
-        run: go test -race ./...
+        run: timeout 120s go test -race ./...
+
+  production-browser:
+    name: Embedded production browser tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build embedded production binary
+        run: timeout 120s npm ci --prefix frontend && timeout 120s npm run build --prefix frontend && timeout 120s go build -o /tmp/taskboard-embedded ./cmd/taskboard
+      - name: Start embedded production server
+        run: TASKBOARD_ADDR=127.0.0.1:8080 /tmp/taskboard-embedded --embedded-app-http > /tmp/taskboard-embedded.log 2>&1 &
+      - name: Run browser tests against embedded production server
+        # The production server is intentionally exercised by the bundle
+        # smoke test only; the remaining specs rely on Vite fixtures/routes.
+        run: timeout 120s env TASKBOARD_E2E_BASE_URL=http://127.0.0.1:8080 npm run test:e2e --prefix frontend -- e2e/embedded-bundle.spec.ts
