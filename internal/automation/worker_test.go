@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -906,6 +907,58 @@ func TestCLISandboxInvocationUsesProfileIsolation(t *testing.T) {
 func TestCLISandboxBlocksReleaseBridgeDirectExecution(t *testing.T) {
 	if _, _, err := cliSandboxInvocation("/workspace/run", "release-bridge", "sh", nil); err == nil || !strings.Contains(err.Error(), "hostseitigen Release-Bridge") {
 		t.Fatalf("release bridge was not blocked: %v", err)
+	}
+}
+
+func TestValidateRunSandboxSnapshotRejectsManipulatedPolicy(t *testing.T) {
+	workspace := t.TempDir()
+	tests := []struct {
+		name   string
+		policy sandbox.Profile
+	}{
+		{
+			name:   "unapproved mount",
+			policy: sandbox.Profile{Name: "development", Mounts: []string{"host-root"}, NetworkMode: "none", WriteMode: "worktree", Active: true},
+		},
+		{
+			name:   "unapproved network",
+			policy: sandbox.Profile{Name: "development", Mounts: []string{"worktree"}, NetworkMode: "host", WriteMode: "worktree", Active: true},
+		},
+		{
+			name:   "built-in network invariant",
+			policy: sandbox.Profile{Name: "development", Mounts: []string{"worktree"}, NetworkMode: "qa-network", WriteMode: "worktree", Active: true},
+		},
+		{
+			name:   "unapproved write mode",
+			policy: sandbox.Profile{Name: "development", Mounts: []string{"worktree"}, NetworkMode: "none", WriteMode: "host", Active: true},
+		},
+		{
+			name:   "profile name mismatch",
+			policy: sandbox.Profile{Name: "strict", Mounts: []string{"worktree"}, NetworkMode: "none", WriteMode: "worktree", Active: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := json.Marshal(tt.policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			profileName := tt.policy.Name
+			if tt.name == "profile name mismatch" {
+				profileName = "development"
+			}
+			if _, err := validateRunSandboxSnapshot(profileName, payload, workspace); err == nil {
+				t.Fatalf("manipulated sandbox snapshot was accepted: %#v", tt.policy)
+			}
+		})
+	}
+	valid := sandbox.Profile{Name: "development", Mounts: []string{"worktree"}, NetworkMode: "none", WriteMode: "worktree", Active: true}
+	payload, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateRunSandboxSnapshot(valid.Name, payload, workspace); err != nil {
+		t.Fatalf("valid sandbox snapshot was rejected: %v", err)
 	}
 }
 
