@@ -9,8 +9,17 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"taskboard/internal/domain"
+	"taskboard/internal/sandbox"
 	"testing"
 )
+
+func TestRunOpenAIResponsesWithPolicyRejectsBridgeOnlyBeforeProviderOrSecretValidation(t *testing.T) {
+	_, _, err := runOpenAIResponsesWithPolicy(context.Background(), domain.ProviderSetting{}, "", "prompt", t.TempDir(), sandbox.Profile{NetworkMode: "bridge-only"})
+	if err == nil || !strings.Contains(err.Error(), "bridge-only") {
+		t.Fatalf("bridge-only must fail closed before provider/secret validation, got %v", err)
+	}
+}
 
 func TestResponsesURL(t *testing.T) {
 	value, err := responsesURL("https://gateway.example")

@@ -308,6 +308,9 @@ func runOpenAIResponsesForProfile(ctx context.Context, provider domain.ProviderS
 }
 
 func runOpenAIResponsesWithPolicy(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree string, policy sandbox.Profile) (string, openAIUsage, error) {
+	if policy.NetworkMode == "bridge-only" {
+		return "", openAIUsage{}, errors.New("sandbox profile bridge-only erlaubt keine direkten Provider-Aufrufe; verwende den geprüften hostseitigen Release-Bridge-Dienst")
+	}
 	if strings.TrimSpace(provider.Model) == "" {
 		return "", openAIUsage{}, errors.New("OpenAI-Modell fehlt in den Provider-Einstellungen")
 	}
