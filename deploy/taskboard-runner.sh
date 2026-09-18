@@ -30,8 +30,9 @@ while :; do
 	if [ "$restart_requested" -eq 1 ]; then
 		continue
 	fi
-	if [ "$status" -eq 0 ]; then
-		exit 0
-	fi
+	# Keep the systemd MainPID alive even when the child exits cleanly. The
+	# update monitor may still need to signal this runner after terminating a
+	# failed candidate, before it has restored and verified the previous bundle.
+	# Only an explicit TERM/INT/HUP trap exits the supervisor.
 	sleep 1
 done

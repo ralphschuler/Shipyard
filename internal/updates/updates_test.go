@@ -151,6 +151,35 @@ func TestTerminateRunningBundleStopsCandidateProcess(t *testing.T) {
 	}
 }
 
+func TestTaskboardRunnerStaysAliveForRollbackHandoff(t *testing.T) {
+	dir := t.TempDir()
+	fakeBinary := filepath.Join(dir, "clean-exit-child.sh")
+	if err := os.WriteFile(fakeBinary, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	runner := filepath.Join("..", "..", "deploy", "taskboard-runner.sh")
+	cmd := exec.Command("sh", runner)
+	cmd.Env = append(os.Environ(), "TASKBOARD_BINARY="+fakeBinary)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		_ = cmd.Wait()
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("runner exited after clean child exit: %v", err)
+	}
+	if err := cmd.Process.Signal(syscall.SIGUSR1); err != nil {
+		t.Fatalf("runner rejected supervisor restart handoff: %v", err)
+	}
+	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
+		t.Fatalf("runner exited during rollback handoff: %v", err)
+	}
+}
+
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestCompareOnlyReportsNewerSemanticRelease(t *testing.T) {
