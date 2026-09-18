@@ -65,6 +65,7 @@ type Task struct {
 	CompletedAt                                                     *time.Time
 	CreatedAt                                                       time.Time
 	IsTerminal                                                      bool
+	ReworkCount                                                     int
 	Labels                                                          []Label
 	TargetProjects                                                  []Project
 }
