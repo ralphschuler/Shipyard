@@ -10,6 +10,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -21,6 +23,8 @@ var (
 	versionPattern      = regexp.MustCompile(`^v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:[-+][0-9A-Za-z.-]+)?$`)
 	patchReleasePattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.\*$`)
 )
+
+const maxLocalChangelogSize = 1 << 20
 
 var (
 	ErrReleaseAllowlistMissing   = errors.New("release allowlist is not configured")
@@ -37,6 +41,7 @@ type Release struct {
 	Commit            string `json:"commit"`
 	PublishedAt       string `json:"publishedAt"`
 	Changelog         string `json:"changelog"`
+	ChangelogSource   string `json:"changelogSource,omitempty"`
 	URL               string `json:"url"`
 	MigrationRequired bool   `json:"migrationRequired"`
 	Verified          bool   `json:"verified"`
@@ -209,10 +214,56 @@ func semver(v string) ([3]int, bool) {
 }
 
 type Client struct {
-	HTTP           *http.Client
-	BaseURL, Token string
-	GOOS, GOARCH   string
-	ApprovedTags   []string
+	HTTP               *http.Client
+	BaseURL, Token     string
+	GOOS, GOARCH       string
+	ApprovedTags       []string
+	LocalChangelogPath string
+}
+
+// LoadLocalChangelog reads an operator-selected Markdown file or the first
+// conventional changelog file in the current working directory. It is only a
+// content source; it never supplies release trust or installation metadata.
+func LoadLocalChangelog(configuredPath string) (content, path string, err error) {
+	candidates := []string{strings.TrimSpace(configuredPath)}
+	if candidates[0] == "" {
+		candidates = []string{"CHANGELOG.md", "CHANGELOG.markdown"}
+	}
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		info, statErr := os.Stat(candidate)
+		if statErr != nil {
+			if os.IsNotExist(statErr) && strings.TrimSpace(configuredPath) == "" {
+				continue
+			}
+			return "", candidate, statErr
+		}
+		if !info.Mode().IsRegular() {
+			return "", candidate, errors.New("changelog path is not a regular file")
+		}
+		if info.Size() > maxLocalChangelogSize {
+			return "", candidate, fmt.Errorf("changelog exceeds %d byte limit", maxLocalChangelogSize)
+		}
+		file, openErr := os.Open(candidate)
+		if openErr != nil {
+			return "", candidate, openErr
+		}
+		data, readErr := io.ReadAll(io.LimitReader(file, maxLocalChangelogSize+1))
+		closeErr := file.Close()
+		if readErr != nil {
+			return "", candidate, readErr
+		}
+		if closeErr != nil {
+			return "", candidate, closeErr
+		}
+		if len(data) > maxLocalChangelogSize {
+			return "", candidate, fmt.Errorf("changelog exceeds %d byte limit", maxLocalChangelogSize)
+		}
+		return string(data), candidate, nil
+	}
+	return "", "", nil
 }
 
 func tagApproved(tag string, approved []string) bool {
@@ -397,6 +448,12 @@ func Resolve(ctx context.Context, current Current, repo, branch string, client C
 		client.HTTP = http.DefaultClient
 	}
 	s := Snapshot{Current: current, Repository: repo, Branch: branch, Provider: "GitHub", Status: "unavailable"}
+	if content, path, err := LoadLocalChangelog(client.LocalChangelogPath); err == nil && content != "" {
+		s.Release.Changelog = content
+		s.Release.ChangelogSource = "Lokale Markdown-Datei: " + filepath.Base(path)
+	} else if err != nil {
+		s.Reason = "Lokaler Changelog konnte nicht gelesen werden."
+	}
 	if err := ValidateReleaseAllowlist(client.ApprovedTags); err != nil {
 		s.Status = "unverified"
 		s.Reason = releasePolicyReason(err)
@@ -435,7 +492,11 @@ func Resolve(ctx context.Context, current Current, repo, branch string, client C
 		}
 		return s
 	}
-	s.Release = Release{Version: r.TagName, Commit: commit.SHA, PublishedAt: r.PublishedAt, Changelog: r.Body, URL: r.HTMLURL}
+	changelog, changelogSource := r.Body, "GitHub Release"
+	if strings.TrimSpace(changelog) == "" {
+		changelog, changelogSource = s.Release.Changelog, s.Release.ChangelogSource
+	}
+	s.Release = Release{Version: r.TagName, Commit: commit.SHA, PublishedAt: r.PublishedAt, Changelog: changelog, ChangelogSource: changelogSource, URL: r.HTMLURL}
 	if len(r.Assets) == 0 {
 		s.Status, s.Reason = "unverified", "Release enthält kein prüfbares Artefakt."
 		return s
