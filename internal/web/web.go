@@ -890,6 +890,10 @@ func (a *App) createAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 400)
 		return
 	}
+	if e := a.store.UpdateAgentSelection(r.Context(), agent.ID, r.FormValue("model"), r.FormValue("reasoning_effort"), r.FormValue("escalation_policy")); e != nil {
+		http.Error(w, e.Error(), 400)
+		return
+	}
 	if e := a.store.SetAgentSkills(r.Context(), agent.ID, r.Form["skill_ids"]); e != nil {
 		http.Error(w, e.Error(), 400)
 		return
@@ -914,6 +918,10 @@ func (a *App) updateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	max, _ := strconv.Atoi(r.FormValue("max_parallel_runs"))
 	if e := a.store.UpdateAgent(r.Context(), r.PathValue("id"), r.FormValue("name"), r.FormValue("description"), r.FormValue("prompt_prefix"), r.FormValue("prompt"), r.FormValue("prompt_suffix"), max, r.FormValue("enabled") == "true"); e != nil {
+		http.Error(w, e.Error(), 400)
+		return
+	}
+	if e := a.store.UpdateAgentSelection(r.Context(), r.PathValue("id"), r.FormValue("model"), r.FormValue("reasoning_effort"), r.FormValue("escalation_policy")); e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}

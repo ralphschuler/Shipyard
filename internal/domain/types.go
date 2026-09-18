@@ -162,6 +162,7 @@ type CatalogSkill struct {
 }
 type Agent struct {
 	ID, Name, Description, Adapter, Prompt, PromptPrefix, PromptSuffix string
+	Model, ReasoningEffort, EscalationPolicy                           string
 	Enabled                                                            bool
 	MaxParallelRuns                                                    int
 	CreatedAt                                                          time.Time
@@ -272,6 +273,8 @@ type ProviderSetting struct {
 	ID, Provider                                string
 	Enabled                                     bool
 	Model, Command, SecretEnv, BaseURL, Options string
+	DiscoverySource, DiscoveryError             string
+	DiscoveryAt                                 *time.Time
 	UpdatedAt                                   time.Time
 }
 type Secret struct {
