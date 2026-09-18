@@ -48,3 +48,119 @@ test("shows raw changelog text when Markdown cannot be rendered", async ({ page 
   await expect(page.getByRole("alert")).toContainText("konnte nicht formatiert werden");
   await expect(page.getByRole("alert")).toContainText("kein Abschluss");
 });
+
+const updateFixture = {
+  current: { version: "1.0.0", commit: "current-sha", builtAt: "2026-09-17T12:00:00Z" },
+  source: { provider: "GitHub", repository: "example/shipyard", branch: "master" },
+  status: "up_to_date",
+  release: {},
+  checked_at: "2026-09-17T12:00:00Z",
+};
+
+test("manual update check shows failure and retry without duplicate requests", async ({ page }) => {
+  let checks = 0;
+  await page.route("**/api/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/v1/settings/appearance") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ Theme: "light", Language: "en" }) });
+      return;
+    }
+    if (path === "/api/v1/settings/updates") {
+      checks += 1;
+      if (checks === 3) {
+        await route.abort("failed");
+        return;
+      }
+      if (checks === 2) {
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        await route.fulfill({ contentType: "application/json", body: JSON.stringify(updateFixture) });
+        return;
+      }
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify(updateFixture) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+
+  await page.goto("/app/#/settings/updates");
+  const checkButton = page.getByRole("button", { name: "Check for updates now" });
+  await expect(checkButton).toBeVisible();
+  await checkButton.click();
+  await expect(checkButton).toHaveAttribute("aria-busy", "true");
+  await expect(page.getByRole("status")).toContainText("Checking");
+  await expect(checkButton).toBeDisabled();
+  await expect(checkButton).toHaveAttribute("aria-busy", "false");
+  await expect(page.getByRole("status")).toContainText("System is up to date");
+
+  await page.route("**/api/v1/settings/updates", async (route) => {
+    checks += 1;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    if (checks === 3) {
+      await route.abort("failed");
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify(updateFixture) });
+  });
+  await checkButton.click();
+  await checkButton.click();
+  await expect(page.getByRole("alert")).toContainText("update check", { timeout: 2_000 });
+  expect(checks).toBe(3);
+  await expect(checkButton).toBeEnabled();
+  await checkButton.click();
+  await expect(page.getByRole("status")).toContainText("System is up to date");
+  expect(checks).toBe(4);
+});
+
+test("manual update check reports an available release", async ({ page }) => {
+  const availableFixture = {
+    ...updateFixture,
+    status: "update_available",
+    installable: false,
+    release: { version: "1.1.0", commit: "latest-sha", url: "https://github.com/example/shipyard/releases/tag/v1.1.0" },
+  };
+  await page.route("**/api/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/v1/settings/appearance") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ Theme: "light", Language: "en" }) });
+      return;
+    }
+    if (path === "/api/v1/settings/updates") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify(availableFixture) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+
+  await page.goto("/app/#/settings/updates");
+  await expect(page.getByRole("status")).toContainText("Update available");
+  await expect(page.getByText("1.1.0")).toBeVisible();
+  await expect(page.getByLabel("Last checked")).toBeVisible();
+});
+
+test("manual update check treats malformed responses as a readable failure", async ({ page }) => {
+  let checks = 0;
+  const malformedFixture = {
+    ...updateFixture,
+    current: { ...updateFixture.current, builtAt: { unexpected: true } },
+  };
+  await page.route("**/api/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/v1/settings/appearance") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ Theme: "light", Language: "en" }) });
+      return;
+    }
+    if (path === "/api/v1/settings/updates") {
+      checks += 1;
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify(checks === 1 ? updateFixture : malformedFixture) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
+  });
+
+  await page.goto("/app/#/settings/updates");
+  await page.getByRole("button", { name: "Check for updates now" }).click();
+
+  await expect(page.getByRole("alert")).toContainText("update check");
+  await expect(page.getByRole("status")).toContainText("could not be completed");
+  await expect(page.getByText("1.0.0")).toBeVisible();
+});

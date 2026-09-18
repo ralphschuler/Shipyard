@@ -496,7 +496,7 @@ export default function App() {
           ) : active?.endpoint ? (
             <ResourceList endpoint={active.endpoint} title={t(active.name)} />
           ) : route === "/settings" || route.startsWith("/settings/") || route === "/account" ? (
-            <Settings route={route} />
+            <Settings route={route} language={language} />
           ) : (
             <NotFound />
           )}
@@ -1464,7 +1464,7 @@ function AgentForm() {
     </Card>
   );
 }
-function Settings({ route }: { route: string }) {
+function Settings({ route, language }: { route: string; language: Language }) {
   const tab =
     route === "/account"
       ? "account"
@@ -1494,7 +1494,7 @@ function Settings({ route }: { route: string }) {
         ))}
       </div>
       {tab === "updates" ? (
-        <Updates />
+        <Updates language={language} />
       ) : tab === "agent-policy" ? (
         <AgentPolicy />
       ) : tab === "appearance" ? (
@@ -1509,18 +1509,79 @@ function Settings({ route }: { route: string }) {
     </>
   );
 }
-function Updates() {
+type UpdateData = {
+  current: { version: string; commit: string; builtAt?: string };
+  source: { provider: string; repository: string; branch: string };
+  status: "up_to_date" | "update_available" | "unavailable" | "unverified" | string;
+  release?: { version?: string; commit?: string; publishedAt?: string; changelog?: string; url?: string; verified?: boolean; compatible?: boolean; migrationRequired?: boolean };
+  installable?: boolean;
+  reason?: string;
+  checked_at?: string;
+};
+
+function isUpdateData(value: unknown): value is UpdateData {
+  const isRecord = (candidate: unknown): candidate is Record<string, unknown> => Boolean(candidate && typeof candidate === "object" && !Array.isArray(candidate));
+  const hasOptionalString = (record: Record<string, unknown>, key: string) => !(key in record) || typeof record[key] === "string";
+  const hasOptionalBoolean = (record: Record<string, unknown>, key: string) => !(key in record) || typeof record[key] === "boolean";
+  if (!isRecord(value)) return false;
+  const update = value;
+  const current = update.current;
+  const source = update.source;
+  const release = update.release;
+  if (!isRecord(current) || !isRecord(source)) return false;
+  if (!hasOptionalString(current, "builtAt") || !hasOptionalString(update, "reason") || !hasOptionalString(update, "checked_at")) return false;
+  if ("installable" in update && typeof update.installable !== "boolean") return false;
+  if (release !== undefined && !isRecord(release)) return false;
+  if (release && (!hasOptionalString(release, "version") || !hasOptionalString(release, "commit") || !hasOptionalString(release, "publishedAt") || !hasOptionalString(release, "changelog") || !hasOptionalString(release, "url") || !hasOptionalBoolean(release, "verified") || !hasOptionalBoolean(release, "compatible") || !hasOptionalBoolean(release, "migrationRequired"))) return false;
+  return Boolean(
+    typeof current.version === "string" && typeof current.commit === "string" &&
+    typeof source.provider === "string" && typeof source.repository === "string" && typeof source.branch === "string" &&
+    typeof update.status === "string",
+  );
+}
+
+function Updates({ language }: { language: Language }) {
   const { data, error } = useAPI<any>("/api/v1/settings/updates");
+  const t = (key: string) => translate(language, key);
   const [message, setMessage] = useState("");
   const [progress, setProgress] = useState<any[]>([]);
   const [installing, setInstalling] = useState(false);
   const [showSource, setShowSource] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [manualData, setManualData] = useState<UpdateData | undefined>();
+  const [checkError, setCheckError] = useState<{ message: string; checkedAt: string }>();
+  const result = (manualData || data) as UpdateData | undefined;
   if (error) return <Failure />;
-  if (!data) return <Loading />;
-  const release = data.release || {};
+  if (!result) return <Loading />;
+  const displayStatus = checkError ? "unavailable" : result.status;
+  const release = checkError ? {} : result.release || {};
   const releaseURL = typeof release.url === "string" ? safeMarkdownURL(release.url) : undefined;
-  const available = data.status === "update_available" && data.installable;
+  const available = displayStatus === "update_available" && result.installable;
+  const checkFailed = Boolean(checkError) || !["up_to_date", "update_available"].includes(result.status);
+  const checkedAt = checkError ? new Date(checkError.checkedAt) : result.checked_at ? new Date(result.checked_at) : undefined;
+  const checkedLabel = checkedAt && !Number.isNaN(checkedAt.getTime())
+    ? new Intl.DateTimeFormat(language, { dateStyle: "medium", timeStyle: "short" }).format(checkedAt)
+    : t("notAvailable");
   const verifyLabel = release.verified && release.compatible ? "Verifiziert und kompatibel" : "Nicht zur Installation freigegeben";
+  const checkNow = async () => {
+    if (checking) return;
+    setChecking(true);
+    setMessage("");
+    try {
+      const response = await fetch("/api/v1/settings/updates", { credentials: "same-origin", cache: "no-store" });
+      const payload = await response.json().catch(() => null);
+      if (!response.ok || !isUpdateData(payload)) throw new Error(t("updatesCheckFailed"));
+      setManualData(payload);
+      setCheckError(undefined);
+    } catch {
+      setCheckError({
+        message: t("updatesCheckFailed"),
+        checkedAt: new Date().toISOString(),
+      });
+    } finally {
+      setChecking(false);
+    }
+  };
   const install = async () => {
     if (!available || !confirm("Dieses verifizierte Release installieren? Aktive Runs müssen vorher beendet sein.")) return;
     setInstalling(true); setMessage("Update wird geprüft und für die Wartung vorbereitet …");
@@ -1537,12 +1598,30 @@ function Updates() {
     <div className="grid gap-4">
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center gap-2"><GitCompareArrows className="size-5" /> Update-Prüfung</CardTitle>
-          <CardDescription>Nur freigegebene GitHub-Releases auf dem Branch master werden berücksichtigt. Unvollständige oder unklare Artefakte bleiben gesperrt.</CardDescription>
+          <CardTitle className="flex items-center gap-2"><GitCompareArrows className="size-5" /> {t("updatesCheckTitle")}</CardTitle>
+          <CardDescription>{t("updatesCheckDescription")}</CardDescription>
         </CardHeader>
-        <CardContent className="grid gap-4 sm:grid-cols-2">
-          <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">Laufende Version</p><p className="mt-1 text-xl font-semibold">{data.current.version}</p><p className="font-mono text-xs text-muted-foreground">{data.current.commit}</p><p className="mt-3 text-sm">Build: {data.current.builtAt || "nicht angegeben"}</p></div>
-          <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">Vergleichsstatus</p><p className="mt-1 text-xl font-semibold">{data.status === "up_to_date" ? "Aktuell" : data.status === "update_available" ? "Update verfügbar" : data.status === "unavailable" ? "Keine Release-Daten" : "Prüfung unvollständig"}</p><p className="mt-3 text-sm text-muted-foreground">Quelle: {data.source.provider} · {data.source.repository}</p></div>
+        <CardContent className="grid gap-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-primary/20 bg-primary/5 p-4">
+            <div>
+              <p className="text-sm font-medium">{t("updatesManualTitle")}</p>
+              <p className="text-sm text-muted-foreground">{t("updatesReadOnly")}</p>
+            </div>
+            <Button type="button" onClick={checkNow} disabled={checking} aria-busy={checking}>
+              {checking ? <><LoaderCircle className="size-4 animate-spin" aria-hidden="true" /> {t("updatesChecking")}</> : t("updatesCheckNow")}
+            </Button>
+          </div>
+          <p className="sr-only" role="status" aria-live="polite">
+            {checking ? t("updatesChecking") : checkFailed ? (checkError?.message || result.reason || t("updatesCheckFailed")) : displayStatus === "update_available" ? t("updatesAvailable") : t("updatesUpToDate")}
+          </p>
+          <p className="text-sm text-muted-foreground" aria-label={t("updatesLastChecked")}>{t("updatesLastChecked")}: {checkedLabel}</p>
+          <p className={checkFailed ? "rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive" : "sr-only"} role={checkFailed ? "alert" : undefined} aria-live="polite">
+            {checkFailed ? (checkError?.message || result.reason || t("updatesCheckFailed")) : ""}
+          </p>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesCurrentVersion")}</p><p className="mt-1 text-xl font-semibold">{result.current.version}</p><p className="font-mono text-xs text-muted-foreground">{result.current.commit}</p><p className="mt-3 text-sm">Build: {result.current.builtAt || t("notAvailable")}</p></div>
+            <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesStatus")}</p><p className="mt-1 text-xl font-semibold">{displayStatus === "up_to_date" ? t("updatesUpToDate") : displayStatus === "update_available" ? t("updatesAvailable") : t("updatesFailed")}</p><p className="mt-3 text-sm text-muted-foreground">Quelle: {result.source.provider} · {result.source.repository}</p></div>
+          </div>
         </CardContent>
       </Card>
       <Card>
@@ -1555,9 +1634,9 @@ function Updates() {
             {showSource ? <section aria-label="Changelog-Quelltext" className="max-h-[34rem] overflow-auto rounded-md bg-muted p-3 text-sm"><pre className="whitespace-pre-wrap break-words">{release.changelog || "Kein Changelog angegeben."}</pre></section> : <section aria-label="Changelog" className="max-h-[34rem] overflow-auto rounded-md bg-muted p-4 text-sm">{renderChangelog(release.changelog)}</section>}
             <div className="flex flex-wrap items-center gap-2"><Button disabled={!available || installing} onClick={install}>{installing ? "Update wird vorbereitet …" : "Update installieren"}</Button>{releaseURL && <a className="text-sm underline" href={releaseURL} target="_blank" rel="noreferrer noopener">Auf GitHub ansehen</a>}</div>
             {progress.length > 0 && <ol className="grid gap-2 rounded-md border p-3 text-sm" aria-label="Update-Fortschritt">{progress.map((step, index) => <li key={`${step.phase}-${index}`} className="flex items-center justify-between gap-3"><span>{step.phase}</span><span className="text-muted-foreground">{step.status === "succeeded" ? "Abgeschlossen" : step.status === "failed" ? "Fehlgeschlagen" : "Läuft"}</span></li>)}</ol>}
-            {data.reason && <p className="text-sm text-muted-foreground">{data.reason}</p>}
+            {result.reason && <p className="text-sm text-muted-foreground">{result.reason}</p>}
           </> : <p className="text-sm text-muted-foreground">Es wurde kein kompatibles Release gemeldet. Ein Installationsbutton ist deshalb nicht verfügbar.</p>}
-          {message && <p className="text-sm text-destructive">{message}</p>}
+          {message && <p className="text-sm text-destructive" role="alert" aria-live="assertive">{message}</p>}
         </CardContent>
       </Card>
     </div>
