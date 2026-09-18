@@ -125,8 +125,8 @@ func tools() []map[string]any {
 		{"name": "set_task_targets", "description": "Set task project_ids and group_ids as comma-separated target scopes", "inputSchema": schema("task_id")},
 		{"name": "list_agents", "description": "List configured local agents", "inputSchema": schema()},
 		{"name": "get_agent", "description": "Get an agent and its assigned skills", "inputSchema": schema("agent_id")},
-		{"name": "create_agent", "description": "Create a local Codex agent profile", "inputSchema": schemaWithOptional([]string{"name", "prompt", "workspace_path"}, "description", "prompt_prefix", "prompt_suffix", "max_parallel_runs")},
-		{"name": "update_agent", "description": "Update a local Codex agent profile", "inputSchema": schemaWithOptional([]string{"agent_id", "name", "prompt", "workspace_path"}, "description", "prompt_prefix", "prompt_suffix", "max_parallel_runs", "enabled")},
+		{"name": "create_agent", "description": "Create a local Codex agent profile", "inputSchema": schemaWithOptional([]string{"name", "prompt"}, "description", "prompt_prefix", "prompt_suffix", "max_parallel_runs")},
+		{"name": "update_agent", "description": "Update a local Codex agent profile", "inputSchema": schemaWithOptional([]string{"agent_id", "name", "prompt"}, "description", "prompt_prefix", "prompt_suffix", "max_parallel_runs", "enabled")},
 		{"name": "delete_agent", "description": "Delete an unused agent profile", "inputSchema": schema("agent_id")},
 		{"name": "set_agent_skills", "description": "Set comma-separated installed skill IDs allowed for an agent", "inputSchema": schema("agent_id")},
 		{"name": "list_installed_skills", "description": "List installed skills available to agents", "inputSchema": schema()},
@@ -284,9 +284,9 @@ func (s *Server) call(r *http.Request, raw json.RawMessage) (any, string) {
 		}
 		value = map[string]any{"agent": agent, "skills": skills}
 	case "create_agent":
-		value, err = s.store.CreateAgent(ctx, a["name"], a["description"], a["prompt_prefix"], a["prompt"], a["prompt_suffix"], a["workspace_path"], atoi(a["max_parallel_runs"]))
+		value, err = s.store.CreateAgent(ctx, a["name"], a["description"], a["prompt_prefix"], a["prompt"], a["prompt_suffix"], atoi(a["max_parallel_runs"]))
 	case "update_agent":
-		err = s.store.UpdateAgent(ctx, a["agent_id"], a["name"], a["description"], a["prompt_prefix"], a["prompt"], a["prompt_suffix"], a["workspace_path"], atoi(a["max_parallel_runs"]), a["enabled"] != "false")
+		err = s.store.UpdateAgent(ctx, a["agent_id"], a["name"], a["description"], a["prompt_prefix"], a["prompt"], a["prompt_suffix"], atoi(a["max_parallel_runs"]), a["enabled"] != "false")
 		value = map[string]bool{"updated": err == nil}
 	case "delete_agent":
 		err = s.store.DeleteAgent(ctx, a["agent_id"])

@@ -675,7 +675,6 @@ function GenericResourceList({
                       item.Message ??
                       item.Summary ??
                       item.RepositoryURL ??
-                      item.WorkspacePath ??
                       "",
                   )}
                 </p>
@@ -1171,10 +1170,10 @@ function Agents() {
               </Badge>
             </div>
             <p className="mt-1 text-sm text-muted-foreground">
-              {agent.Description || agent.WorkspacePath}
+              {agent.Description || "Profil ohne festen Workspace"}
             </p>
           </a>
-        )) : <EmptyState title="Noch kein Agent" description="Lege einen Agenten mit Workspace, Arbeitsanweisung und erlaubten Skills an." actionHref="#/agents/new" actionLabel="Agent anlegen" />}
+        )) : <EmptyState title="Noch kein Agent" description="Lege einen Agenten mit Arbeitsanweisung und erlaubten Skills an." actionHref="#/agents/new" actionLabel="Agent anlegen" />}
       </CardContent>
     </Card>
   );
@@ -1201,7 +1200,6 @@ function AgentDetail({ id }: { id: string }) {
     body.set("prompt_prefix", form.PromptPrefix || "");
     body.set("prompt", form.Prompt || "");
     body.set("prompt_suffix", form.PromptSuffix || "");
-    body.set("workspace_path", form.WorkspacePath);
     body.set("max_parallel_runs", String(form.MaxParallelRuns || 1));
     body.set("enabled", String(form.Enabled));
     try {
@@ -1251,15 +1249,6 @@ function AgentDetail({ id }: { id: string }) {
               value={form.Description || ""}
               onChange={(e) =>
                 setForm({ ...form, Description: e.target.value })
-              }
-            />
-          </label>
-          <label className="grid gap-2 text-sm">
-            Workspace
-            <Input
-              value={form.WorkspacePath}
-              onChange={(e) =>
-                setForm({ ...form, WorkspacePath: e.target.value })
               }
             />
           </label>
@@ -1351,7 +1340,6 @@ function AgentDetail({ id }: { id: string }) {
 function AgentForm() {
   const { data: skills } = useAPI<any[]>("/api/v1/skills");
   const [name, setName] = useState("");
-  const [workspace, setWorkspace] = useState("");
   const [prompt, setPrompt] = useState("");
   const [description, setDescription] = useState("");
   const [prefix, setPrefix] = useState("");
@@ -1365,7 +1353,6 @@ function AgentForm() {
     form.set("name", name);
     form.set("description", description);
     form.set("prompt_prefix", prefix);
-    form.set("workspace_path", workspace);
     form.set("prompt", prompt);
     form.set("prompt_suffix", suffix);
     form.set("max_parallel_runs", "1");
@@ -1383,7 +1370,7 @@ function AgentForm() {
       <CardHeader>
         <CardTitle>Neuer Agent</CardTitle>
         <CardDescription>
-          Der Workspace muss ein zugängliches lokales Git-Repository sein.
+          Der Run-Workspace wird beim Start aus dem Task-Projektziel erzeugt.
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -1394,15 +1381,6 @@ function AgentForm() {
               required
               value={name}
               onChange={(e) => setName(e.target.value)}
-            />
-          </label>
-          <label className="grid gap-2 text-sm">
-            Workspace
-            <Input
-              required
-              value={workspace}
-              onChange={(e) => setWorkspace(e.target.value)}
-              placeholder="/home/agent/projekt"
             />
           </label>
           <label className="grid gap-2 text-sm">
@@ -2220,14 +2198,12 @@ function EmptyState({
 }
 function AgentTemplates() {
   const [name, setName] = useState("");
-  const [workspace, setWorkspace] = useState("/home/agent/taskboard");
   const [kind, setKind] = useState("implementation");
   const [message, setMessage] = useState("");
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const form = new FormData();
     form.set("name", name);
-    form.set("workspace", workspace);
     form.set("kind", kind);
     try {
       await mutation("/agents/templates", { method: "POST", body: form });
@@ -2254,14 +2230,6 @@ function AgentTemplates() {
               required
               value={name}
               onChange={(e) => setName(e.target.value)}
-            />
-          </label>
-          <label className="grid gap-1 text-sm">
-            Workspace
-            <Input
-              required
-              value={workspace}
-              onChange={(e) => setWorkspace(e.target.value)}
             />
           </label>
           <label className="grid gap-1 text-sm">

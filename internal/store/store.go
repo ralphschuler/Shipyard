@@ -777,6 +777,26 @@ func normalizeTargetIDs(kind string, rawIDs []string) ([]string, error) {
 	}
 	return ids, nil
 }
+
+// runRepositoryTargets is the only source of a run's checkout path. Agent
+// profiles intentionally do not participate in repository resolution.
+func runRepositoryTargets(targets []domain.RepositoryTarget) ([]domain.RepositoryTarget, error) {
+	if len(targets) == 0 {
+		return nil, errors.New("Kein verfügbares Projekt-Repository für diese Aufgabe. Weise ein eindeutiges Projektziel zu und starte den Run erneut.")
+	}
+	resolved := make([]domain.RepositoryTarget, len(targets))
+	copy(resolved, targets)
+	for i := range resolved {
+		if strings.TrimSpace(resolved[i].RepositoryURL) == "" || strings.TrimSpace(resolved[i].ProjectID) == "" {
+			return nil, errors.New("Das Projektziel ist nicht verfügbar. Wähle ein registriertes Projekt mit Repository und starte den Run erneut.")
+		}
+		if strings.TrimSpace(resolved[i].LocalPath) == "" {
+			resolved[i].LocalPath = filepath.Join("/home/agent/.taskboard-projects", resolved[i].ProjectID)
+		}
+	}
+	return resolved, nil
+}
+
 func (s *Store) TaskRepositoryTargets(c context.Context, taskID string) ([]domain.RepositoryTarget, error) {
 	rows, err := s.DB.Query(c, `SELECT id,task_id,COALESCE(project_id::text,''),project_name,repository_url,default_branch,local_path,target_source,source_groups,created_at FROM task_repository_targets WHERE task_id=$1 ORDER BY project_name`, taskID)
 	if err != nil {
@@ -799,8 +819,14 @@ func (s *Store) EffectiveTaskRepositoryTargets(c context.Context, taskID string)
 		return nil, err
 	}
 	projects, err := s.BoardProjects(c, task.BoardID)
-	if err != nil || len(projects) != 1 {
+	if err != nil {
 		return nil, err
+	}
+	if len(projects) == 0 {
+		return nil, errors.New("Kein Projekt-Repository für diese Aufgabe zugewiesen. Weise ein eindeutiges Projektziel zu und starte den Run erneut.")
+	}
+	if len(projects) != 1 {
+		return nil, errors.New("Mehrere Projekt-Repositories sind möglich. Weise der Aufgabe ein eindeutiges Projektziel oder eine Projektgruppe zu.")
 	}
 	project := projects[0]
 	return []domain.RepositoryTarget{{TaskID: taskID, ProjectID: project.ID, ProjectName: project.Name, RepositoryURL: project.RepositoryURL, DefaultBranch: project.DefaultBranch, LocalPath: project.LocalPath, TargetSource: "inherited"}}, nil
@@ -2035,8 +2061,8 @@ func (s *Store) ResolveInteractionAndMove(c context.Context, id, answerer, freef
 		return i, nil, nil
 	}
 	var a domain.Agent
-	err = tx.QueryRow(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,workspace_path,enabled,max_parallel_runs,created_at FROM agents WHERE id=$1", i.AgentID).
-		Scan(&a.ID, &a.Name, &a.Description, &a.Adapter, &a.Prompt, &a.PromptPrefix, &a.PromptSuffix, &a.WorkspacePath, &a.Enabled, &a.MaxParallelRuns, &a.CreatedAt)
+	err = tx.QueryRow(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,enabled,max_parallel_runs,created_at FROM agents WHERE id=$1", i.AgentID).
+		Scan(&a.ID, &a.Name, &a.Description, &a.Adapter, &a.Prompt, &a.PromptPrefix, &a.PromptSuffix, &a.Enabled, &a.MaxParallelRuns, &a.CreatedAt)
 	if err != nil {
 		return i, nil, err
 	}
@@ -2049,6 +2075,10 @@ func (s *Store) ResolveInteractionAndMove(c context.Context, id, answerer, freef
 	}
 	if len(targets) == 0 {
 		return i, nil, ErrTargetSelectionRequired
+	}
+	targets, err = runRepositoryTargets(targets)
+	if err != nil {
+		return i, nil, err
 	}
 	if _, err = tx.Exec(c, "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", i.TaskID+"|manual|"+a.ID); err != nil {
 		return i, nil, err
@@ -2067,12 +2097,6 @@ func (s *Store) ResolveInteractionAndMove(c context.Context, id, answerer, freef
 	runs := make([]domain.AgentRun, 0, len(targets))
 	for _, target := range targets {
 		workspace := target.LocalPath
-		if workspace == "" && target.ProjectID != "" {
-			workspace = filepath.Join("/home/agent/.taskboard-projects", target.ProjectID)
-		}
-		if workspace == "" {
-			workspace = a.WorkspacePath
-		}
 		if err = lockWorkspaceTx(c, tx, workspace); err != nil {
 			return i, nil, err
 		}
@@ -2268,7 +2292,7 @@ func defaultString(v, d string) string {
 	return v
 }
 func (s *Store) Agents(c context.Context) ([]domain.Agent, error) {
-	r, e := s.DB.Query(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,workspace_path,enabled,max_parallel_runs,created_at FROM agents WHERE retired_at IS NULL ORDER BY name")
+	r, e := s.DB.Query(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,enabled,max_parallel_runs,created_at FROM agents WHERE retired_at IS NULL ORDER BY name")
 	if e != nil {
 		return nil, e
 	}
@@ -2277,22 +2301,22 @@ func (s *Store) Agents(c context.Context) ([]domain.Agent, error) {
 }
 func (s *Store) GetAgent(c context.Context, id string) (domain.Agent, error) {
 	var a domain.Agent
-	e := s.DB.QueryRow(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,workspace_path,enabled,max_parallel_runs,created_at FROM agents WHERE id=$1", id).Scan(&a.ID, &a.Name, &a.Description, &a.Adapter, &a.Prompt, &a.PromptPrefix, &a.PromptSuffix, &a.WorkspacePath, &a.Enabled, &a.MaxParallelRuns, &a.CreatedAt)
+	e := s.DB.QueryRow(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,enabled,max_parallel_runs,created_at FROM agents WHERE id=$1", id).Scan(&a.ID, &a.Name, &a.Description, &a.Adapter, &a.Prompt, &a.PromptPrefix, &a.PromptSuffix, &a.Enabled, &a.MaxParallelRuns, &a.CreatedAt)
 	return a, e
 }
-func (s *Store) CreateAgent(c context.Context, name, desc, prefix, prompt, suffix, workspace string, max int) (domain.Agent, error) {
+func (s *Store) CreateAgent(c context.Context, name, desc, prefix, prompt, suffix string, max int) (domain.Agent, error) {
 	var a domain.Agent
 	if max < 1 {
 		max = 1
 	}
-	e := s.DB.QueryRow(c, "INSERT INTO agents(name,description,prompt_prefix,prompt,prompt_suffix,workspace_path,max_parallel_runs) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,workspace_path,enabled,max_parallel_runs,created_at", strings.TrimSpace(name), desc, prefix, prompt, suffix, strings.TrimSpace(workspace), max).Scan(&a.ID, &a.Name, &a.Description, &a.Adapter, &a.Prompt, &a.PromptPrefix, &a.PromptSuffix, &a.WorkspacePath, &a.Enabled, &a.MaxParallelRuns, &a.CreatedAt)
+	e := s.DB.QueryRow(c, "INSERT INTO agents(name,description,prompt_prefix,prompt,prompt_suffix,max_parallel_runs) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,enabled,max_parallel_runs,created_at", strings.TrimSpace(name), desc, prefix, prompt, suffix, max).Scan(&a.ID, &a.Name, &a.Description, &a.Adapter, &a.Prompt, &a.PromptPrefix, &a.PromptSuffix, &a.Enabled, &a.MaxParallelRuns, &a.CreatedAt)
 	return a, e
 }
-func (s *Store) UpdateAgent(c context.Context, id, name, desc, prefix, prompt, suffix, workspace string, max int, enabled bool) error {
+func (s *Store) UpdateAgent(c context.Context, id, name, desc, prefix, prompt, suffix string, max int, enabled bool) error {
 	if max < 1 {
 		max = 1
 	}
-	_, err := s.DB.Exec(c, "UPDATE agents SET name=$2,description=$3,prompt_prefix=$4,prompt=$5,prompt_suffix=$6,workspace_path=$7,max_parallel_runs=$8,enabled=$9 WHERE id=$1 AND retired_at IS NULL", id, strings.TrimSpace(name), desc, prefix, prompt, suffix, strings.TrimSpace(workspace), max, enabled)
+	_, err := s.DB.Exec(c, "UPDATE agents SET name=$2,description=$3,prompt_prefix=$4,prompt=$5,prompt_suffix=$6,max_parallel_runs=$7,enabled=$8 WHERE id=$1 AND retired_at IS NULL", id, strings.TrimSpace(name), desc, prefix, prompt, suffix, max, enabled)
 	return err
 }
 
@@ -2570,7 +2594,11 @@ func (s *Store) CreateRun(c context.Context, task, agent, rule string) (domain.A
 	if workspace == "" {
 		workspace = filepath.Join("/home/agent/.taskboard-projects", targetProject)
 	}
-	return s.createRunWithWorkspace(c, task, a, agent, rule, workspace, targetProject, "")
+	targets, err = runRepositoryTargets(targets)
+	if err != nil {
+		return domain.AgentRun{}, err
+	}
+	return s.createRunWithWorkspace(c, task, a, agent, rule, targets[0].LocalPath, targets[0].ProjectID, "")
 }
 func (s *Store) createRunWithWorkspace(c context.Context, task string, a domain.Agent, agent, rule, workspace, targetProject, batchID string) (domain.AgentRun, error) {
 	var r domain.AgentRun
@@ -2585,16 +2613,6 @@ func (s *Store) createRunWithWorkspace(c context.Context, task string, a domain.
 		return domain.AgentRun{}, e
 	}
 	return r, nil
-}
-func (s *Store) TaskWorkspace(c context.Context, taskID, fallback string) string {
-	targets, err := s.EffectiveTaskRepositoryTargets(c, taskID)
-	if err != nil || len(targets) == 0 || targets[0].RepositoryURL == "" {
-		return fallback
-	}
-	if targets[0].LocalPath != "" {
-		return targets[0].LocalPath
-	}
-	return filepath.Join("/home/agent/.taskboard-projects", targets[0].ProjectID)
 }
 func (s *Store) CreateManualRun(c context.Context, task, agent string) (domain.AgentRun, error) {
 	runs, err := s.CreateManualRuns(c, task, agent)
@@ -2623,6 +2641,10 @@ func (s *Store) CreateManualRuns(c context.Context, task, agent string) ([]domai
 			return nil, errors.New("target project has no repository")
 		}
 	}
+	targets, err = runRepositoryTargets(targets)
+	if err != nil {
+		return nil, err
+	}
 	tx, err := s.DB.Begin(c)
 	if err != nil {
 		return nil, err
@@ -2647,12 +2669,6 @@ func (s *Store) CreateManualRuns(c context.Context, task, agent string) ([]domai
 	runs := make([]domain.AgentRun, 0, len(targets))
 	for _, target := range targets {
 		workspace := target.LocalPath
-		if workspace == "" && target.ProjectID != "" {
-			workspace = filepath.Join("/home/agent/.taskboard-projects", target.ProjectID)
-		}
-		if workspace == "" {
-			workspace = a.WorkspacePath
-		}
 		if err = lockWorkspaceTx(c, tx, workspace); err != nil {
 			return nil, err
 		}
@@ -3297,6 +3313,10 @@ func (s *Store) CreateRunsForEvent(c context.Context, event domain.AutomationEve
 			return nil, errors.New("target project has no repository")
 		}
 	}
+	targets, e = runRepositoryTargets(targets)
+	if e != nil {
+		return nil, e
+	}
 	tx, e := s.DB.Begin(c)
 	if e != nil {
 		return nil, e
@@ -3386,12 +3406,6 @@ func (s *Store) CreateRunsForEvent(c context.Context, event domain.AutomationEve
 	runs := make([]domain.AgentRun, 0, len(targets))
 	for _, target := range targets {
 		workspace := target.LocalPath
-		if workspace == "" && target.ProjectID != "" {
-			workspace = filepath.Join("/home/agent/.taskboard-projects", target.ProjectID)
-		}
-		if workspace == "" {
-			workspace = a.WorkspacePath
-		}
 		if e = lockWorkspaceTx(c, tx, workspace); e != nil {
 			return nil, e
 		}

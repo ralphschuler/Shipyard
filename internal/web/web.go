@@ -846,12 +846,8 @@ func (a *App) createAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 400)
 		return
 	}
-	if e := validateAgentWorkspace(r.FormValue("workspace_path")); e != nil {
-		http.Error(w, e.Error(), http.StatusBadRequest)
-		return
-	}
 	max, _ := strconv.Atoi(r.FormValue("max_parallel_runs"))
-	agent, e := a.store.CreateAgent(r.Context(), r.FormValue("name"), r.FormValue("description"), r.FormValue("prompt_prefix"), r.FormValue("prompt"), r.FormValue("prompt_suffix"), r.FormValue("workspace_path"), max)
+	agent, e := a.store.CreateAgent(r.Context(), r.FormValue("name"), r.FormValue("description"), r.FormValue("prompt_prefix"), r.FormValue("prompt"), r.FormValue("prompt_suffix"), max)
 	if e != nil {
 		http.Error(w, e.Error(), 400)
 		return
@@ -878,39 +874,14 @@ func (a *App) updateAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 400)
 		return
 	}
-	if e := validateAgentWorkspace(r.FormValue("workspace_path")); e != nil {
-		http.Error(w, e.Error(), http.StatusBadRequest)
-		return
-	}
 	max, _ := strconv.Atoi(r.FormValue("max_parallel_runs"))
-	if e := a.store.UpdateAgent(r.Context(), r.PathValue("id"), r.FormValue("name"), r.FormValue("description"), r.FormValue("prompt_prefix"), r.FormValue("prompt"), r.FormValue("prompt_suffix"), r.FormValue("workspace_path"), max, r.FormValue("enabled") == "true"); e != nil {
+	if e := a.store.UpdateAgent(r.Context(), r.PathValue("id"), r.FormValue("name"), r.FormValue("description"), r.FormValue("prompt_prefix"), r.FormValue("prompt"), r.FormValue("prompt_suffix"), max, r.FormValue("enabled") == "true"); e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
 	http.Redirect(w, r, "/agents", 303)
 }
 
-// validateAgentWorkspace runs in the same process context as the worker. It
-// avoids accepting host paths such as /tmp that may be invisible after the
-// service sandbox is applied, and verifies the Git prerequisite needed for
-// isolated worktrees before a user can save an agent profile.
-func validateAgentWorkspace(raw string) error {
-	workspace := strings.TrimSpace(raw)
-	if workspace == "" || !filepath.IsAbs(workspace) {
-		return errors.New("Workspace muss ein absoluter Pfad sein")
-	}
-	info, err := os.Stat(workspace)
-	if err != nil || !info.IsDir() {
-		return errors.New("Workspace ist für den Server nicht als Verzeichnis verfügbar")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", workspace, "rev-parse", "--is-inside-work-tree").Output()
-	if err != nil || strings.TrimSpace(string(out)) != "true" {
-		return errors.New("Workspace muss ein zugängliches Git-Repository sein")
-	}
-	return nil
-}
 func (a *App) deleteAgent(w http.ResponseWriter, r *http.Request) {
 	if e := a.store.DeleteAgent(r.Context(), r.PathValue("id")); e != nil {
 		http.Error(w, "Agent konnte nicht ausgemustert werden: "+e.Error(), 409)
@@ -1148,7 +1119,7 @@ func (a *App) createTemplateAgent(w http.ResponseWriter, r *http.Request) {
 		prompt = "Aktualisiere die Dokumentation zur Aufgabe. Erstelle keinen Push, Merge oder Release."
 		desc = "Dokumentations-Agent"
 	}
-	_, e := a.store.CreateAgent(r.Context(), r.FormValue("name"), desc, "", prompt, "", r.FormValue("workspace"), 1)
+	_, e := a.store.CreateAgent(r.Context(), r.FormValue("name"), desc, "", prompt, "", 1)
 	if e != nil {
 		http.Error(w, e.Error(), 400)
 		return

@@ -56,6 +56,14 @@ func TestEstimateUsageCostKeepsHypotheticalCostForIncompleteSubscriptionRun(t *t
 
 func ptrInt64(value int64) *int64 { return &value }
 
+func TestRunTargetProjectIsRequiredBeforeExecution(t *testing.T) {
+	if err := validateRunTargetProject(domain.AgentRun{}); err == nil {
+		t.Fatal("runs without a resolved project target must be rejected")
+	}
+	if err := validateRunTargetProject(domain.AgentRun{TargetProject: "project-1"}); err != nil {
+		t.Fatal(err)
+	}
+}
 func runGit(t *testing.T, directory string, args ...string) {
 	t.Helper()
 	command := exec.Command("git", append([]string{"-C", directory}, args...)...)

@@ -37,7 +37,7 @@ func TestCheckProviderForAgentRejectsUnassignedSecret(t *testing.T) {
 	s := workerIntegrationStore(t)
 	ctx := context.Background()
 	suffix := time.Now().UTC().Format("20060102150405000000000")
-	agent, err := s.CreateAgent(ctx, "Provider check agent "+suffix, "integration", "", "", "", t.TempDir(), 1)
+	agent, err := s.CreateAgent(ctx, "Provider check agent "+suffix, "integration", "", "", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,11 +89,11 @@ func TestProcessStartsDeliveryAgentExactlyOnceAndRejectsUnknownTarget(t *testing
 	unknownScript := fakeProviderScript(t, triageCount, "```taskboard-transition\n{\"target_column_id\":\"00000000-0000-0000-0000-000000000000\"}\n```\n")
 	deliveryScript := fakeProviderScript(t, deliveryCount, "```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"Scope/Akzeptanz\",\"result\":\"ok\"},{\"check\":\"Diff/Secrets\",\"result\":\"ok\"},{\"check\":\"Tests/Fehler\",\"result\":\"ok\"},{\"check\":\"Sicherheits-/Betriebsrisiken\",\"result\":\"ok\"},{\"check\":\"Rückwärtskompatibilität\",\"result\":\"ok\"}],\"tests\":\"integration\",\"open_risks\":\"none\"}\n```\n")
 	suffix := time.Now().Format("20060102150405.000000000")
-	triageAgent, err := s.CreateAgent(ctx, "Triage Agent "+t.Name()+" "+suffix, "integration", "", "", "", repository, 1)
+	triageAgent, err := s.CreateAgent(ctx, "Triage Agent "+t.Name()+" "+suffix, "integration", "", "", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	deliveryAgent, err := s.CreateAgent(ctx, "Delivery Agent "+t.Name()+" "+suffix, "integration", "", "", "", repository, 1)
+	deliveryAgent, err := s.CreateAgent(ctx, "Delivery Agent "+t.Name()+" "+suffix, "integration", "", "", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestApplyConcurrentRetriesObservePersistedAppliedState(t *testing.T) {
 	}
 	backlog := integrationColumnByName(t, columns, "Backlog")
 	development := integrationColumnByName(t, columns, "Entwicklung")
-	agent, err := s.CreateAgent(ctx, "Concurrent apply agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", source, 1)
+	agent, err := s.CreateAgent(ctx, "Concurrent apply agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +416,7 @@ func TestProcessIntegrationQueueEndToEndRebasesPushesCreatesPRAndSyncsMerge(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := s.CreateAgent(ctx, "Queue E2E agent "+time.Now().Format("150405.000000000"), "integration", "", "", "", source, 1)
+	agent, err := s.CreateAgent(ctx, "Queue E2E agent "+time.Now().Format("150405.000000000"), "integration", "", "", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
