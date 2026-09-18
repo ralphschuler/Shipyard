@@ -306,6 +306,85 @@ func TestRecordIntegrationConflictUsesQueueIDsWhenRunCannotBeLoaded(t *testing.T
 	}
 }
 
+func TestProcessIntegrationQueueReturnsConflictAuditFailure(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, t.TempDir(), "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Integration Test")
+	runGit(t, source, "config", "user.email", "integration@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "shared.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "shared.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+
+	board, err := s.CreateBoard(ctx, "Queue conflict audit "+time.Now().Format("150405.000000000"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	task, err := s.CreateTask(ctx, board.ID, "Queue conflict", "exercise queue conflict", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch, err := ensureTaskBranch(ctx, source, task.ID, "master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	branchWorktree := filepath.Join(t.TempDir(), "task-branch")
+	runGit(t, source, "worktree", "add", branchWorktree, branch)
+	if err := os.WriteFile(filepath.Join(branchWorktree, "shared.txt"), []byte("task\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, branchWorktree, "add", "shared.txt")
+	runGit(t, branchWorktree, "commit", "-m", "task change")
+	head, err := gitOutput(ctx, branchWorktree, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "worktree", "remove", "--force", branchWorktree)
+
+	other := filepath.Join(t.TempDir(), "other")
+	runGit(t, t.TempDir(), "clone", remote, other)
+	runGit(t, other, "config", "user.name", "Remote Test")
+	runGit(t, other, "config", "user.email", "remote@example.invalid")
+	if err := os.WriteFile(filepath.Join(other, "shared.txt"), []byte("remote\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, other, "add", "shared.txt")
+	runGit(t, other, "commit", "-m", "remote conflict")
+	runGit(t, other, "push", "origin", "master")
+
+	base, err := gitOutput(ctx, source, "rev-parse", "origin/master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const missingRunID = "00000000-0000-0000-0000-000000000002"
+	job, err := s.EnqueueIntegration(ctx, domain.IntegrationJob{RepositoryPath: source, RunID: missingRunID, TaskID: task.ID, Branch: branch, DefaultBranch: "master", BaseSHA: base, HeadSHA: head})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.IntegrationJobs(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	w := &Worker{Store: s}
+	if err := w.processIntegrationQueue(ctx); err == nil || !strings.Contains(err.Error(), "Run-Protokoll") {
+		t.Fatalf("queue conflict audit failure = %v, want visible Run-Protokoll error", err)
+	}
+	var status, step, lastError string
+	if err := s.DB.QueryRow(ctx, "SELECT status,step,last_error FROM repository_integration_queue WHERE id=$1", job.ID).Scan(&status, &step, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || step != "conflict" || !strings.Contains(lastError, "Run-Protokoll") {
+		t.Fatalf("queue conflict state = status %q step %q error %q", status, step, lastError)
+	}
+}
+
 func TestProcessIntegrationQueueEndToEndRebasesPushesCreatesPRAndSyncsMerge(t *testing.T) {
 	s := workerIntegrationStore(t)
 	ctx := context.Background()

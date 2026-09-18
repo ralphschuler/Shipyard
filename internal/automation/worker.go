@@ -965,11 +965,12 @@ func integrationDefaultBranch(project domain.Project, checkedOutBranch string) s
 // processIntegrationQueue is deliberately restartable: every step is stored
 // before the next external Git operation. A transient push/PR failure leaves
 // the job visible and eligible for a later poll instead of losing delivery.
-func (w *Worker) processIntegrationQueue(ctx context.Context) {
+func (w *Worker) processIntegrationQueue(ctx context.Context) error {
 	jobs, err := w.Store.IntegrationJobs(ctx, 20)
 	if err != nil {
-		return
+		return err
 	}
+	var failures []error
 	for _, job := range jobs {
 		if err := w.processIntegrationJob(ctx, job); err != nil {
 			if isIntegrationConflict(err) {
@@ -977,13 +978,23 @@ func (w *Worker) processIntegrationQueue(ctx context.Context) {
 				recordErr := w.recordIntegrationConflictByIDs(ctx, job.RunID, job.TaskID, conflictErr)
 				updateErr := w.Store.UpdateIntegration(ctx, job.ID, "failed", "conflict", job.BaseSHA, job.HeadSHA, job.PRURL, conflictErr.Error(), job.PRNumber, job.Attempts+1)
 				if recordErr != nil || updateErr != nil {
-					_ = w.Store.UpdateIntegration(ctx, job.ID, "failed", "conflict", job.BaseSHA, job.HeadSHA, job.PRURL, errors.Join(err, recordErr, updateErr).Error(), job.PRNumber, job.Attempts+1)
+					persistErr := errors.Join(recordErr, updateErr)
+					if retryErr := w.Store.UpdateIntegration(ctx, job.ID, "failed", "conflict", job.BaseSHA, job.HeadSHA, job.PRURL, persistErr.Error(), job.PRNumber, job.Attempts+1); retryErr != nil {
+						persistErr = errors.Join(persistErr, retryErr)
+					}
+					failures = append(failures, fmt.Errorf("Integrationskonflikt für Queue-Job %s konnte nicht vollständig protokolliert werden: %w", job.ID, persistErr))
 				}
 				continue
 			}
-			_ = w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, err.Error(), job.PRNumber, job.Attempts+1)
+			updateErr := w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, err.Error(), job.PRNumber, job.Attempts+1)
+			if updateErr != nil {
+				failures = append(failures, fmt.Errorf("Integrationsfehler für Queue-Job %s: %w", job.ID, errors.Join(err, updateErr)))
+			} else {
+				failures = append(failures, fmt.Errorf("Integrationsfehler für Queue-Job %s: %w", job.ID, err))
+			}
 		}
 	}
+	return errors.Join(failures...)
 }
 
 func integrationConflictWithState(job domain.IntegrationJob, integrationErr error) error {
@@ -1972,7 +1983,9 @@ func (w *Worker) Start(ctx context.Context) {
 		tick := time.NewTicker(integrationQueueInterval)
 		defer tick.Stop()
 		for {
-			w.processIntegrationQueue(ctx)
+			if err := w.processIntegrationQueue(ctx); err != nil {
+				log.Printf("integration queue: %v", err)
+			}
 			select {
 			case <-ctx.Done():
 				return
