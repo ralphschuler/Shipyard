@@ -2137,7 +2137,11 @@ func (w *Worker) Process(ctx context.Context) {
 			}
 			deferEvent = true
 		}
-		if event.Type == "task.completed" && w.ReleasePublisher != nil {
+		if event.Type == "task.completed" {
+			if err := validateTaskCompletedReleasePublisher(w.ReleasePublisher); err != nil {
+				deferWithReason("Release-Agent blockiert: " + err.Error())
+				continue
+			}
 			if err := w.publishCompletedTask(ctx, event); err != nil {
 				deferWithReason("Release-Agent blockiert: " + err.Error())
 				continue
@@ -2176,6 +2180,13 @@ func (w *Worker) Process(ctx context.Context) {
 		w.startRun(ctx, run)
 	}
 	w.processWebhookDeliveries(ctx)
+}
+
+func validateTaskCompletedReleasePublisher(publisher ReleasePublisher) error {
+	if publisher == nil {
+		return errors.New("Release-Publisher ist nicht konfiguriert")
+	}
+	return nil
 }
 
 // publishCompletedTask is the server-side trust boundary for the release

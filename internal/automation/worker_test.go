@@ -41,6 +41,12 @@ func TestAcceptedRunMustBelongToAssignedProject(t *testing.T) {
 	}
 }
 
+func TestTaskCompletedWithoutReleasePublisherRemainsRetryable(t *testing.T) {
+	if err := validateTaskCompletedReleasePublisher(nil); err == nil {
+		t.Fatal("task.completed without a release publisher must remain blocked and retryable")
+	}
+}
+
 func TestMeasuredUsagePointerPreservesKnownZero(t *testing.T) {
 	if value := measuredUsagePointer(0, false); value != nil {
 		t.Fatalf("unknown usage must remain nil, got %v", *value)
