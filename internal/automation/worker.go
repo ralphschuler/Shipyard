@@ -2278,6 +2278,27 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	if branchErr != nil {
 		return branchErr
 	}
+	// A clean rebase rewrites commit IDs. Reconcile the stored identity before
+	// the ancestor check, otherwise a retry can apply an already accepted run
+	// for a second time simply because its old SHA no longer exists on the
+	// rebased task branch.
+	if delivery.AcceptedCommitSHA != "" {
+		rebasedSHA, recoveryErr := findUnpersistedTaskBranchCommit(ctx, source, taskBranch, worktree, runID)
+		if recoveryErr != nil {
+			return fmt.Errorf("rebasierter Task-Branch-Commit konnte nicht geprüft werden: %w", recoveryErr)
+		}
+		if rebasedSHA != "" && rebasedSHA != delivery.AcceptedCommitSHA {
+			persisted, persistErr := w.Store.UpdateRunAcceptedCommitSHA(ctx, runID, rebasedSHA)
+			if persistErr != nil {
+				return fmt.Errorf("rebasierter AcceptedCommitSHA konnte nicht persistiert werden: %w", persistErr)
+			}
+			if !persisted {
+				return errors.New("rebasierter AcceptedCommitSHA konnte nicht persistiert werden; Run ist bereits übernommen")
+			}
+			delivery.AcceptedCommitSHA = rebasedSHA
+			_ = w.Store.AddRunLog(ctx, runID, "warning", "AcceptedCommitSHA nach konfliktfreiem Rebase auf den umgeschriebenen Task-Branch-Commit abgebildet.")
+		}
+	}
 	alreadyCommitted := false
 	if delivery.AcceptedCommitSHA == "" {
 		recoveredSHA, recoveryErr := findUnpersistedTaskBranchCommit(ctx, source, taskBranch, worktree, runID)
