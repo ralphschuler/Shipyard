@@ -6,15 +6,28 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"taskboard/internal/store"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Store is deliberately a narrow service façade. Callers cannot supply a
 // partial WHERE clause; every query starts with the complete validated scope.
-type Store struct{ db *store.Store }
+type Store struct {
+	db                *store.Store
+	retentionRuns     atomic.Int64
+	retentionRows     atomic.Int64
+	retentionFailures atomic.Int64
+}
+
+type RetentionMetrics struct {
+	Runs     int64 `json:"runs"`
+	Rows     int64 `json:"rows"`
+	Failures int64 `json:"failures"`
+}
 
 func New(s *store.Store) *Store { return &Store{db: s} }
 func scopeArgs(s Scope) ([]any, error) {
@@ -31,17 +44,34 @@ func (s *Store) AppendConversation(ctx context.Context, scope Scope, p Provenanc
 	if !p.Valid(scope) {
 		return "", ErrInvalidProvenance
 	}
+	if m.MessageID != p.MessageID || m.RunID != p.RunID || m.OccurredAt.IsZero() || !m.OccurredAt.Equal(p.OccurredAt) {
+		return "", ErrInvalidProvenance
+	}
 	original := m.Content
 	m.Content = Redact(m.Content)
 	if m.Content == "" || m.ThreadID == "" || m.Role == "" {
 		return "", errors.New("message is incomplete")
 	}
-	var id string
-	err := s.db.DB.QueryRow(ctx, `INSERT INTO memory_conversations(tenant_id,user_id,project_id,task_id,agent_id,thread_id,message_id,run_id,role,content,content_hash,occurred_at,expires_at,provenance_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, m.ThreadID, m.MessageID, m.RunID, m.Role, m.Content, Hash(m.Content), m.OccurredAt, m.ExpiresAt, pJSON(p)).Scan(&id)
-	if err == nil {
-		_ = s.audit(ctx, scope, "stored", id, "ok", map[string]any{"redacted": m.Content != original})
+	tx, err := s.db.DB.Begin(ctx)
+	if err != nil {
+		return "", err
 	}
-	return id, err
+	defer tx.Rollback(ctx)
+	var runOK bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agent_runs WHERE id=$1 AND task_id=$2 AND agent_id=$3)`, p.RunID, scope.TaskID, scope.AgentID).Scan(&runOK); err != nil {
+		return "", err
+	}
+	if !runOK {
+		return "", ErrInvalidProvenance
+	}
+	var id string
+	if err = tx.QueryRow(ctx, `INSERT INTO memory_conversations(tenant_id,user_id,project_id,task_id,agent_id,thread_id,message_id,run_id,role,content,content_hash,occurred_at,expires_at,provenance_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, m.ThreadID, m.MessageID, m.RunID, m.Role, m.Content, Hash(m.Content), m.OccurredAt, m.ExpiresAt, pJSON(p)).Scan(&id); err != nil {
+		return "", err
+	}
+	if err = s.auditTx(ctx, tx, scope, scope.UserID, "stored", id, "ok", map[string]any{"redacted": m.Content != original}); err != nil {
+		return "", err
+	}
+	return id, tx.Commit(ctx)
 }
 
 func (s *Store) SearchConversation(ctx context.Context, scope Scope, query string, limit int, before time.Time, beforeID string) ([]ConversationMessage, error) {
@@ -65,10 +95,43 @@ func (s *Store) SearchConversation(ctx context.Context, scope Scope, query strin
 		m.Content = Redact(m.Content)
 		out = append(out, m)
 	}
-	if err = rows.Err(); err == nil {
-		_ = s.audit(ctx, scope, "searched", "", "ok", map[string]any{"query": query, "count": len(out)})
+	if err = rows.Err(); err != nil {
+		return nil, err
 	}
-	return out, err
+	if err = s.audit(ctx, scope, scope.UserID, "searched", "", "ok", map[string]any{"query": query, "count": len(out)}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ExportMemory is intentionally server-side and scope-bound. It does not
+// reuse the paginated UI response, so an export cannot silently omit pages.
+func (s *Store) ExportMemory(ctx context.Context, scope Scope, query string, budget int) (ExportData, error) {
+	if _, err := scopeArgs(scope); err != nil {
+		return ExportData{}, err
+	}
+	rows, err := s.db.DB.Query(ctx, `SELECT id,thread_id,message_id,run_id,role,content,occurred_at,expires_at FROM memory_conversations WHERE tenant_id=$1 AND user_id=$2 AND project_id=$3 AND task_id=$4 AND agent_id=$5 AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at>now()) AND ($6='' OR search_vector @@ plainto_tsquery('simple',$6)) ORDER BY occurred_at DESC,id DESC`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, strings.TrimSpace(query))
+	if err != nil {
+		return ExportData{}, err
+	}
+	defer rows.Close()
+	messages := []ConversationMessage{}
+	for rows.Next() {
+		var m ConversationMessage
+		if err = rows.Scan(&m.ID, &m.ThreadID, &m.MessageID, &m.RunID, &m.Role, &m.Content, &m.OccurredAt, &m.ExpiresAt); err != nil {
+			return ExportData{}, err
+		}
+		m.Content = Redact(m.Content)
+		messages = append(messages, m)
+	}
+	if err = rows.Err(); err != nil {
+		return ExportData{}, err
+	}
+	pack, err := s.RetrieveContextPack(ctx, scope, query, budget)
+	if err != nil {
+		return ExportData{}, err
+	}
+	return ExportData{Messages: messages, Context: pack}, nil
 }
 
 func (s *Store) UpsertFact(ctx context.Context, scope Scope, in FactInput, actorID string) (string, error) {
@@ -94,18 +157,40 @@ func (s *Store) UpsertFact(ctx context.Context, scope Scope, in FactInput, actor
 		return "", err
 	}
 	defer tx.Rollback(ctx)
+	var provenanceOK bool
+	if err = tx.QueryRow(ctx, `SELECT EXISTS(
+		SELECT 1 FROM agent_runs r
+		JOIN memory_conversations c ON c.message_id=$6 AND c.run_id=r.id
+		WHERE r.id=$7 AND r.task_id=$4 AND r.agent_id=$5
+		  AND c.tenant_id=$1 AND c.user_id=$2 AND c.project_id=$3 AND c.task_id=$4 AND c.agent_id=$5
+	)`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, in.MessageID, in.RunID).Scan(&provenanceOK); err != nil {
+		return "", err
+	}
+	if !provenanceOK {
+		return "", ErrInvalidProvenance
+	}
 	key := DedupeKey(in.Subject, in.Predicate, object)
 	var factID, oldVersion string
+	var existingObject []byte
 	var version int
-	err = tx.QueryRow(ctx, `INSERT INTO memory_facts(tenant_id,user_id,project_id,task_id,agent_id,subject,predicate,object_json,dedupe_key,confidence,high_impact) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(tenant_id,user_id,project_id,task_id,agent_id,dedupe_key) DO UPDATE SET updated_at=now() RETURNING id,COALESCE(current_version_id::text,''),COALESCE((SELECT version_no FROM memory_fact_versions v WHERE v.id=memory_facts.current_version_id),0)`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, in.Subject, in.Predicate, object, key, in.Confidence, in.HighImpact).Scan(&factID, &oldVersion, &version)
+	err = tx.QueryRow(ctx, `INSERT INTO memory_facts(tenant_id,user_id,project_id,task_id,agent_id,subject,predicate,object_json,dedupe_key,confidence,high_impact,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT(tenant_id,user_id,project_id,task_id,agent_id,dedupe_key) DO NOTHING RETURNING id`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, in.Subject, in.Predicate, object, key, in.Confidence, in.HighImpact, in.ValidUntil).Scan(&factID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = tx.QueryRow(ctx, `SELECT id,COALESCE(current_version_id::text,''),COALESCE((SELECT version_no FROM memory_fact_versions v WHERE v.id=current_version_id),0),object_json FROM memory_facts WHERE tenant_id=$1 AND user_id=$2 AND project_id=$3 AND task_id=$4 AND agent_id=$5 AND dedupe_key=$6 FOR UPDATE`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, key).Scan(&factID, &oldVersion, &version, &existingObject)
+	} else if err == nil {
+		oldVersion = ""
+		version = 0
+	}
 	if err != nil {
 		return "", err
 	}
-	if oldVersion != "" {
-		if _, err = tx.Exec(ctx, `UPDATE memory_fact_versions SET active=false WHERE id=$1`, oldVersion); err != nil {
+	if oldVersion != "" && string(existingObject) == string(object) {
+		if err = s.auditTx(ctx, tx, scope, actorID, "deduplicated", factID, "ok", map[string]any{"version": version}); err != nil {
 			return "", err
 		}
-		if _, err = tx.Exec(ctx, `UPDATE memory_facts SET status='superseded' WHERE id=$1`, factID); err != nil {
+		return factID, tx.Commit(ctx)
+	}
+	if oldVersion != "" {
+		if _, err = tx.Exec(ctx, `UPDATE memory_facts SET status='pending',object_json=$1,confidence=$2,high_impact=$3,expires_at=$4,updated_at=now() WHERE id=$5`, object, in.Confidence, in.HighImpact, in.ValidUntil, factID); err != nil {
 			return "", err
 		}
 	}
@@ -117,12 +202,16 @@ func (s *Store) UpsertFact(ctx context.Context, scope Scope, in FactInput, actor
 	if _, err = tx.Exec(ctx, `UPDATE memory_facts SET current_version_id=$1,updated_at=now() WHERE id=$2`, vid, factID); err != nil {
 		return "", err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO memory_audit_events(tenant_id,user_id,project_id,task_id,agent_id,action,target_id,actor_id,actor_role,result,metadata_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,'service','ok',$9)`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, func() string {
+	role, err := s.actorRole(ctx, actorID)
+	if err != nil {
+		return "", err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO memory_audit_events(tenant_id,user_id,project_id,task_id,agent_id,action,target_id,actor_id,actor_role,result,metadata_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'ok',$10)`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, func() string {
 		if oldVersion != "" {
 			return "superseded"
 		}
 		return "stored"
-	}(), factID, actorID, `{}`); err != nil {
+	}(), factID, actorID, role, `{}`); err != nil {
 		return "", err
 	}
 	return factID, tx.Commit(ctx)
@@ -135,23 +224,122 @@ func (s *Store) SetFactStatus(ctx context.Context, scope Scope, factID, actorID,
 	if status != "confirmed" && status != "revoked" {
 		return errors.New("invalid fact status")
 	}
-	tag, err := s.db.DB.Exec(ctx, `UPDATE memory_facts SET status=$1,updated_at=now() WHERE tenant_id=$2 AND user_id=$3 AND project_id=$4 AND task_id=$5 AND agent_id=$6 AND id=$7`, status, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, factID)
+	role, err := s.actorRole(ctx, actorID)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() != 1 {
-		return pgx.ErrNoRows
+	if role == "viewer" || role == "service" {
+		return errors.New("actor is not allowed to change fact status")
 	}
-	return s.audit(ctx, scope, status, factID, "ok", map[string]any{"actor": actorID})
+	tx, err := s.db.DB.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var highImpact bool
+	if err = tx.QueryRow(ctx, `SELECT high_impact FROM memory_facts WHERE tenant_id=$1 AND user_id=$2 AND project_id=$3 AND task_id=$4 AND agent_id=$5 AND id=$6 FOR UPDATE`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, factID).Scan(&highImpact); err != nil {
+		return err
+	}
+	if err = tx.QueryRow(ctx, `UPDATE memory_facts SET status=$1,updated_at=now() WHERE id=$2 RETURNING id`, status, factID).Scan(&factID); err != nil {
+		return err
+	}
+	if statusSetsConfirmation(status) {
+		_, err = tx.Exec(ctx, `UPDATE memory_facts SET confirmed_by=$1,confirmed_at=now() WHERE id=$2`, actorID, factID)
+	} else {
+		_, err = tx.Exec(ctx, `UPDATE memory_facts SET confirmed_by=NULL,confirmed_at=NULL WHERE id=$1`, factID)
+	}
+	if err != nil {
+		return err
+	}
+	if err = s.auditTx(ctx, tx, scope, actorID, status, factID, "ok", map[string]any{"actor_role": role, "high_impact": highImpact}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *Store) Retain(ctx context.Context, scope Scope) (int64, error) {
-	if _, err := scopeArgs(scope); err != nil {
-		return 0, err
-	}
-	r, err := s.db.DB.Exec(ctx, `DELETE FROM memory_conversations WHERE tenant_id=$1 AND user_id=$2 AND project_id=$3 AND task_id=$4 AND agent_id=$5 AND (expires_at<now() OR occurred_at<now()-interval '365 days')`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID)
-	return r.RowsAffected(), err
+	r, err := s.RetainWithPolicyStats(ctx, scope, RetentionPolicy{})
+	return r.TotalRows(), err
 }
+
+func (s *Store) RetainWithPolicy(ctx context.Context, scope Scope, policy RetentionPolicy) (int64, error) {
+	r, err := s.RetainWithPolicyStats(ctx, scope, policy)
+	return r.TotalRows(), err
+}
+
+func (s *Store) RetainWithPolicyStats(ctx context.Context, scope Scope, policy RetentionPolicy) (RetentionResult, error) {
+	if _, err := scopeArgs(scope); err != nil {
+		return RetentionResult{}, err
+	}
+	policy = policy.normalized()
+	tx, err := s.db.DB.Begin(ctx)
+	if err != nil {
+		return RetentionResult{}, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT set_config('shipyard.memory_delete','on',true)`); err != nil {
+		return RetentionResult{}, err
+	}
+	r, err := tx.Exec(ctx, `DELETE FROM memory_conversations WHERE tenant_id=$1 AND user_id=$2 AND project_id=$3 AND task_id=$4 AND agent_id=$5 AND (expires_at<now() OR occurred_at<$6)`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, time.Now().Add(-policy.ConversationAge))
+	if err != nil {
+		return RetentionResult{}, err
+	}
+	f, err := tx.Exec(ctx, `DELETE FROM memory_facts WHERE tenant_id=$1 AND user_id=$2 AND project_id=$3 AND task_id=$4 AND agent_id=$5 AND (expires_at<now() OR updated_at<$6)`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, time.Now().Add(-policy.FactAge))
+	if err != nil {
+		return RetentionResult{}, err
+	}
+	result := RetentionResult{ConversationRows: r.RowsAffected(), FactRows: f.RowsAffected(), Runs: 1}
+	if err = s.auditTx(ctx, tx, scope, scope.UserID, "retained", "", "ok", map[string]any{"conversation_rows": result.ConversationRows, "fact_rows": result.FactRows}); err != nil {
+		return RetentionResult{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return RetentionResult{}, err
+	}
+	s.retentionRuns.Add(1)
+	s.retentionRows.Add(result.TotalRows())
+	return result, nil
+}
+
+// RetainAll applies the configured policy to every scope represented in the
+// memory tables. The scope list is read before deletion, so each operation is
+// still audited with its owning user and all deletes remain scope predicates.
+func (s *Store) RetainAll(ctx context.Context, policy RetentionPolicy) (RetentionResult, error) {
+	rows, err := s.db.DB.Query(ctx, `SELECT tenant_id,user_id,project_id,task_id,agent_id FROM memory_conversations UNION SELECT tenant_id,user_id,project_id,task_id,agent_id FROM memory_facts`)
+	if err != nil {
+		return RetentionResult{}, err
+	}
+	var scopes []Scope
+	for rows.Next() {
+		var scope Scope
+		if err = rows.Scan(&scope.TenantID, &scope.UserID, &scope.ProjectID, &scope.TaskID, &scope.AgentID); err != nil {
+			rows.Close()
+			return RetentionResult{}, err
+		}
+		scopes = append(scopes, scope)
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return RetentionResult{}, err
+	}
+	rows.Close()
+	var total RetentionResult
+	for _, scope := range scopes {
+		result, retainErr := s.RetainWithPolicyStats(ctx, scope, policy)
+		if retainErr != nil {
+			return total, retainErr
+		}
+		total.ConversationRows += result.ConversationRows
+		total.FactRows += result.FactRows
+		total.Runs += result.Runs
+	}
+	return total, nil
+}
+
+func (s *Store) RetentionMetrics() RetentionMetrics {
+	return RetentionMetrics{Runs: s.retentionRuns.Load(), Rows: s.retentionRows.Load(), Failures: s.retentionFailures.Load()}
+}
+
+func (s *Store) RecordRetentionFailure() { s.retentionFailures.Add(1) }
 
 // RetrieveContextPack applies scope predicates in SQL and enforces the hard
 // budget after deterministic ordering. Pending high-impact facts never enter.
@@ -177,7 +365,7 @@ func (s *Store) RetrieveContextPack(ctx context.Context, scope Scope, query stri
 	if err = rows.Err(); err != nil {
 		return ContextPack{}, err
 	}
-	rows, err = s.db.DB.Query(ctx, `SELECT f.id,f.subject,f.predicate,f.object_json,f.confidence,v.message_id,v.run_id,v.created_at FROM memory_facts f JOIN memory_fact_versions v ON v.id=f.current_version_id WHERE f.tenant_id=$1 AND f.user_id=$2 AND f.project_id=$3 AND f.task_id=$4 AND f.agent_id=$5 AND f.status IN ('confirmed','pending') AND (NOT f.high_impact OR f.status='confirmed') AND (f.expires_at IS NULL OR f.expires_at>now()) ORDER BY f.confidence DESC,f.updated_at DESC,f.id LIMIT 100`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID)
+	rows, err = s.db.DB.Query(ctx, `SELECT f.id,f.subject,f.predicate,f.object_json,f.confidence,v.message_id,v.run_id,v.valid_from,v.valid_until FROM memory_facts f JOIN memory_fact_versions v ON v.id=f.current_version_id WHERE f.tenant_id=$1 AND f.user_id=$2 AND f.project_id=$3 AND f.task_id=$4 AND f.agent_id=$5 AND f.status IN ('confirmed','pending') AND (NOT f.high_impact OR f.status='confirmed') AND (f.expires_at IS NULL OR f.expires_at>now()) AND v.valid_from<=now() AND (v.valid_until IS NULL OR v.valid_until>now()) ORDER BY f.confidence DESC,f.updated_at DESC,f.id LIMIT 100`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID)
 	if err != nil {
 		return ContextPack{}, err
 	}
@@ -186,9 +374,13 @@ func (s *Store) RetrieveContextPack(ctx context.Context, scope Scope, query stri
 		var object []byte
 		var confidence float64
 		var at time.Time
-		if err = rows.Scan(&id, &subject, &predicate, &object, &confidence, &message, &run, &at); err != nil {
+		var until *time.Time
+		if err = rows.Scan(&id, &subject, &predicate, &object, &confidence, &message, &run, &at, &until); err != nil {
 			rows.Close()
 			return ContextPack{}, err
+		}
+		if !FactVersionVisibleAt(at, until, time.Now()) {
+			continue
 		}
 		items = append(items, RetrievalItem{Kind: "fact", ID: id, Text: subject + " " + predicate + " " + string(object), Confidence: confidence, Source: Provenance{MessageID: message, TaskID: scope.TaskID, RunID: run, AgentID: scope.AgentID, OccurredAt: at}})
 	}
@@ -198,35 +390,92 @@ func (s *Store) RetrieveContextPack(ctx context.Context, scope Scope, query stri
 	}
 	pack := Fit(items, budget)
 	pack.ID = Hash(scope.TenantID + scope.UserID + scope.ProjectID + scope.TaskID + scope.AgentID + query + fmt.Sprint(budget))
-	_ = s.audit(ctx, scope, "read", "", "ok", map[string]any{"retrieval_id": pack.ID, "items": len(pack.Items), "budget": budget})
+	if err = s.audit(ctx, scope, scope.UserID, "read", "", "ok", map[string]any{"retrieval_id": pack.ID, "items": len(pack.Items), "budget": budget}); err != nil {
+		return ContextPack{}, err
+	}
 	return pack, nil
 }
 
 func (s *Store) DeleteMemory(ctx context.Context, scope Scope) (int64, error) {
+	r, err := s.DeleteMemoryStats(ctx, scope)
+	return r.TotalRows(), err
+}
+
+// DeleteMemoryStats returns a complete, auditable deletion result for the
+// scope. DeleteMemory remains as a compatibility wrapper for older callers.
+func (s *Store) DeleteMemoryStats(ctx context.Context, scope Scope) (RetentionResult, error) {
 	if _, err := scopeArgs(scope); err != nil {
-		return 0, err
+		return RetentionResult{}, err
 	}
 	tx, err := s.db.DB.Begin(ctx)
 	if err != nil {
-		return 0, err
+		return RetentionResult{}, err
 	}
 	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `SELECT set_config('shipyard.memory_delete','on',true)`); err != nil {
+		return RetentionResult{}, err
+	}
 	var n int64
 	if err = tx.QueryRow(ctx, `WITH deleted AS (DELETE FROM memory_conversations WHERE tenant_id=$1 AND user_id=$2 AND project_id=$3 AND task_id=$4 AND agent_id=$5 RETURNING 1) SELECT count(*) FROM deleted`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID).Scan(&n); err != nil {
-		return 0, err
+		return RetentionResult{}, err
 	}
-	if _, err = tx.Exec(ctx, `DELETE FROM memory_facts WHERE tenant_id=$1 AND user_id=$2 AND project_id=$3 AND task_id=$4 AND agent_id=$5`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID); err != nil {
-		return 0, err
+	f, err := tx.Exec(ctx, `DELETE FROM memory_facts WHERE tenant_id=$1 AND user_id=$2 AND project_id=$3 AND task_id=$4 AND agent_id=$5`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID)
+	if err != nil {
+		return RetentionResult{}, err
 	}
-	if _, err = tx.Exec(ctx, `INSERT INTO memory_audit_events(tenant_id,user_id,project_id,task_id,agent_id,action,actor_id,actor_role,result,metadata_json) VALUES($1,$2,$3,$4,$5,'deleted',$2,'service','ok',$6)`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID, `{"conversation_rows":`+fmt.Sprint(n)+`}`); err != nil {
-		return 0, err
+	result := RetentionResult{ConversationRows: n, FactRows: f.RowsAffected()}
+	if err = s.auditTx(ctx, tx, scope, scope.UserID, "deleted", "", "ok", map[string]any{"conversation_rows": n, "fact_rows": result.FactRows}); err != nil {
+		return RetentionResult{}, err
 	}
-	return n, tx.Commit(ctx)
+	return result, tx.Commit(ctx)
 }
 
-func (s *Store) audit(ctx context.Context, sc Scope, action, target, result string, meta map[string]any) error {
+func (s *Store) audit(ctx context.Context, sc Scope, actorID, action, target, result string, meta map[string]any) error {
+	return s.auditTx(ctx, s.db.DB, sc, actorID, action, target, result, meta)
+}
+
+type queryRower interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func (s *Store) actorRole(ctx context.Context, actorID string) (string, error) {
+	return actorRole(ctx, s.db.DB, actorID)
+}
+
+func actorRole(ctx context.Context, q queryRower, actorID string) (string, error) {
+	if strings.TrimSpace(actorID) == "" {
+		return "", errors.New("actor is required")
+	}
+	var role string
+	err := q.QueryRow(ctx, `SELECT role FROM users WHERE id=$1 AND active`, actorID).Scan(&role)
+	if err == nil {
+		return role, nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		var exists bool
+		if err = q.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM agents WHERE id=$1 AND retired_at IS NULL)`, actorID).Scan(&exists); err != nil {
+			return "", err
+		}
+		if exists {
+			return "service", nil
+		}
+	}
+	return "", err
+}
+
+func (s *Store) auditTx(ctx context.Context, q queryRower, sc Scope, actorID, action, target, result string, meta map[string]any) error {
 	b, _ := json.Marshal(meta)
-	_, err := s.db.DB.Exec(ctx, `INSERT INTO memory_audit_events(tenant_id,user_id,project_id,task_id,agent_id,action,target_id,actor_id,actor_role,result,metadata_json) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,'')::uuid,$2,'service',$8,$9)`, sc.TenantID, sc.UserID, sc.ProjectID, sc.TaskID, sc.AgentID, action, target, result, b)
+	role, err := actorRole(ctx, q, actorID)
+	if err != nil {
+		return err
+	}
+	qExec, ok := q.(interface {
+		Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+	})
+	if !ok {
+		return errors.New("audit executor is unavailable")
+	}
+	_, err = qExec.Exec(ctx, `INSERT INTO memory_audit_events(tenant_id,user_id,project_id,task_id,agent_id,action,target_id,actor_id,actor_role,result,metadata_json) VALUES($1,$2,$3,$4,$5,$6,NULLIF($7,'')::uuid,$8,$9,$10,$11)`, sc.TenantID, sc.UserID, sc.ProjectID, sc.TaskID, sc.AgentID, action, target, actorID, role, result, b)
 	return err
 }
 func pJSON(v any) []byte { b, _ := json.Marshal(v); return b }

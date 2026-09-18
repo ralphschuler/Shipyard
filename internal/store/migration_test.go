@@ -179,11 +179,38 @@ func TestAgentMemoryMigrationEnforcesScopeHistoryAndActiveVersion(t *testing.T) 
 	for _, required := range []string{
 		"memory_conversations", "memory_audit_events", "provenance_json", "search_vector",
 		"UNIQUE(tenant_id,user_id,project_id,task_id,agent_id,dedupe_key)",
-		"CREATE UNIQUE INDEX memory_one_active_version ON memory_fact_versions(fact_id) WHERE active",
+		"CREATE TRIGGER memory_fact_versions_append_only BEFORE UPDATE OR DELETE ON memory_fact_versions",
 		"current_version_id UUID", "high_impact BOOLEAN",
+		"memory_fact_versions_current_validity", "memory_facts_retention",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("memory migration missing %q", required)
+		}
+	}
+}
+
+func TestMemoryHardeningAllowsOnlyExplicitRetentionDeletes(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/048_memory_hardening.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"shipyard.memory_delete", "TG_OP = 'DELETE'", "memory_fact_versions_append_only"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("memory hardening migration missing %q", required)
+		}
+	}
+}
+
+func TestMemoryRetentionMigrationAddsScopedAgeIndexes(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/049_memory_retention_indexes.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"memory_conversations_retention_scope", "memory_facts_retention_updated", "updated_at"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("memory retention migration missing %q", required)
 		}
 	}
 }
