@@ -164,3 +164,92 @@ test("legacy dialog enhancement keeps nested forms usable and restores focus", a
   await expect(dialog).toBeHidden();
   await expect(page.locator("#trigger")).toBeFocused();
 });
+
+function taskFixture(commentCount: number) {
+  return {
+    Task: { ID: `task-${commentCount}`, BoardID: "board-1", Title: "Kommentarprüfung", Description: "Beschreibung" },
+    Allowed: [],
+    Columns: {},
+    Interactions: [],
+    Changes: [],
+    History: [],
+    Agents: [],
+    Runs: [],
+    BoardLabels: [],
+    Projects: [],
+    TargetProjects: [],
+    Groups: [],
+    TargetGroups: [],
+    Comments: Array.from({ length: commentCount }, (_, index) => ({
+      ID: `comment-${index}`,
+      Author: `Autor ${index + 1}`,
+      CreatedAt: `2026-09-17T10:${String(index).padStart(2, "0")}:00Z`,
+      Body: index === commentCount - 1
+        ? `Ein sehr langer Kommentar, der vollständig lesbar bleiben muss. ${"Zusätzlicher Inhalt. ".repeat(20)}`
+        : `Kommentar ${index + 1}`,
+    })),
+  };
+}
+
+test("task comments stay compact and reveal older comments without reloading", async ({ page }) => {
+  await page.route("**/events", (route) => route.abort());
+  await page.route("**/api/v1/tasks/task-*", async (route) => {
+    const count = Number(new URL(route.request().url()).pathname.split("-").at(-1));
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify(taskFixture(count)) });
+  });
+  await page.route("**/api/v1/settings/appearance", (route) =>
+    route.fulfill({ contentType: "application/json", body: JSON.stringify({ Theme: "light", Language: "de" }) }),
+  );
+  await page.goto("/app/#/tasks/task-10");
+
+  const comments = page.locator('[data-testid="task-comment"]');
+  await expect(comments).toHaveCount(6);
+  await expect(comments.nth(0)).toContainText("Kommentar 5");
+  await expect(comments.nth(5)).toContainText("Ein sehr langer Kommentar");
+  const longComment = comments.nth(5).locator("details");
+  await expect(longComment).toHaveCount(1);
+  await expect(longComment.locator("summary")).toContainText("Ein sehr langer Kommentar");
+  await longComment.locator("summary").click();
+  await expect(longComment.locator("p")).toContainText("Zusätzlicher Inhalt");
+  await expect(page.getByRole("button", { name: "Ältere Kommentare anzeigen" })).toBeVisible();
+  await expect(comments.nth(2)).toHaveAttribute("data-prominent", "false");
+  await expect(comments.nth(3)).toHaveAttribute("data-prominent", "true");
+  await expect(comments.nth(5)).toHaveAttribute("data-prominent", "true");
+
+  const olderCommentsButton = page.getByRole("button", { name: "Ältere Kommentare anzeigen" });
+  await olderCommentsButton.focus();
+  const anchorTopBeforeReveal = await comments.nth(0).evaluate((element) => {
+    return element.getBoundingClientRect().top;
+  });
+  await page.keyboard.press("Enter");
+  await expect(comments).toHaveCount(10);
+  const anchorTopAfterReveal = await comments.nth(4).evaluate((element) => element.getBoundingClientRect().top);
+  expect(Math.abs(anchorTopAfterReveal - anchorTopBeforeReveal)).toBeLessThan(2);
+  await expect(page.getByRole("button", { name: "Ältere Kommentare ausblenden" })).toHaveAttribute("aria-expanded", "true");
+  await expect(comments.nth(0)).toContainText("Kommentar 1");
+  await expect(comments.nth(9)).toContainText("Ein sehr langer Kommentar");
+  await expect(comments.nth(6)).toHaveAttribute("data-prominent", "false");
+  await expect(comments.nth(7)).toHaveAttribute("data-prominent", "true");
+
+  await page.getByRole("button", { name: "Ältere Kommentare ausblenden" }).click();
+  await expect(comments).toHaveCount(6);
+  const anchorTopAfterCollapse = await comments.nth(0).evaluate((element) => element.getBoundingClientRect().top);
+  expect(Math.abs(anchorTopAfterCollapse - anchorTopBeforeReveal)).toBeLessThan(2);
+});
+
+test.describe("comment thresholds", () => {
+  for (const count of [0, 3, 6, 7]) {
+    test(`${count} comments has the expected initial visibility`, async ({ page }) => {
+      await page.route("**/events", (route) => route.abort());
+      await page.route("**/api/v1/settings/appearance", (route) =>
+        route.fulfill({ contentType: "application/json", body: JSON.stringify({ Theme: "light", Language: "de" }) }),
+      );
+      await page.route(`**/api/v1/tasks/task-${count}`, (route) =>
+        route.fulfill({ contentType: "application/json", body: JSON.stringify(taskFixture(count)) }),
+      );
+      await page.goto(`/app/#/tasks/task-${count}`);
+      await expect(page.locator('[data-testid="task-comment"]')).toHaveCount(Math.min(count, 6));
+      await expect(page.getByRole("button", { name: "Ältere Kommentare anzeigen" })).toHaveCount(count > 6 ? 1 : 0);
+    });
+  }
+});

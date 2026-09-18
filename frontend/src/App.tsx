@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Activity,
   Bot,
@@ -478,7 +478,7 @@ export default function App() {
           ) : route.startsWith("/boards/") ? (
             <BoardDetail id={route.split("/")[2]} />
           ) : route.startsWith("/tasks/") ? (
-            <TaskDetail id={route.split("/")[2]} />
+            <TaskDetail key={route.split("/")[2]} id={route.split("/")[2]} />
           ) : route.startsWith("/runs/") ? (
             <RunDetail id={route.split("/")[2]} />
           ) : route === "/automations/schedules" ? (
@@ -3389,6 +3389,19 @@ function ChangesTab({ changes, onMessage }: { changes: any[]; onMessage: (messag
 function TaskDetail({ id }: { id: string }) {
   const { data, error } = useAPI<any>("/api/v1/tasks/" + id);
   const [comment, setComment] = useState("");
+  const [showOlderComments, setShowOlderComments] = useState(false);
+  const commentScrollAnchor = useRef<{ index: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    const anchor = commentScrollAnchor.current;
+    if (!anchor) return;
+    const element = document.querySelector<HTMLElement>(
+      `[data-testid="task-comment"][data-comment-index="${anchor.index}"]`,
+    );
+    if (element) {
+      window.scrollTo({ top: window.scrollY + element.getBoundingClientRect().top - anchor.top, behavior: "auto" });
+    }
+    commentScrollAnchor.current = null;
+  }, [showOlderComments]);
   const [edit, setEdit] = useState(false);
   const [targets, setTargets] = useState(false);
   const [handoff, setHandoff] = useState(false);
@@ -3398,6 +3411,22 @@ function TaskDetail({ id }: { id: string }) {
   if (error) return <Failure />;
   if (!data) return <Loading />;
   const task = data.Task;
+  const allComments = data.Comments || [];
+  const hasOlderComments = allComments.length > 6;
+  const visibleComments = showOlderComments || !hasOlderComments
+    ? allComments
+    : allComments.slice(-6);
+  const latestCommentStart = Math.max(0, allComments.length - 3);
+  const toggleOlderComments = () => {
+    if (hasOlderComments) {
+      const anchorIndex = allComments.length - 6;
+      const element = document.querySelector<HTMLElement>(
+        `[data-testid="task-comment"][data-comment-index="${anchorIndex}"]`,
+      );
+      if (element) commentScrollAnchor.current = { index: anchorIndex, top: element.getBoundingClientRect().top };
+    }
+    setShowOlderComments((visible) => !visible);
+  };
   const request = async (url: string, body: FormData) => {
     try {
       await mutation(url, { method: "POST", body });
@@ -3560,21 +3589,58 @@ function TaskDetail({ id }: { id: string }) {
                   </form>
                 </section>
               ))}
-              <div className="space-y-4" aria-label="Task-Kommentare">
-                {data.Comments.map((entry: any) => {
+              <div
+                id="task-comments-list"
+                className="space-y-3"
+                aria-label="Task-Kommentare"
+                aria-live="polite"
+              >
+                {visibleComments.map((entry: any, visibleIndex: number) => {
                   const automated = /agent|taskboard|system|codex|qa/i.test(entry.Author || "");
+                  const originalIndex = showOlderComments || !hasOlderComments
+                    ? visibleIndex
+                    : allComments.length - visibleComments.length + visibleIndex;
+                  const prominent = originalIndex >= latestCommentStart;
+                  const body = String(entry.Body || "");
+                  const canExpand = body.length > 280;
                   return (
                     <ChatBubble
                       key={entry.ID}
+                      data-testid="task-comment"
+                      data-comment-index={originalIndex}
+                      data-prominent={prominent}
+                      className={prominent ? "task-comment--prominent" : "task-comment--compact"}
                       author={entry.Author || "Unbekannt"}
                       timestamp={entry.CreatedAt ? new Date(entry.CreatedAt).toLocaleString("de-DE") : undefined}
                       side={automated ? "incoming" : "outgoing"}
                     >
-                      <MarkdownContent source={entry.Body || ""} className="text-sm" />
+                      {entry.Status && <span className="mb-1 block text-xs font-medium opacity-75">{entry.Status}</span>}
+                      {canExpand ? (
+                        <details>
+                          <summary className="cursor-pointer whitespace-pre-wrap leading-6 marker:text-current/60">
+                            {body.slice(0, 280).trimEnd()} …
+                          </summary>
+                          <MarkdownContent source={body} className="mt-2 text-sm" />
+                        </details>
+                      ) : (
+                        <MarkdownContent source={body} className="text-sm" />
+                      )}
                     </ChatBubble>
                   );
                 })}
               </div>
+              {hasOlderComments && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="mt-4"
+                  aria-expanded={showOlderComments}
+                  aria-controls="task-comments-list"
+                  onClick={toggleOlderComments}
+                >
+                  {showOlderComments ? "Ältere Kommentare ausblenden" : "Ältere Kommentare anzeigen"}
+                </Button>
+              )}
               <form className="mt-5 grid gap-3" onSubmit={commentSubmit}>
                 <textarea
                   required
