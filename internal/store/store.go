@@ -2931,6 +2931,17 @@ func (s *Store) MarkRunApplied(c context.Context, id, commitSHA string) (bool, e
 	tag, err := s.DB.Exec(c, "UPDATE agent_runs SET accepted_commit_sha=$2,applied_at=now(),summary='Änderungen übernommen' WHERE id=$1 AND applied_at IS NULL AND $2 <> ''", id, commitSHA)
 	return tag.RowsAffected() == 1, err
 }
+
+// UpdateRunAcceptedCommitSHA stores the replacement identity after a clean
+// rebase. Applied runs are immutable so retries cannot rewrite history.
+func (s *Store) UpdateRunAcceptedCommitSHA(c context.Context, id, commitSHA string) (bool, error) {
+	if strings.TrimSpace(commitSHA) == "" {
+		return false, errors.New("accepted commit SHA darf nicht leer sein")
+	}
+	tag, err := s.DB.Exec(c, "UPDATE agent_runs SET accepted_commit_sha=$2 WHERE id=$1 AND applied_at IS NULL", id, strings.TrimSpace(commitSHA))
+	return tag.RowsAffected() == 1, err
+}
+
 func (s *Store) SetRunIntegration(c context.Context, id, branch, baseSHA, headSHA, status, prURL string, prNumber int) error {
 	_, err := s.DB.Exec(c, `UPDATE agent_runs SET integration_branch=$2,integration_base_sha=$3,integration_head_sha=$4,integration_status=$5,pr_url=$6,pr_number=$7 WHERE id=$1`, id, branch, baseSHA, headSHA, status, prURL, prNumber)
 	return err
