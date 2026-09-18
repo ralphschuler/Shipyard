@@ -4,7 +4,22 @@ import path from "node:path";
 
 const apiFixtures: Record<string, unknown> = {
   "/api/v1/settings/appearance": { Theme: "light", Language: "de" },
-  "/api/v1/projects": [],
+  "/api/v1/projects": [{
+    ID: "project-1",
+    Name: "Shipyard",
+    RepositoryURL: "https://github.com/ralphschuler/Shipyard.git",
+    DefaultBranch: "master",
+    Boards: [],
+  }],
+  "/api/v1/boards/board-1": {
+    Board: { ID: "board-1", Name: "Board 1" },
+    Labels: [],
+    Projects: [],
+    Groups: [],
+    Columns: [{ ID: "column-1", Name: "Inbox" }],
+    Tasks: [],
+    Transitions: [],
+  },
   "/api/v1/boards": Array.from({ length: 18 }, (_, index) => ({
     ID: `board-${index}`,
     Name: `Board ${index}`,
@@ -39,7 +54,53 @@ const apiFixtures: Record<string, unknown> = {
     Transitions: [],
     Groups: [],
   },
+  "/api/v1/tasks/task-1": {
+    Task: {
+      ID: "task-1",
+      Title: "Modal-Layout prüfen",
+      Description: "Eine produktive Task-Ansicht mit Dialogen.",
+      Priority: "high",
+      BoardID: "board-1",
+      Labels: [],
+    },
+    Interactions: [{
+      ID: "interaction-1",
+      Title: "Welche Oberfläche soll geprüft werden?",
+      Body: "Bitte wähle eine Oberfläche.",
+      Fields: [{
+        ID: "surface",
+        Label: "Oberfläche",
+        Type: "select",
+        Required: true,
+        Options: [{ Value: "web", Label: "Web" }, { Value: "mobile", Label: "Mobile" }],
+      }],
+    }],
+    Comments: [],
+    Allowed: [],
+    Columns: {},
+    BoardLabels: [],
+    Agents: [],
+    Runs: [],
+    History: [],
+    Projects: [],
+    Groups: [],
+    TargetProjects: [],
+    TargetGroups: [],
+    Changes: [],
+  },
+  "/api/v1/runs/run-1": {
+    run: { ID: "run-1", Status: "succeeded" },
+    task: { ID: "task-1", Title: "Modal-Layout prüfen" },
+    delivery: {
+      GateStatus: "passed",
+      DiffSummary: "1 Datei geändert",
+      GateOutput: "Alle Prüfungen bestanden",
+      AppliedAt: null,
+    },
+    usage: {},
+  },
 };
+const legacyStyles = await readFile(path.resolve(import.meta.dirname, "../../internal/web/static/app.css"), "utf8");
 
 async function mockReactBackend(page: Page) {
   await page.route("**/events", (route) => route.abort());
@@ -54,27 +115,79 @@ async function mockReactBackend(page: Page) {
   });
 }
 
-test("React project modal scrolls, focuses, closes on Escape, and restores focus", async ({ page }) => {
+test("React project modal remains bounded and scrolls its body at every supported viewport", async ({ page }) => {
   await mockReactBackend(page);
-  await page.setViewportSize({ width: 390, height: 320 });
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 1024, height: 600 },
+    { width: 768, height: 480 },
+    { width: 390, height: 320 },
+    { width: 390, height: 220 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto("/app/#/projects");
+
+    const trigger = page.getByRole("button", { name: "Projekt anlegen" });
+    await expect(trigger).toBeVisible();
+    await trigger.click();
+
+    const dialog = page.getByRole("dialog", { name: "Neues Projekt" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByLabel("Name")).toBeFocused();
+
+    const surface = await dialog.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      const body = element.querySelector<HTMLElement>('[data-slot="dialog-body"]')!;
+      const header = element.querySelector<HTMLElement>('[data-slot="dialog-header"]')!;
+      const footer = element.querySelector<HTMLElement>('[data-slot="dialog-footer"]')!;
+      body.scrollTop = body.scrollHeight;
+      return {
+        backgroundColor: style.backgroundColor,
+        color: style.color,
+        top: rect.top,
+        bottom: rect.bottom,
+        viewportHeight: window.innerHeight,
+        overflowY: getComputedStyle(body).overflowY,
+        bodyScrolls: body.scrollHeight > body.clientHeight,
+        bodyAtEnd: body.scrollTop + body.clientHeight >= body.scrollHeight,
+        headerVisible: header.getBoundingClientRect().top >= rect.top,
+        footerVisible: footer.getBoundingClientRect().bottom <= rect.bottom,
+      };
+    });
+    expect(surface.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+    expect(surface.color).not.toBe("rgba(0, 0, 0, 0)");
+    expect(surface.top).toBeGreaterThanOrEqual(0);
+    expect(surface.bottom).toBeLessThanOrEqual(surface.viewportHeight);
+    expect(surface.overflowY).toBe("auto");
+    expect(surface.bodyScrolls).toBe(true);
+    expect(surface.bodyAtEnd).toBe(true);
+    expect(surface.headerVisible).toBe(true);
+    expect(surface.footerVisible).toBe(true);
+
+    const overlay = page.locator('[data-slot="dialog-overlay"]');
+    await expect(overlay).toBeVisible();
+    expect(await overlay.evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
+
+    await page.keyboard.press("Tab");
+    await expect(dialog.getByLabel("Repository-URL")).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+  }
+});
+
+test("React project edit dialog keeps the same modal contract", async ({ page }) => {
+  await mockReactBackend(page);
+  await page.setViewportSize({ width: 768, height: 480 });
   await page.goto("/app/#/projects");
 
-  const trigger = page.getByRole("button", { name: "Projekt anlegen" });
-  await expect(trigger).toBeVisible();
+  const trigger = page.getByRole("button", { name: "Bearbeiten", exact: true });
   await trigger.click();
-
-  const dialog = page.getByRole("dialog", { name: "Neues Projekt" });
+  const dialog = page.getByRole("dialog", { name: "Projekt bearbeiten" });
   await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Name")).toHaveValue("Shipyard");
   await expect(dialog.getByLabel("Name")).toBeFocused();
-
-  const scrollState = await dialog.locator('[data-slot="dialog-body"]').evaluate((element) => ({
-    overflowY: getComputedStyle(element).overflowY,
-    scrollHeight: element.scrollHeight,
-    clientHeight: element.clientHeight,
-  }));
-  expect(scrollState.overflowY).toBe("auto");
-  expect(scrollState.scrollHeight).toBeGreaterThan(scrollState.clientHeight);
-
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
   await expect(trigger).toBeFocused();
@@ -130,21 +243,91 @@ test("React board filters keep each board's state isolated", async ({ page }) =>
   await expect(page.getByText("1 Aufgabe gefunden")).toBeVisible();
 });
 
+test("productive task edit dialog traps focus and keeps the backdrop inert", async ({ page }) => {
+  await mockReactBackend(page);
+  await page.setViewportSize({ width: 390, height: 240 });
+  await page.goto("/app/#/tasks/task-1");
+
+  const trigger = page.getByRole("button", { name: "Bearbeiten", exact: true });
+  await expect(trigger).toBeVisible();
+  await trigger.click();
+
+  const dialog = page.getByRole("dialog", { name: "Aufgabe bearbeiten" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Titel")).toBeFocused();
+  expect(await dialog.evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe(
+    "rgba(0, 0, 0, 0)",
+  );
+
+  for (let index = 0; index < 10; index++) {
+    await page.keyboard.press("Tab");
+    await expect(dialog).toContainText("Aufgabe bearbeiten");
+    expect(await page.evaluate(() => {
+      const active = document.activeElement;
+      const dialog = document.querySelector('[role="dialog"]');
+      return active === dialog || dialog?.contains(active);
+    })).toBe(true);
+  }
+  for (let index = 0; index < 4; index++) {
+    await page.keyboard.press("Shift+Tab");
+    expect(await page.evaluate(() => document.activeElement?.closest('[role="dialog"]') !== null)).toBe(true);
+  }
+
+  let backdropClicked = false;
+  await page.evaluate(() => {
+    document.querySelector("main")?.addEventListener("click", () => {
+      document.body.dataset.backdropClicked = "true";
+    });
+  });
+  await page.mouse.click(2, 2);
+  backdropClicked = (await page.locator("body").getAttribute("data-backdrop-clicked")) === "true";
+  expect(backdropClicked).toBe(false);
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(trigger).toBeFocused();
+});
+
+test("productive interaction and change-approval flows remain usable", async ({ page }) => {
+  await mockReactBackend(page);
+  let answerBody = "";
+  await page.route("**/interactions/interaction-1/answer", async (route) => {
+    answerBody = route.request().postData() || "";
+    await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+  });
+  await page.goto("/app/#/tasks/task-1");
+  await page.getByLabel("Oberfläche").selectOption("web");
+  await page.getByRole("button", { name: "Antwort speichern" }).click();
+  expect(answerBody).toContain("surface=web");
+  await expect(page.getByRole("button", { name: "Bearbeiten", exact: true })).toBeVisible();
+
+  await page.route("**/runs/run-1/diff", (route) => route.fulfill({ status: 200, body: "+ modal" }));
+  await page.goto("/app/#/runs/run-1");
+  await page.getByRole("button", { name: "Änderungen übernehmen" }).click();
+  const dialog = page.getByRole("dialog", { name: "Änderungen übernehmen?" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Bestätigen und übernehmen" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+});
+
 test("legacy dialog enhancement keeps nested forms usable and restores focus", async ({ page }) => {
   await page.route("**/api/i18n", (route) =>
     route.fulfill({ contentType: "application/json", body: JSON.stringify({ languages: { de: {}, en: {} } }) }),
   );
   await page.goto("/app/");
+  await page.setViewportSize({ width: 390, height: 240 });
   await page.setContent(`
     <button id="trigger" type="button">Legacy öffnen</button>
     <dialog id="legacy" data-closable>
       <article>
         <header><h2>Legacy-Dialog</h2><button class="close" type="button" aria-label="Schließen">×</button></header>
-        <form><label>Name<input autofocus></label><textarea rows="20"></textarea><footer><button>Speichern</button></footer></form>
+        <form><label>Name<input autofocus></label><textarea rows="40"></textarea><footer><button>Speichern</button></footer></form>
         <form><button type="submit">Löschen</button></form>
       </article>
     </dialog>
   `);
+  await page.addStyleTag({ content: legacyStyles });
   const appScript = await readFile(path.resolve(import.meta.dirname, "../../internal/web/static/app.js"), "utf8");
   await page.addScriptTag({ content: appScript });
   await page.locator("#trigger").evaluate(() => {
@@ -159,6 +342,25 @@ test("legacy dialog enhancement keeps nested forms usable and restores focus", a
   await expect(dialog.locator("input[autofocus]")).toBeFocused();
   await expect(dialog.locator(".dialog-body")).toHaveCount(1);
   await expect(dialog.locator("form.dialog-secondary-form")).toHaveCount(1);
+
+  const legacyLayout = await dialog.evaluate((element) => {
+    const body = element.querySelector<HTMLElement>(".dialog-body")!;
+    const header = element.querySelector<HTMLElement>("header")!;
+    const footer = element.querySelector<HTMLElement>("footer")!;
+    body.scrollTop = body.scrollHeight;
+    return {
+      backgroundColor: getComputedStyle(element).backgroundColor,
+      bodyOverflowY: getComputedStyle(body).overflowY,
+      bodyScrolls: body.scrollHeight > body.clientHeight,
+      headerVisible: header.getBoundingClientRect().top >= element.getBoundingClientRect().top,
+      footerVisible: footer.getBoundingClientRect().bottom <= element.getBoundingClientRect().bottom,
+    };
+  });
+  expect(legacyLayout.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
+  expect(legacyLayout.bodyOverflowY).toBe("auto");
+  expect(legacyLayout.bodyScrolls).toBe(true);
+  expect(legacyLayout.headerVisible).toBe(true);
+  expect(legacyLayout.footerVisible).toBe(true);
 
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
@@ -252,4 +454,50 @@ test.describe("comment thresholds", () => {
       await expect(page.getByRole("button", { name: "Ältere Kommentare anzeigen" })).toHaveCount(count > 6 ? 1 : 0);
     });
   }
+});
+
+test("legacy modal traps focus, blocks the backdrop, and rejects Escape when not closable", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 240 });
+  await page.goto("/app/");
+  await page.setContent(`
+    <button id="outside" type="button">Außerhalb</button>
+    <dialog id="legacy">
+      <article>
+        <header><h2>Nicht schließbar</h2></header>
+        <form><label>Name<input autofocus></label><textarea rows="40"></textarea><footer><button>Speichern</button></footer></form>
+      </article>
+    </dialog>
+  `);
+  await page.addStyleTag({ content: legacyStyles });
+  const appScript = await readFile(path.resolve(import.meta.dirname, "../../internal/web/static/app.js"), "utf8");
+  await page.addScriptTag({ content: appScript });
+  await page.locator("#outside").evaluate(() => {
+    const outside = document.querySelector<HTMLButtonElement>("#outside")!;
+    outside.addEventListener("click", () => outside.dataset.clicked = "true");
+    const dialog = document.querySelector<HTMLDialogElement>("#legacy")!;
+    dialog.showModal();
+  });
+
+  const dialog = page.locator("#legacy");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator("input")).toBeFocused();
+  const focusables = dialog.locator("input, textarea, button");
+  for (let index = 0; index < 6; index++) {
+    await page.keyboard.press("Tab");
+    await expect(dialog).toContainText("Nicht schließbar");
+    expect(await page.evaluate(() => {
+      const active = document.activeElement;
+      const dialog = document.querySelector("#legacy");
+      return active === dialog || dialog?.contains(active) ? "legacy" : active?.tagName;
+    })).toBe("legacy");
+  }
+  await expect(focusables.first()).toBeAttached();
+
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeVisible();
+  await page.mouse.click(4, 4);
+  expect(await page.locator("#outside").getAttribute("data-clicked")).toBeNull();
+
+  await dialog.evaluate((element) => (element as HTMLDialogElement).close());
+  await expect(dialog).toBeHidden();
 });

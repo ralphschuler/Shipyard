@@ -47,6 +47,15 @@ const dialogFocusTarget=dialog=>dialog.querySelector('[autofocus]')||dialog.quer
 const openModal=(dialog,trigger=document.activeElement)=>{if(!dialog)return;if(trigger instanceof HTMLElement)modalReturnFocus.set(dialog,trigger);enhanceLegacyDialog(dialog);if(!dialog.open)nativeShowModal.call(dialog);requestAnimationFrame(()=>dialogFocusTarget(dialog)?.focus())};
 HTMLDialogElement.prototype.showModal=function(){openModal(this)};
 document.addEventListener('cancel',event=>{const dialog=event.target.closest?.('dialog');if(dialog&&!isClosableDialog(dialog))event.preventDefault()},true);
+document.addEventListener('keydown',event=>{
+ if(event.key!=='Tab')return;
+ const dialog=event.target.closest?.('dialog')||document.querySelector('dialog[open]');
+ if(!(dialog instanceof HTMLDialogElement)||!dialog.open)return;
+ const focusable=[...dialog.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')].filter(element=>{const node=element;return node instanceof HTMLElement&&!!(node.offsetWidth||node.offsetHeight||node.getClientRects().length)});
+ if(!focusable.length){event.preventDefault();dialog.focus();return}
+ const first=focusable[0],last=focusable[focusable.length-1],active=document.activeElement;
+ if(event.shiftKey?(active===first||active===dialog):(active===last||!dialog.contains(active))){event.preventDefault();(event.shiftKey?last:first).focus()}
+},true);
 document.addEventListener('close',event=>{const dialog=event.target;if(!(dialog instanceof HTMLDialogElement))return;const trigger=modalReturnFocus.get(dialog);modalReturnFocus.delete(dialog);if(trigger?.isConnected)requestAnimationFrame(()=>trigger.focus())},true);
 document.querySelectorAll('.brand-mark').forEach(mark=>{mark.textContent='SY';mark.title=trText('Shipyard')});
 // Older server-rendered views predate the Shipyard favicon. Keep branding a

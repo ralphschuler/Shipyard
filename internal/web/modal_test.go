@@ -1,6 +1,7 @@
 package web
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -58,5 +59,27 @@ func TestModalAccessibilityScriptContract(t *testing.T) {
 	}
 	if strings.Contains(js, "button[type=\"button\"]'))event.preventDefault()") {
 		t.Fatal("Escape handling must not infer closability from arbitrary button types")
+	}
+}
+
+func TestReactModalUsesDefinedOpaqueSurface(t *testing.T) {
+	styles, err := os.ReadFile("../../frontend/src/index.css")
+	if err != nil {
+		t.Fatalf("read React modal styles: %v", err)
+	}
+	if !strings.Contains(string(styles), `[data-slot="dialog-content"]{background-color:var(--card);color:var(--card-foreground)}`) {
+		t.Fatal("React modal must have an explicit opaque card surface fallback")
+	}
+
+	source, err := os.ReadFile("../../frontend/src/components/ui/dialog.tsx")
+	if err != nil {
+		t.Fatalf("read React modal source: %v", err)
+	}
+	contents := string(source)
+	if !strings.Contains(contents, "bg-card") {
+		t.Fatal("React modal must use the defined opaque card surface")
+	}
+	if strings.Contains(contents, "bg-popover") {
+		t.Fatal("React modal must not use the undefined popover surface")
 	}
 }

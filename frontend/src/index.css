@@ -226,6 +226,10 @@
     transition: none;
   }
 }
+/* Keep the dialog surface opaque even if a utility stylesheet is unavailable
+   during an incremental asset refresh. The modal must always separate its
+   content from the page behind it. */
+[data-slot="dialog-content"]{background-color:var(--card);color:var(--card-foreground)}
 
 /* Task discussions use the same neutral surfaces and radius scale as the
    shadcn cards.  The selector is deliberately scoped to the comment composer,
