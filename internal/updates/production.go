@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -33,6 +34,8 @@ type productionAdapter struct {
 	backupScript string
 	backupDir    string
 	databaseURL  string
+	healthURL    string
+	buildInfoURL string
 	writeMu      sync.Mutex
 }
 
@@ -52,6 +55,8 @@ func NewProductionOrchestrator(s *store.Store) *Orchestrator {
 		backupScript: filepath.Join(root, "deploy", "backup-postgres.sh"),
 		backupDir:    envOr("TASKBOARD_BACKUP_DIR", filepath.Join(root, "backups")),
 		databaseURL:  envOr("DATABASE_URL", "postgres://taskboard:taskboard@localhost:5432/taskboard?sslmode=disable"),
+		healthURL:    productionHealthURL,
+		buildInfoURL: "http://127.0.0.1:8080/app/build-info.json",
 	}
 	return &Orchestrator{
 		Backup:            p.backup,
@@ -180,11 +185,24 @@ func (p *productionAdapter) restart(ctx context.Context, snapshot Snapshot) erro
 	if err := cmd.Run(); err != nil {
 		return errors.New("new release failed embedded app validation")
 	}
+	// A detached monitor waits for the old process to relinquish the socket,
+	// verifies the health and build identity of the process started by systemd,
+	// and restores the complete previous binary bundle on failure. The monitor
+	// must not inherit the request context: the HTTP handler cancels it after
+	// writing the successful update response.
+	healthURL := envOr(p.healthURL, productionHealthURL)
+	buildInfoURL := envOr(p.buildInfoURL, "http://127.0.0.1:8080/app/build-info.json")
+	monitor := exec.Command(p.binary, "--monitor-restart", healthURL, buildInfoURL, p.binary, p.previous, snapshot.Release.Version, snapshot.Release.Commit)
+	monitor.Stdout = io.Discard
+	monitor.Stderr = io.Discard
+	if err := monitor.Start(); err != nil {
+		return errors.New("new release restart monitor could not start")
+	}
 	return nil
 }
 
 func (p *productionAdapter) health(ctx context.Context, _ Snapshot) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, productionHealthURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, envOr(p.healthURL, productionHealthURL), nil)
 	if err != nil {
 		return err
 	}
@@ -197,6 +215,135 @@ func (p *productionAdapter) health(ctx context.Context, _ Snapshot) error {
 		return fmt.Errorf("healthcheck returned HTTP %d", res.StatusCode)
 	}
 	return nil
+}
+
+type restartMonitorConfig struct {
+	healthURL    string
+	buildInfoURL string
+	binary       string
+	previous     string
+	version      string
+	commit       string
+	poll         time.Duration
+	wait         time.Duration
+	client       *http.Client
+}
+
+// RunRestartMonitor is the small supervisor hand-off used by the production
+// binary. It returns an error so the CLI can exit with the service's
+// Restart=on-failure status after restoring the previous bundle.
+func RunRestartMonitor(healthURL, buildInfoURL, binary, previous, version, commit string) error {
+	return monitorRestart(context.Background(), restartMonitorConfig{
+		healthURL:    healthURL,
+		buildInfoURL: buildInfoURL,
+		binary:       binary,
+		previous:     previous,
+		version:      version,
+		commit:       commit,
+		poll:         250 * time.Millisecond,
+		wait:         30 * time.Second,
+	})
+}
+
+func monitorRestart(ctx context.Context, cfg restartMonitorConfig) error {
+	if cfg.poll <= 0 {
+		cfg.poll = 250 * time.Millisecond
+	}
+	if cfg.wait <= 0 {
+		cfg.wait = 30 * time.Second
+	}
+	client := cfg.client
+	if client == nil {
+		client = &http.Client{Timeout: 2 * time.Second}
+	}
+	deadline := time.NewTimer(cfg.wait)
+	defer deadline.Stop()
+
+	// First observe the old service going away. A healthy response here is
+	// still the old process and must never count as update success.
+	for {
+		if err := ctx.Err(); err != nil {
+			return rollbackAfterRestartError(cfg, err)
+		}
+		if !endpointHealthy(ctx, client, cfg.healthURL) {
+			break
+		}
+		if !waitForMonitorTick(ctx, deadline, cfg.poll) {
+			return rollbackAfterRestartError(cfg, errors.New("old service did not stop"))
+		}
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return rollbackAfterRestartError(cfg, err)
+		}
+		if endpointHealthy(ctx, client, cfg.healthURL) && buildInfoMatches(ctx, client, cfg.buildInfoURL, cfg.version, cfg.commit) {
+			return nil
+		}
+		if !waitForMonitorTick(ctx, deadline, cfg.poll) {
+			return rollbackAfterRestartError(cfg, errors.New("new service did not become healthy with matching build metadata"))
+		}
+	}
+}
+
+func waitForMonitorTick(ctx context.Context, deadline *time.Timer, poll time.Duration) bool {
+	timer := time.NewTimer(poll)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-deadline.C:
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func endpointHealthy(ctx context.Context, client *http.Client, endpoint string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer res.Body.Close()
+	return res.StatusCode == http.StatusOK
+}
+
+func buildInfoMatches(ctx context.Context, client *http.Client, endpoint, version, commit string) bool {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return false
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return false
+	}
+	var info struct {
+		Version string `json:"version"`
+		Commit  string `json:"commit"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&info); err != nil {
+		return false
+	}
+	return info.Version == version && info.Commit == commit
+}
+
+func rollbackAfterRestartError(cfg restartMonitorConfig, cause error) error {
+	previous, err := os.ReadFile(cfg.previous)
+	if err != nil {
+		return fmt.Errorf("%w; read rollback bundle: %v", cause, err)
+	}
+	if err := atomicWrite(cfg.binary, previous, 0755); err != nil {
+		return fmt.Errorf("%w; restore rollback bundle: %v", cause, err)
+	}
+	return cause
 }
 
 func (p *productionAdapter) rollback(_ context.Context, _ Snapshot) error {

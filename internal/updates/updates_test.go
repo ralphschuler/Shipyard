@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadLocalChangelogUsesConfiguredFileAndEnforcesSizeLimit(t *testing.T) {
@@ -435,5 +436,72 @@ func TestProductionAdapterRestartValidatesInstalledBundle(t *testing.T) {
 	p := &productionAdapter{binary: filepath.Join(t.TempDir(), "missing-taskboard")}
 	if err := p.restart(context.Background(), Snapshot{}); err == nil {
 		t.Fatal("restart must reject a candidate that cannot validate its embedded bundle")
+	}
+}
+
+func TestRestartMonitorWaitsForNewHealthAndRollsBackOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "taskboard")
+	previous := filepath.Join(dir, "taskboard.previous-update")
+	if err := os.WriteFile(binary, []byte("new-bundle"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(previous, []byte("old-bundle"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	phase := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		status := http.StatusServiceUnavailable
+		body := ""
+		switch phase {
+		case 0:
+			phase = 1
+		case 1:
+			phase = 2
+			status = http.StatusOK
+		case 2:
+			status = http.StatusOK
+			if strings.HasSuffix(r.URL.Path, "build-info.json") {
+				body = `{"version":"v2.0.0","commit":"newcommit"}`
+			}
+		}
+		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	err := monitorRestart(ctx, restartMonitorConfig{
+		healthURL:    "http://restart.test/healthz",
+		buildInfoURL: "http://restart.test/app/build-info.json",
+		binary:       binary,
+		previous:     previous,
+		version:      "v2.0.0",
+		commit:       "newcommit",
+		poll:         1 * time.Millisecond,
+		client:       client,
+	})
+	if err != nil {
+		t.Fatalf("monitor succeeded unexpectedly: %v", err)
+	}
+
+	phase = 3
+	err = monitorRestart(ctx, restartMonitorConfig{
+		healthURL:    "http://restart.test/healthz",
+		buildInfoURL: "http://restart.test/app/build-info.json",
+		binary:       binary,
+		previous:     previous,
+		version:      "v2.0.0",
+		commit:       "newcommit",
+		poll:         1 * time.Millisecond,
+		wait:         5 * time.Millisecond,
+		client:       client,
+	})
+	if err == nil {
+		t.Fatal("monitor must fail when the restarted service never becomes healthy")
+	}
+	got, readErr := os.ReadFile(binary)
+	if readErr != nil || string(got) != "old-bundle" {
+		t.Fatalf("rollback bundle = %q, err = %v", got, readErr)
 	}
 }

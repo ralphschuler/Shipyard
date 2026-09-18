@@ -56,6 +56,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) == 8 && os.Args[1] == "--monitor-restart" {
+		if err := updates.RunRestartMonitor(os.Args[2], os.Args[3], os.Args[4], os.Args[5], os.Args[6], os.Args[7]); err != nil {
+			log.Print(err)
+			os.Exit(75)
+		}
+		return
+	}
 	setBuildMetadata()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
