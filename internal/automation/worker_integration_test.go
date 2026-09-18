@@ -59,6 +59,44 @@ func TestCheckProviderForAgentRejectsUnassignedSecret(t *testing.T) {
 	}
 }
 
+func TestProcessKeepsTaskCompletedRetryableWhenReleasePublisherIsMissing(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "Missing release publisher", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	task, err := s.CreateTask(ctx, board.ID, "Retry release", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.DB.Exec(ctx, `INSERT INTO automation_events(type,task_id,board_id,payload)
+		VALUES('task.completed',$1,$2,'{}'::jsonb)`, task.ID, board.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	(&Worker{Store: s}).Process(ctx)
+
+	var processedAt *time.Time
+	var attempts int
+	var lastError string
+	if err = s.DB.QueryRow(ctx, `SELECT processed_at,attempts,last_error
+		FROM automation_events WHERE task_id=$1 AND type='task.completed'`, task.ID).
+		Scan(&processedAt, &attempts, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if processedAt != nil {
+		t.Fatal("task.completed was acknowledged without a release publisher")
+	}
+	if attempts != 1 {
+		t.Fatalf("missing release publisher attempts = %d, want 1", attempts)
+	}
+	if !strings.Contains(lastError, "Release-Agent blockiert") || !strings.Contains(lastError, "nicht konfiguriert") {
+		t.Fatalf("retry error does not expose the blocking reason: %q", lastError)
+	}
+}
+
 func TestProcessStartsDeliveryAgentExactlyOnceAndRejectsUnknownTarget(t *testing.T) {
 	s := workerIntegrationStore(t)
 	ctx := context.Background()
