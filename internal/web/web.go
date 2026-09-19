@@ -567,7 +567,7 @@ func (a *App) Register(m *http.ServeMux) {
 	}))
 	m.HandleFunc("GET /api/i18n", a.i18nAPI)
 	m.HandleFunc("GET /events", a.events)
-	m.HandleFunc("GET /api/v1/dashboard", a.dashboardAPI)
+	m.HandleFunc("GET /api/v1/dashboard", func(w http.ResponseWriter, r *http.Request) { dashboardAPI(a.store, w, r) })
 	m.HandleFunc("GET /api/v1/boards", a.boardsAPI)
 	m.HandleFunc("GET /api/v1/board-templates", a.boardTemplatesAPI)
 	m.HandleFunc("POST /api/v1/boards", a.createBoardAPI)
@@ -603,7 +603,7 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("POST /api/v1/settings/updates/install", a.installUpdateAPI)
 	m.HandleFunc("GET /api/v1/account", a.accountAPI)
 	m.HandleFunc("POST /api/v1/account/tokens", a.createAccountTokenAPI)
-	m.HandleFunc("GET /dashboard/attention", a.dashboardAttention)
+	m.HandleFunc("GET /dashboard/attention", func(w http.ResponseWriter, r *http.Request) { dashboardAttentionAPI(a.store, w, r) })
 	m.HandleFunc("GET /healthz", a.health)
 	m.HandleFunc("GET /metrics", a.metrics)
 	m.HandleFunc("GET /setup", a.setup)
@@ -1942,24 +1942,6 @@ func (a *App) dashboard(w http.ResponseWriter, r *http.Request) {
 	a.render(r, w, "dashboard.html", map[string]any{"Dashboard": d, "Max": max})
 }
 
-// dashboardAPI is the first stable UI API used by the React/shadcn client.
-// It deliberately returns the same domain projection as the legacy view so
-// the migration does not duplicate business or metric logic in JavaScript.
-func (a *App) dashboardAPI(w http.ResponseWriter, r *http.Request) {
-	from, to, err := dashboardRange(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	dashboard, err := a.store.DashboardFiltered(r.Context(), from, to, r.URL.Query().Get("provider"), r.URL.Query().Get("model"), r.URL.Query().Get("agent"), r.URL.Query().Get("board"))
-	if err != nil {
-		http.Error(w, "Dashboard-Daten sind momentan nicht verfügbar.", http.StatusServiceUnavailable)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(dashboard)
-}
-
 func dashboardRange(r *http.Request) (*time.Time, *time.Time, error) {
 	value := r.URL.Query().Get("range")
 	if value == "" || value == "all" {
@@ -2461,15 +2443,6 @@ func (a *App) createBoardAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(value)
-}
-func (a *App) dashboardAttention(w http.ResponseWriter, r *http.Request) {
-	attention, err := a.store.DashboardAttention(r.Context())
-	if err != nil {
-		http.Error(w, "Dashboard-Daten sind momentan nicht verfügbar.", http.StatusServiceUnavailable)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(attention)
 }
 func (a *App) createBoard(w http.ResponseWriter, r *http.Request) {
 	b, e := a.store.CreateBoardWithTemplate(r.Context(), r.FormValue("name"), defaultString(r.FormValue("template"), "software"))
