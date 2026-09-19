@@ -88,21 +88,31 @@
   }
 }
 
-/* The navigation is intentionally darker than the workspace: it reads as a
-   persistent control surface, while the aqua marker keeps the active place
-   legible in both themes. */
+/* Navigation follows the selected theme.  The light surface stays calm and
+   tangible beside the workspace; the darker control-room treatment belongs
+   exclusively to dark mode. */
 .shipyard-sidebar {
-  --sidebar-bg: oklch(0.2 0.035 252);
-  --sidebar-text: oklch(0.87 0.018 245);
-  --sidebar-muted: oklch(0.67 0.03 250);
-  --sidebar-line: oklch(1 0 0 / 10%);
-  --sidebar-active: oklch(0.75 0.12 184);
+  --sidebar-bg: oklch(0.975 0.008 250);
+  --sidebar-text: oklch(0.27 0.027 250);
+  --sidebar-muted: oklch(0.48 0.025 250);
+  --sidebar-line: oklch(0.88 0.014 250);
+  --sidebar-active: oklch(0.48 0.13 184);
+  --sidebar-hover: oklch(0.94 0.025 205);
+  --sidebar-active-bg: oklch(0.88 0.075 184);
+  --sidebar-active-line: oklch(0.68 0.12 184 / 45%);
   background: var(--sidebar-bg);
   border-color: var(--sidebar-line);
   color: var(--sidebar-text);
 }
 .dark .shipyard-sidebar {
   --sidebar-bg: oklch(0.13 0.028 252);
+  --sidebar-text: oklch(0.87 0.018 245);
+  --sidebar-muted: oklch(0.67 0.03 250);
+  --sidebar-line: oklch(1 0 0 / 10%);
+  --sidebar-active: oklch(0.75 0.12 184);
+  --sidebar-hover: oklch(1 0 0 / 8%);
+  --sidebar-active-bg: oklch(0.75 0.12 184 / 14%);
+  --sidebar-active-line: oklch(0.75 0.12 184 / 30%);
 }
 .shipyard-brand {
   border-color: var(--sidebar-line);
@@ -130,12 +140,12 @@
   transition: background-color 140ms ease, color 140ms ease, border-color 140ms ease;
 }
 .shipyard-nav-item:hover {
-  background: oklch(1 0 0 / 8%);
+  background: var(--sidebar-hover);
   color: var(--sidebar-text);
 }
 .shipyard-nav-item.is-active {
-  border-color: oklch(0.75 0.12 184 / 30%);
-  background: oklch(0.75 0.12 184 / 14%);
+  border-color: var(--sidebar-active-line);
+  background: var(--sidebar-active-bg);
   color: var(--sidebar-active);
   font-weight: 600;
 }
@@ -154,7 +164,9 @@
   scrollbar-color: oklch(1 0 0 / 22%) transparent;
 }
 .board-subnavigation.has-boards {
-  height: min(20rem, 42vh);
+  /* A max-height retains scrolling for long board lists without reserving a
+     mostly empty panel for the common case of just a few boards. */
+  height: auto;
 }
 .board-subnavigation ul {
   margin: 0;
@@ -180,11 +192,11 @@
   white-space: nowrap;
 }
 .board-nav-link:hover {
-  background: oklch(1 0 0 / 7%);
+  background: var(--sidebar-hover);
   color: var(--sidebar-text);
 }
 .board-nav-link.is-active {
-  background: oklch(0.75 0.12 184 / 12%);
+  background: var(--sidebar-active-bg);
   color: var(--sidebar-active);
   font-weight: 600;
 }
