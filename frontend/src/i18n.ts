@@ -56,6 +56,13 @@ export const legacyEnglishPhrases: Record<string, string> = {
 const translatedNodes = new WeakMap<Node, string>();
 const translatedAttributes = new WeakMap<Element, Record<string, string | null>>();
 
+const germanSource = (value: string) => /[äöüß]/i.test(value) || /\b(?:bitte|einstellungen|projekt|aufgabe|speichern|löschen|bearbeiten|keine|noch|wähle|spalte|status|prüfung|änderung|fehlgeschlagen|übernahme)\b/i.test(value);
+const userAuthoredSelector = "textarea, input, pre, code, [contenteditable='true'], [data-user-content], .markdown-content";
+
+function isUserAuthoredNode(node: Node): boolean {
+  return !!node.parentElement?.closest(userAuthoredSelector);
+}
+
 export function applyLegacyReactLanguage(language: Language, root: ParentNode = document.body): void {
   const dictionary = language === "en" ? legacyEnglishPhrases : Object.fromEntries(Object.keys(legacyEnglishPhrases).map((key) => [key, key]));
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
@@ -64,12 +71,15 @@ export function applyLegacyReactLanguage(language: Language, root: ParentNode = 
   for (const node of nodes) {
     const original = translatedNodes.get(node) ?? node.nodeValue ?? "";
     translatedNodes.set(node, original);
+    if (isUserAuthoredNode(node)) continue;
     const value = original.trim();
     if (!value) continue;
-    const replacement = dictionary[value];
+    const replacement = dictionary[value] ?? (language === "en" && germanSource(value) ? "Translation unavailable" : undefined);
     if (replacement) {
       const start = original.indexOf(value);
       node.nodeValue = original.slice(0, start) + replacement + original.slice(start + value.length);
+    } else {
+      node.nodeValue = original;
     }
   }
   root.querySelectorAll?.("[title],[aria-label],[placeholder]").forEach((element) => {
@@ -77,7 +87,11 @@ export function applyLegacyReactLanguage(language: Language, root: ParentNode = 
     for (const attribute of ["title", "aria-label", "placeholder"]) {
       const original = previous[attribute] ?? element.getAttribute(attribute);
       previous[attribute] = original;
-      if (original && dictionary[original]) element.setAttribute(attribute, dictionary[original]);
+      if (original && !element.matches(userAuthoredSelector)) {
+        const replacement = dictionary[original] ?? (language === "en" && germanSource(original) ? "Translation unavailable" : undefined);
+        if (replacement) element.setAttribute(attribute, replacement);
+        else element.setAttribute(attribute, original);
+      }
     }
     translatedAttributes.set(element, previous);
   });

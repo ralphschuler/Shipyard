@@ -27,4 +27,12 @@ test.describe("locale persistence and first render", () => {
     await expect(page.locator("html")).toHaveAttribute("lang", "en");
     await expect(page.getByText("Einstellungen")).toHaveCount(0);
   });
+
+  test("mounts promptly when the appearance endpoint is unavailable", async ({ page }) => {
+    await page.route("**/api/v1/settings/appearance", (route) => route.abort());
+    await page.route("**/api/v1/boards", (route) => route.fulfill({ json: [] }));
+    await page.route("**/events", (route) => route.abort());
+    await page.goto("/app/#/projects");
+    await expect(page.getByRole("navigation", { name: /navigation/i })).toBeVisible({ timeout: 5000 });
+  });
 });
