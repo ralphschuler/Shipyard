@@ -16,6 +16,7 @@ declare module "lucide-react" {
   export const FolderGit2: ComponentType<any>;
   export const Gauge: ComponentType<any>;
   export const GitCompareArrows: ComponentType<any>;
+  export const Key: ComponentType<any>;
   export const Download: ComponentType<any>;
   export const LayoutDashboard: ComponentType<any>;
   export const LoaderCircle: ComponentType<any>;
@@ -28,6 +29,7 @@ declare module "lucide-react" {
   export const Search: ComponentType<any>;
   export const Sun: ComponentType<any>;
   export const Trash2: ComponentType<any>;
+  export const User: ComponentType<any>;
   export const Wrench: ComponentType<any>;
   export const X: ComponentType<any>;
   export const XIcon: ComponentType<any>;

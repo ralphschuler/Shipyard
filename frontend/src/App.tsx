@@ -9,6 +9,7 @@ import {
   FolderGit2,
   Gauge,
   GitCompareArrows,
+  Key,
   LayoutDashboard,
   LoaderCircle,
   Menu,
@@ -17,6 +18,8 @@ import {
   ShieldCheck,
   ShieldAlert,
   Sun,
+  Trash2,
+  User,
   Wrench,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -1409,6 +1412,7 @@ function Settings({ route, language }: { route: string; language: Language }) {
         : route.split("/").pop() || "providers";
   const tabs = [
     ["providers", "Provider"],
+    ["secrets", text("Secrets", "Secrets")],
     ["updates", "Updates"],
     ["agent-policy", text("Agentenrichtlinien", "Agent policies")],
     ["appearance", text("Darstellung", "Appearance")],
@@ -1439,6 +1443,8 @@ function Settings({ route, language }: { route: string; language: Language }) {
         <Integrations />
       ) : tab === "account" ? (
         <Account />
+      ) : tab === "secrets" ? (
+        <Secrets />
       ) : (
         <Providers />
       )}
@@ -1595,6 +1601,112 @@ function renderChangelog(source = "") {
     return <div role="alert"><p className="font-medium">Der Changelog konnte nicht formatiert werden.</p><pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap break-words">{source}</pre></div>;
   }
 }
+
+type ManagedSecret = {
+  ID: string;
+  Name: string;
+  EnvName: string;
+  Description?: string;
+  Revoked?: boolean;
+  AgentIDs?: string[];
+};
+
+function Secrets() {
+  const { text } = useLocale();
+  const { data, error } = useAPI<ManagedSecret[]>("/api/v1/settings/secrets");
+  const { data: agents, error: agentsError } = useAPI<any[]>("/api/v1/agents");
+  const [createOpen, setCreateOpen] = useState(false);
+  const [replaceID, setReplaceID] = useState<string>();
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState("");
+
+  if (error || agentsError) return <Failure />;
+  if (!data || !agents) return <Loading />;
+  const agentName = (id: string) => agents.find((agent) => agent.ID === id)?.Name || id;
+  const save = async (url: string, form: FormData, success: string) => {
+    setBusy(url);
+    setMessage("");
+    try {
+      await mutation(url, { method: "POST", body: form });
+      setMessage(success);
+      refreshData();
+    } catch (err) {
+      setMessage(String(err));
+    } finally {
+      setBusy("");
+    }
+  };
+  const remove = async (secret: ManagedSecret) => {
+    if (!confirm(text(`Secret „${secret.Name}“ wirklich löschen?`, `Delete secret “${secret.Name}”?`))) return;
+    await save(`/settings/secrets/${secret.ID}/delete`, new FormData(), text("Secret gelöscht.", "Secret deleted."));
+  };
+  return (
+    <div className="grid gap-5">
+      <Card className="overflow-hidden border-primary/20 bg-primary/[0.03]">
+        <CardHeader className="flex flex-row items-start justify-between gap-4">
+          <div>
+          <CardTitle className="flex items-center gap-2"><Key className="size-5 text-primary" /> {text("Verwaltete Secrets", "Managed secrets")}</CardTitle>
+            <CardDescription>{text("Sichere Werte für gezielt zugewiesene Agents. Der Wert verlässt diese Ansicht nach dem Speichern.", "Secure values for specifically assigned agents. The value leaves this view after saving.")}</CardDescription>
+          </div>
+          <Button onClick={() => setCreateOpen(true)}>{text("Secret anlegen", "Add secret")}</Button>
+        </CardHeader>
+      </Card>
+
+      {data.length === 0 ? (
+        <Card><CardContent className="py-12 text-center text-sm text-muted-foreground">{text("Noch keine verwalteten Secrets. Lege eines an, um es Agents zuzuweisen.", "No managed secrets yet. Add one to assign it to agents.")}</CardContent></Card>
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-2">
+          {data.map((secret) => <SecretCard key={secret.ID} secret={secret} agents={agents} agentName={agentName} busy={busy} onSave={save} onReplace={() => setReplaceID(secret.ID)} onDelete={() => remove(secret)} text={text} />)}
+        </div>
+      )}
+      {message && <p role="status" className="text-sm text-muted-foreground">{message}</p>}
+      <Dialog open={createOpen} onOpenChange={setCreateOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>{text("Neues Secret", "New secret")}</DialogTitle><DialogDescription>{text("Der Wert wird verschlüsselt gespeichert und nicht zurückgegeben.", "The value is encrypted and never returned.")}</DialogDescription></DialogHeader>
+          <SecretValueForm action="create" busy={busy} onSubmit={async (form) => { try { await mutation("/api/v1/settings/secrets", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.fromEntries(form.entries())) }); setCreateOpen(false); setMessage(text("Secret angelegt.", "Secret created.")); refreshData(); } catch (err) { setMessage(String(err)); } }} text={text} />
+        </DialogContent>
+      </Dialog>
+      <Dialog open={Boolean(replaceID)} onOpenChange={(open) => !open && setReplaceID(undefined)}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>{text("Secret ersetzen", "Replace secret")}</DialogTitle><DialogDescription>{text("Nur der neue Wert wird entgegengenommen. Der bisherige Wert bleibt unsichtbar.", "Only the new value is accepted. The previous value stays hidden.")}</DialogDescription></DialogHeader>
+          <SecretValueForm action="replace" busy={busy} onSubmit={async (form) => { await save(`/settings/secrets/${replaceID}/replace`, form, text("Secret ersetzt.", "Secret replaced.")); setReplaceID(undefined); }} text={text} />
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function SecretCard({ secret, agents, agentName, busy, onSave, onReplace, onDelete, text }: { secret: ManagedSecret; agents: any[]; agentName: (id: string) => string; busy: string; onSave: (url: string, form: FormData, success: string) => Promise<void>; onReplace: () => void; onDelete: () => void; text: (german: string, english: string) => string }) {
+  const [selected, setSelected] = useState(secret.AgentIDs || []);
+  const [open, setOpen] = useState(false);
+  const status = secret.Revoked ? text("Widerrufen", "Revoked") : text("Aktiv", "Active");
+  const toggle = (id: string) => setSelected((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id]);
+  const assign = async (event: React.FormEvent) => {
+    event.preventDefault();
+    const form = new FormData();
+    selected.forEach((id) => form.append("agent_id", id));
+    await onSave(`/settings/secrets/${secret.ID}/agents`, form, text("Agent-Zuweisung gespeichert.", "Agent assignment saved."));
+  };
+  return <Card>
+    <CardHeader className="flex flex-row items-start justify-between gap-3"><div><CardTitle className="text-lg">{secret.Name}</CardTitle><CardDescription className="mt-1 font-mono text-xs">{secret.EnvName}</CardDescription></div><Badge variant={secret.Revoked ? "outline" : "secondary"}>{status}</Badge></CardHeader>
+    <CardContent className="grid gap-4">
+      {secret.Description && <p className="text-sm text-muted-foreground">{secret.Description}</p>}
+      <div className="grid gap-2"><p className="text-xs font-medium text-muted-foreground">{text("Zugewiesene Agents", "Assigned agents")}</p><div className="flex flex-wrap gap-2">{secret.AgentIDs?.length ? secret.AgentIDs.map((id) => <Badge key={id} variant="outline"><User className="mr-1 size-3" />{agentName(id)}</Badge>) : <span className="text-sm text-muted-foreground">{text("Keine", "None")}</span>}</div></div>
+      <div className="flex flex-wrap gap-2 border-t pt-3"><Button variant="outline" size="sm" onClick={onReplace} disabled={Boolean(busy)}>{text(`${secret.Name} ersetzen`, `Replace ${secret.Name}`)}</Button><Button variant="outline" size="sm" onClick={() => setOpen((value) => !value)}><User className="size-4" /> {text("Agents zuweisen", "Assign agents")}</Button>{!secret.Revoked && <Button variant="outline" size="sm" onClick={() => onSave(`/settings/secrets/${secret.ID}/revoke`, new FormData(), text("Secret widerrufen.", "Secret revoked."))} disabled={Boolean(busy)}>{text("Widerrufen", "Revoke")}</Button>}<Button variant="ghost" size="sm" className="text-destructive" onClick={onDelete} disabled={Boolean(busy)}><Trash2 className="size-4" /> {text("Löschen", "Delete")}</Button></div>
+      {open && <form onSubmit={assign} className="grid gap-3 rounded-lg bg-muted/50 p-3"><fieldset className="grid gap-2"><legend className="text-sm font-medium">{text("Agents auswählen", "Select agents")}</legend>{agents.map((agent) => <label key={agent.ID} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={selected.includes(agent.ID)} onChange={() => toggle(agent.ID)} />{agent.Name}</label>)}</fieldset><Button type="submit" size="sm" disabled={Boolean(busy)}>{text("Zuweisung speichern", "Save assignment")}</Button></form>}
+    </CardContent>
+  </Card>;
+}
+
+function SecretValueForm({ action, busy, onSubmit, text }: { action: "create" | "replace"; busy: string; onSubmit: (form: FormData) => Promise<void>; text: (german: string, english: string) => string }) {
+  return <form className="grid gap-4" onSubmit={(event) => { event.preventDefault(); const form = new FormData(event.currentTarget); void onSubmit(form); }}>
+    {action === "create" && <><label className="grid gap-1 text-sm">{text("Name", "Name")}<Input name="name" required autoComplete="off" /></label><label className="grid gap-1 text-sm">{text("Env-Name", "Environment name")}<Input name="env_name" required autoComplete="off" /></label><label className="grid gap-1 text-sm">{text("Beschreibung", "Description")}<Input name="description" autoComplete="off" /></label></>}
+    <label className="grid gap-1 text-sm">{text("Wert", "Value")}<Input aria-label={text("Neuer Wert", "New value")} name="value" type="password" required autoComplete="new-password" /></label>
+    <p className="text-xs text-muted-foreground">{text("Der Wert wird nicht angezeigt, gespeichert oder geloggt.", "The value is not displayed, stored in the UI, or logged.")}</p>
+    <DialogFooter><Button type="submit" disabled={Boolean(busy)}>{action === "create" ? text("Secret anlegen", "Add secret") : text("Wert ersetzen", "Replace value")}</Button></DialogFooter>
+  </form>;
+}
+
 function Providers() {
   const { data, error } = useAPI<any[]>("/api/v1/settings/providers");
   const [message, setMessage] = useState("");
@@ -1653,8 +1765,8 @@ function Providers() {
       <CardHeader>
         <CardTitle>Provider</CardTitle>
         <CardDescription>
-          Provider werden dynamisch konfiguriert; Secrets bleiben in den
-          Umgebungsvariablen des Hosts.
+          Provider verwenden verwaltete Agent-Secrets. Werte werden nur beim
+          Anlegen oder Ersetzen entgegengenommen und danach nie angezeigt.
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
