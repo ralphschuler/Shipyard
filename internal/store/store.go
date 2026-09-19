@@ -33,6 +33,17 @@ var ErrTargetSelectionRequired = errors.New("an explicit repository target selec
 
 var canonicalUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 
+func acquireWorkspaceRunGate() (*workspacecfg.RunGate, error) {
+	if _, err := workspacecfg.Validate(); err != nil {
+		return nil, fmt.Errorf("Workspace-Preflight blockiert neue Runs: %w", err)
+	}
+	gate, err := workspacecfg.AcquireRunGate()
+	if err != nil {
+		return nil, errors.New("Workspace-Migration blockiert neue Runs")
+	}
+	return gate, nil
+}
+
 // Keep every positional AutomationRule query in one canonical order. pgx's
 // RowToStructByPos deliberately rejects a partial row; centralising this list
 // prevents a newly added rule field from silently disabling the worker.
@@ -793,7 +804,9 @@ func runRepositoryTargets(targets []domain.RepositoryTarget) ([]domain.Repositor
 			return nil, errors.New("Das Projektziel ist nicht verfügbar. Wähle ein registriertes Projekt mit Repository und starte den Run erneut.")
 		}
 		if strings.TrimSpace(resolved[i].LocalPath) == "" {
-			resolved[i].LocalPath = filepath.Join(workspacecfg.ProjectsRoot(), resolved[i].ProjectID)
+			resolved[i].LocalPath = workspacecfg.ProjectPath(resolved[i].ProjectID)
+		} else if workspacecfg.Root() != "" {
+			resolved[i].LocalPath = workspacecfg.ProjectPath(resolved[i].ProjectID)
 		}
 	}
 	return resolved, nil
@@ -994,7 +1007,7 @@ func (s *Store) CreateProject(c context.Context, name, repo, branch, path string
 		return p, err
 	}
 	if p.RepositoryURL != "" && p.LocalPath == "" {
-		p.LocalPath = filepath.Join(workspacecfg.ProjectsRoot(), p.ID)
+		p.LocalPath = workspacecfg.ProjectPath(p.ID)
 		if _, err = tx.Exec(c, `UPDATE projects SET local_path=$2 WHERE id=$1`, p.ID, p.LocalPath); err != nil {
 			return p, err
 		}
@@ -2822,6 +2835,11 @@ func (s *Store) DeleteRule(c context.Context, id string) error {
 	return err
 }
 func (s *Store) CreateRun(c context.Context, task, agent, rule string) (domain.AgentRun, error) {
+	gate, err := acquireWorkspaceRunGate()
+	if err != nil {
+		return domain.AgentRun{}, err
+	}
+	defer gate.Close()
 	a, e := s.GetAgent(c, agent)
 	if e != nil {
 		return domain.AgentRun{}, e
@@ -2874,6 +2892,11 @@ func (s *Store) CreateManualRun(c context.Context, task, agent string) (domain.A
 	return runs[0], nil
 }
 func (s *Store) CreateManualRuns(c context.Context, task, agent string) ([]domain.AgentRun, error) {
+	gate, err := acquireWorkspaceRunGate()
+	if err != nil {
+		return nil, err
+	}
+	defer gate.Close()
 	a, err := s.GetAgent(c, agent)
 	if err != nil {
 		return nil, err
@@ -3195,6 +3218,26 @@ func (s *Store) RunWorktree(c context.Context, id string) (string, error) {
 	var path string
 	err := s.DB.QueryRow(c, "SELECT worktree_path FROM agent_runs WHERE id=$1", id).Scan(&path)
 	return path, err
+}
+
+// ActiveRunWorktreePaths are excluded from a workspace migration. Their
+// providers may still hold files open, so the old checkout remains the safe
+// source of truth until the run reaches a terminal state.
+func (s *Store) ActiveRunWorktreePaths(c context.Context) (map[string]bool, error) {
+	rows, err := s.DB.Query(c, `SELECT worktree_path FROM agent_runs WHERE status IN ('queued','running') AND worktree_path <> ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	paths := map[string]bool{}
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		paths[filepath.Clean(path)] = true
+	}
+	return paths, rows.Err()
 }
 
 // ReclaimableRunWorktrees returns only terminal deliveries which can never be
@@ -3615,6 +3658,11 @@ func (s *Store) CreateRunForEvent(c context.Context, event domain.AutomationEven
 	return runs[0], nil
 }
 func (s *Store) CreateRunsForEvent(c context.Context, event domain.AutomationEvent, rule domain.AutomationRule) ([]domain.AgentRun, error) {
+	gate, err := acquireWorkspaceRunGate()
+	if err != nil {
+		return nil, err
+	}
+	defer gate.Close()
 	a, e := s.GetAgent(c, rule.AgentID)
 	if e != nil {
 		return nil, e

@@ -626,6 +626,7 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("GET /api/v1/settings/appearance", a.appearanceAPI)
 	m.HandleFunc("GET /api/v1/settings/integrations", a.integrationsAPI)
 	m.HandleFunc("GET /api/v1/settings/updates", a.updatesAPI)
+	m.HandleFunc("GET /api/v1/settings/workspace", a.workspaceAPI)
 	m.HandleFunc("POST /api/v1/settings/updates/install", a.installUpdateAPI)
 	m.HandleFunc("GET /api/v1/account", a.accountAPI)
 	m.HandleFunc("POST /api/v1/account/tokens", a.createAccountTokenAPI)
@@ -681,6 +682,7 @@ func (a *App) Register(m *http.ServeMux) {
 		http.Redirect(w, r, "/settings/providers", http.StatusSeeOther)
 	})
 	m.HandleFunc("GET /settings/providers", a.providerSettings)
+	m.HandleFunc("GET /settings/workspace", a.workspaceSettings)
 	m.HandleFunc("GET /settings/secrets", a.secrets)
 	m.HandleFunc("POST /settings/secrets", a.createSecret)
 	m.HandleFunc("POST /settings/secrets/{id}/replace", a.replaceSecret)
@@ -1267,6 +1269,17 @@ func (a *App) providerSettings(w http.ResponseWriter, r *http.Request) {
 	a.render(r, w, "providers.html", map[string]any{"Providers": p, "Agents": agents})
 }
 
+func (a *App) workspaceAPI(w http.ResponseWriter, r *http.Request) {
+	status, _ := workspace.Validate()
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"root": status.Root, "projects": status.Projects, "runs": status.Runs, "integrations": status.Integrations, "storage": status.Storage, "writable": status.Writable, "git": status.Git, "ready": status.Ready(), "error": status.Error})
+}
+
+func (a *App) workspaceSettings(w http.ResponseWriter, r *http.Request) {
+	status, _ := workspace.Validate()
+	a.render(r, w, "workspace.html", map[string]any{"Status": status})
+}
+
 func canManageSecrets(u domain.User) bool { return u.Role == "owner" || u.Role == "admin" }
 func (a *App) secrets(w http.ResponseWriter, r *http.Request) {
 	u, ok := currentUser(r.Context())
@@ -1796,7 +1809,7 @@ func (a *App) deleteProjectGroup(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/projects", 303)
 }
 func (a *App) createProject(w http.ResponseWriter, r *http.Request) {
-	p, err := a.store.CreateProject(r.Context(), r.FormValue("name"), r.FormValue("repository_url"), r.FormValue("default_branch"), r.FormValue("local_path"), r.Form["board_ids"])
+	p, err := a.store.CreateProject(r.Context(), r.FormValue("name"), r.FormValue("repository_url"), r.FormValue("default_branch"), "", r.Form["board_ids"])
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -1811,7 +1824,7 @@ func (a *App) createProject(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/projects", 303)
 }
 func (a *App) updateProject(w http.ResponseWriter, r *http.Request) {
-	err := a.store.UpdateProject(r.Context(), r.PathValue("id"), r.FormValue("name"), r.FormValue("repository_url"), r.FormValue("default_branch"), r.FormValue("local_path"), r.Form["board_ids"])
+	err := a.store.UpdateProject(r.Context(), r.PathValue("id"), r.FormValue("name"), r.FormValue("repository_url"), r.FormValue("default_branch"), "", r.Form["board_ids"])
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -1888,10 +1901,7 @@ func (a *App) syncProjectRepo(ctx context.Context, p domain.Project) error {
 	if p.RepositoryURL == "" {
 		return a.store.RecordProjectSync(ctx, p.ID, "Kein Repository hinterlegt")
 	}
-	path := p.LocalPath
-	if path == "" {
-		path = filepath.Join(workspace.ProjectsRoot(), p.ID)
-	}
+	path := workspace.ProjectPath(p.ID)
 	if !filepath.IsAbs(path) {
 		return a.store.RecordProjectSync(ctx, p.ID, "Lokaler Pfad muss absolut sein")
 	}
