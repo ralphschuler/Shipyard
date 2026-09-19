@@ -42,7 +42,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ChatBubble } from "@/components/ui/chat-bubble";
 import { MarkdownContent } from "@/components/markdown-content";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { normalizeLanguage, translate, type Language } from "@/i18n";
+import { applyLegacyReactLanguage, normalizeLanguage, translate, type Language } from "@/i18n";
 import { renderMarkdown, safeMarkdownURL } from "@/markdown";
 import { mutation, refreshData, useAPI, type LiveChange } from "@/api/client";
 
@@ -132,7 +132,9 @@ export default function App() {
   // envelope.  The board list endpoint normally returns an array, but a
   // malformed response must not take down every route in the application.
   const boards = Array.isArray(boardsResponse) ? boardsResponse : [];
-  const [language, setLanguage] = useState<Language>(() => normalizeLanguage(localStorage.getItem("shipyard-language")));
+  const storedLanguage = localStorage.getItem("shipyard-language");
+  const [language, setLanguage] = useState<Language>(() => normalizeLanguage(storedLanguage));
+  const [languageReady, setLanguageReady] = useState(() => storedLanguage !== null);
   const t = (key: string) => translate(language, key);
   const [dark, setDark] = useState(
     localStorage.getItem("shipyard-theme") === "dark",
@@ -149,7 +151,13 @@ export default function App() {
   const mobileMenuButtonRef = useRef<HTMLButtonElement>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   useEffect(() => {
-    if (appearance?.Language) setLanguage(normalizeLanguage(appearance.Language));
+    if (appearance?.Language) {
+      // A durable browser preference is already authoritative for this session.
+      // Without one, wait for the account value before the first paint so a
+      // new browser cannot briefly render German before switching to English.
+      if (storedLanguage === null) setLanguage(normalizeLanguage(appearance.Language));
+      setLanguageReady(true);
+    }
   }, [appearance?.Language]);
   useEffect(() => {
     const changed = (event: Event) => setLanguage(normalizeLanguage((event as CustomEvent<string>).detail));
@@ -229,6 +237,9 @@ export default function App() {
     media.addEventListener("change", apply);
     return () => media.removeEventListener("change", apply);
   }, [appearance?.Theme]);
+  useLayoutEffect(() => {
+    applyLegacyReactLanguage(language);
+  }, [language, route]);
   useEffect(() => {
     const stream = new EventSource("/events");
     // Never remount the application for a database notification. Components
@@ -315,6 +326,7 @@ export default function App() {
   const boardSubmenuSize = boardsOpen ? boards.length + 1 : 0;
   const navIndexFor = (index: number) =>
     index + (boardsOpen && index > boardsNavIndex ? boardSubmenuSize : 0);
+  if (!languageReady) return <Loading />;
   return (
     <LocaleContext.Provider value={{ language, t, text: (german, english) => language === "en" ? english : german }}>
     <TooltipProvider>
@@ -384,7 +396,7 @@ export default function App() {
                     </a>
                   )}
                   {item.name === "boards" && boardsOpen && (
-                    <nav id="board-subnavigation" className="board-subnavigation" aria-label={t("availableBoards")}>
+                    <nav id="board-subnavigation" className={`board-subnavigation ${boards.length > 0 ? "has-boards" : ""}`} aria-label={t("availableBoards")}>
                       <ul>
                         <li><a href="#/boards" onClick={(event) => { event.preventDefault(); navigate("/boards"); }} onKeyDown={(event) => navigateNav(boardsNavIndex + 1, event)} data-nav-index={boardsNavIndex + 1} className={`board-nav-link ${route === "/boards" ? "is-active" : ""}`} aria-current={route === "/boards" ? "page" : undefined} aria-label={t("allBoards")} title={t("allBoards")}>
                           <span className="board-nav-glyph" aria-hidden="true">⌘</span><span>{t("allBoards")}</span>

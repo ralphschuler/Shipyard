@@ -349,7 +349,7 @@ func runOpenAIResponsesWithPolicy(ctx context.Context, provider domain.ProviderS
 	usageServiceTier := options.ServiceTier
 	request := responseRequest{
 		Model:           provider.Model,
-		Instructions:    "Du bist ein Coding-Agent. Arbeite ausschließlich im zugewiesenen Git-Worktree über run_command. Keine Netzwerkanfragen, keine Pushes, Merges, Releases, Deployments oder dauerhaften Prozesse. Prüfe die Änderung und antworte mit einer kurzen Zusammenfassung.",
+		Instructions:    "You are a coding agent. Work exclusively in the assigned Git worktree through run_command. Do not make network requests, pushes, merges, releases, deployments, or persistent processes. Verify the change and respond with a short summary.",
 		Input:           prompt,
 		Tools:           toolDefinitions(),
 		MaxOutputTokens: options.MaxOutputTokens,

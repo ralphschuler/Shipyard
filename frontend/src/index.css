@@ -146,11 +146,15 @@
 }
 .board-subnavigation {
   max-height: min(20rem, 42vh);
+  min-height: 0;
   overflow-y: auto;
   margin: 0.2rem 0 0.35rem 1.5rem;
   border-left: 1px solid var(--sidebar-line);
   padding: 0.15rem 0.35rem 0.15rem 0.6rem;
   scrollbar-color: oklch(1 0 0 / 22%) transparent;
+}
+.board-subnavigation.has-boards {
+  height: min(20rem, 42vh);
 }
 .board-subnavigation ul {
   margin: 0;

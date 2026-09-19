@@ -74,6 +74,17 @@ func TestEnglishServerFallbackNeverReturnsGermanSourceText(t *testing.T) {
 	}
 }
 
+func TestEnglishLegacyTextNodeFallbackNeverReturnsKnownGermanUIText(t *testing.T) {
+	html := `<main><p>Dieser deutsche Prüfhinweis ist unbekannt.</p><p>Eigener Task-Titel</p></main>`
+	english := localizeHTML(html, languageEnglish)
+	if strings.Contains(english, "Dieser deutsche Prüfhinweis ist unbekannt.") {
+		t.Fatalf("unknown German UI text was exposed: %s", english)
+	}
+	if !strings.Contains(english, "Eigener Task-Titel") {
+		t.Fatalf("dynamic user content was not preserved: %s", english)
+	}
+}
+
 func TestLocalizeHTMLTranslatesLegacyViewAndKeepsGermanDefault(t *testing.T) {
 	html := `<html lang="dynamic"><nav aria-label="Hauptnavigation"><a>Übersicht</a></nav><h1>Neue Aufgabe</h1><p>Eigener Task-Titel</p></html>`
 	english := localizeHTML(html, "en")
