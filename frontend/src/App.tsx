@@ -399,7 +399,7 @@ export default function App() {
                     </a>
                   )}
                   {item.name === "boards" && boardsOpen && (
-                    <nav id="board-subnavigation" className="board-subnavigation" aria-label={t("availableBoards")}>
+                    <nav id="board-subnavigation" className={`board-subnavigation ${boards.length > 0 ? "has-boards" : ""}`} aria-label={t("availableBoards")}>
                       <ul>
                         <li><a href="#/boards" onClick={(event) => { event.preventDefault(); navigate("/boards"); }} onKeyDown={(event) => navigateNav(boardsNavIndex + 1, event)} data-nav-index={boardsNavIndex + 1} className={`board-nav-link ${route === "/boards" ? "is-active" : ""}`} aria-current={route === "/boards" ? "page" : undefined} aria-label={t("allBoards")} title={t("allBoards")}>
                           <span className="board-nav-glyph" aria-hidden="true">⌘</span><span>{t("allBoards")}</span>
