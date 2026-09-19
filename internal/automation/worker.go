@@ -1386,6 +1386,48 @@ func ensureTaskBranch(ctx context.Context, source, taskID string, configuredDefa
 	return branch, nil
 }
 
+// refreshTaskBranch rebases an existing task branch onto the newest remote
+// default branch before a delivery run receives its isolated worktree. The
+// source checkout stays untouched; only the durable branch for this task is
+// advanced. A conflict is surfaced before any agent starts writing files.
+func refreshTaskBranch(ctx context.Context, source, taskID, runID string, configuredDefault ...string) (string, error) {
+	defaultBranch := repositoryBranch(ctx, source)
+	if len(configuredDefault) > 0 {
+		defaultBranch = integrationDefaultBranch(domain.Project{DefaultBranch: configuredDefault[0]}, defaultBranch)
+	}
+	if _, err := gitOutput(ctx, source, "fetch", "--no-tags", "origin", defaultBranch); err != nil {
+		return "", fmt.Errorf("aktueller Remote-Default-Branch konnte nicht gefetcht werden: %w", err)
+	}
+	branch, err := ensureTaskBranch(ctx, source, taskID, defaultBranch)
+	if err != nil {
+		return "", err
+	}
+	remoteRef := "origin/" + defaultBranch
+	if _, err := gitOutput(ctx, source, "rev-parse", "--verify", remoteRef); err != nil {
+		return "", fmt.Errorf("Remote-Default-Branch %s ist nicht verfügbar: %w", remoteRef, err)
+	}
+	if _, err := gitOutput(ctx, source, "merge-base", "--is-ancestor", remoteRef, branch); err == nil {
+		return branch, nil
+	}
+	refreshPath := filepath.Join(taskIntegrationDirectory(source), "refresh-"+runID)
+	if err := os.MkdirAll(filepath.Dir(refreshPath), 0700); err != nil {
+		return "", err
+	}
+	if err := removeIntegrationWorktree(ctx, source, refreshPath); err != nil {
+		return "", fmt.Errorf("verwaister Branch-Refresh-Worktree konnte nicht entfernt werden: %w", err)
+	}
+	if out, err := exec.CommandContext(ctx, "git", "-C", source, "worktree", "add", refreshPath, branch).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("Branch-Refresh-Worktree konnte nicht angelegt werden: %s", strings.TrimSpace(string(out)))
+	}
+	defer func() { _ = removeIntegrationWorktree(context.Background(), source, refreshPath) }()
+	if out, err := exec.CommandContext(ctx, "git", "-C", refreshPath, "rebase", remoteRef).CombinedOutput(); err != nil {
+		files := gitConflictFiles(ctx, refreshPath)
+		_ = exec.CommandContext(context.Background(), "git", "-C", refreshPath, "rebase", "--abort").Run()
+		return "", managedCheckoutProblem("vor dem Delivery-Run nicht konfliktfrei auf den aktuellen Main-Stand rebasierbar", files, strings.TrimSpace(string(out)))
+	}
+	return branch, nil
+}
+
 func removeIntegrationWorktree(ctx context.Context, source, path string) error {
 	if path == "" {
 		return nil
@@ -2991,7 +3033,13 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		_ = w.finish(ctx, run, "failed")
 		return
 	}
-	taskBranch, taskBranchErr := ensureTaskBranch(ctx, run.WorkspaceSnapshot, run.TaskID)
+	defaultBranch := repositoryBranch(ctx, run.WorkspaceSnapshot)
+	if run.TargetProject != "" {
+		if project, projectErr := w.Store.Project(ctx, run.TargetProject); projectErr == nil {
+			defaultBranch = integrationDefaultBranch(project, defaultBranch)
+		}
+	}
+	taskBranch, taskBranchErr := refreshTaskBranch(ctx, run.WorkspaceSnapshot, run.TaskID, run.ID, defaultBranch)
 	if taskBranchErr != nil {
 		branchLock()
 		_ = w.Store.AddRunLog(ctx, run.ID, "error", taskBranchErr.Error())
@@ -3009,7 +3057,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	}
 	branchLock()
 	_ = w.Store.SetRunWorktree(ctx, run.ID, worktree)
-	_ = w.Store.AddRunLog(ctx, run.ID, "info", "Task-Branch: "+taskBranch)
+	_ = w.Store.AddRunLog(ctx, run.ID, "info", "Task-Branch vor Delivery auf origin/"+defaultBranch+" aktualisiert: "+taskBranch)
 	_ = w.Store.AddRunLog(ctx, run.ID, "info", "Isolierter Git-Worktree: "+worktree)
 	run.WorkspaceSnapshot = worktree
 	devDefinition, hasDevContainer, devErr := discoverDevContainer(worktree)

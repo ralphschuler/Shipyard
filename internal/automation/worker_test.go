@@ -192,6 +192,59 @@ func TestEnsureTaskBranchFetchesCurrentDefaultBeforeCreation(t *testing.T) {
 	}
 }
 
+func TestRefreshTaskBranchRebasesExistingBranchBeforeDelivery(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, t.TempDir(), "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+
+	branch, err := ensureTaskBranch(context.Background(), source, "refresh-task", "master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	branchWorktree := filepath.Join(t.TempDir(), "task-branch")
+	runGit(t, source, "worktree", "add", branchWorktree, branch)
+	if err := os.WriteFile(filepath.Join(branchWorktree, "task.txt"), []byte("task\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, branchWorktree, "add", "task.txt")
+	runGit(t, branchWorktree, "commit", "-m", "task change")
+	runGit(t, source, "worktree", "remove", "--force", branchWorktree)
+
+	other := filepath.Join(t.TempDir(), "other")
+	runGit(t, t.TempDir(), "clone", remote, other)
+	runGit(t, other, "config", "user.name", "Test")
+	runGit(t, other, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(other, "remote.txt"), []byte("remote\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, other, "add", "remote.txt")
+	runGit(t, other, "commit", "-m", "remote advance")
+	runGit(t, other, "push", "origin", "master")
+
+	got, err := refreshTaskBranch(context.Background(), source, "refresh-task", "refresh-run", "master")
+	if err != nil {
+		t.Fatalf("refresh task branch: %v", err)
+	}
+	if got != branch {
+		t.Fatalf("branch = %q, want %q", got, branch)
+	}
+	for _, file := range []string{"task.txt", "remote.txt"} {
+		if _, err := gitOutput(context.Background(), source, "show", branch+":"+file); err != nil {
+			t.Fatalf("refreshed task branch is missing %s: %v", file, err)
+		}
+	}
+}
+
 func TestIntegrationPRMergedRequiresMergedState(t *testing.T) {
 	if integrationPRMerged([]byte(`{"state":"OPEN","mergedAt":null}`)) {
 		t.Fatal("open pull request reported as merged")
