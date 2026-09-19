@@ -1039,6 +1039,37 @@ func taskIntegrationBranch(taskID string) string {
 	return "task/" + strings.TrimSpace(taskID)
 }
 
+// ensureIntegrationBranch repairs the local ref boundary used by the queue.
+// The accepted commit is the source of truth when a checkout lost its task
+// branch between Apply and queue processing.
+func ensureIntegrationBranch(ctx context.Context, source, branch, headSHA string) error {
+	branch = strings.TrimSpace(branch)
+	headSHA = strings.TrimSpace(headSHA)
+	if branch == "" || !strings.HasPrefix(branch, "task/") || strings.ContainsAny(branch, " \t\n\r") {
+		return errors.New("ungültiger Integrations-Branch")
+	}
+	if headSHA == "" {
+		return errors.New("Integrations-Head-SHA fehlt")
+	}
+	resolvedHead, err := gitOutput(ctx, source, "rev-parse", "--verify", headSHA+"^{commit}")
+	if err != nil {
+		return fmt.Errorf("Integrations-Head %s ist lokal nicht verfügbar: %w", headSHA, err)
+	}
+	if _, err := gitOutput(ctx, source, "show-ref", "--verify", "refs/heads/"+branch); err != nil {
+		if _, err := gitOutput(ctx, source, "branch", branch, resolvedHead); err != nil {
+			return fmt.Errorf("Integrations-Branch %s konnte aus dem übernommenen Commit nicht angelegt werden: %w", branch, err)
+		}
+		return nil
+	}
+	if _, err := gitOutput(ctx, source, "merge-base", "--is-ancestor", resolvedHead, branch); err == nil {
+		return nil
+	}
+	if _, err := gitOutput(ctx, source, "branch", "-f", branch, resolvedHead); err != nil {
+		return fmt.Errorf("Integrations-Branch %s konnte auf den übernommenen Commit aktualisiert werden: %w", branch, err)
+	}
+	return nil
+}
+
 // validateRunSandboxSnapshot treats the profile persisted with a run as the
 // execution contract. It rejects malformed or substituted snapshots before a
 // worker can use them after an agent configuration has changed.
@@ -1168,10 +1199,13 @@ func (w *Worker) processIntegrationQueue(ctx context.Context) error {
 				}
 				continue
 			}
-			updateErr := w.Store.UpdateIntegration(ctx, job.ID, job.Status, job.Step, job.BaseSHA, job.HeadSHA, job.PRURL, err.Error(), job.PRNumber, job.Attempts+1)
+			status, step := integrationFailureState(job)
+			updateErr := w.Store.UpdateIntegration(ctx, job.ID, status, step, job.BaseSHA, job.HeadSHA, job.PRURL, err.Error(), job.PRNumber, job.Attempts+1)
 			if updateErr != nil {
 				failures = append(failures, fmt.Errorf("Integrationsfehler für Queue-Job %s: %w", job.ID, errors.Join(err, updateErr)))
 			} else {
+				_ = w.Store.SetRunIntegration(ctx, job.RunID, job.Branch, job.BaseSHA, job.HeadSHA, status, job.PRURL, job.PRNumber)
+				_ = w.Store.AddRunLog(ctx, job.RunID, "error", fmt.Sprintf("Integration fehlgeschlagen (%s/%s): %s; nächster Versuch wird eingeplant.", status, step, err))
 				failures = append(failures, fmt.Errorf("Integrationsfehler für Queue-Job %s: %w", job.ID, err))
 			}
 		}
@@ -1181,6 +1215,13 @@ func (w *Worker) processIntegrationQueue(ctx context.Context) error {
 
 func integrationConflictWithState(job domain.IntegrationJob, integrationErr error) error {
 	return fmt.Errorf("base=%s head=%s: %w", strings.TrimSpace(job.BaseSHA), strings.TrimSpace(job.HeadSHA), integrationErr)
+}
+
+func integrationFailureState(job domain.IntegrationJob) (string, string) {
+	if job.Status == "running" {
+		return "queued", job.Step
+	}
+	return job.Status, job.Step
 }
 
 func (w *Worker) processIntegrationJob(ctx context.Context, job domain.IntegrationJob) error {
@@ -1221,6 +1262,9 @@ func (w *Worker) processIntegrationJob(ctx context.Context, job domain.Integrati
 	}
 	integrationPath := filepath.Join(taskIntegrationDirectory(job.RepositoryPath), "queue-"+job.ID)
 	if err := os.MkdirAll(filepath.Dir(integrationPath), 0o700); err != nil {
+		return err
+	}
+	if err := ensureIntegrationBranch(ctx, job.RepositoryPath, job.Branch, job.HeadSHA); err != nil {
 		return err
 	}
 	if err := removeIntegrationWorktree(ctx, job.RepositoryPath, integrationPath); err != nil {
