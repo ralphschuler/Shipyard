@@ -99,7 +99,7 @@ if [[ "${TASKBOARD_VERIFY_UI:-1}" == "1" ]]; then
   cookie_jar="$(mktemp)"
   cleanup_ui_verifier() { rm -f "$cookie_jar"; }
   trap cleanup_ui_verifier EXIT
-  for path in / /boards /projects /agents /automations /schedules /webhooks /skills /runs /audit /settings/providers /settings/agent-policy /settings/appearance /settings/integrations /account; do
+  for path in /app/ /app/tasks/verify /app/settings/updates; do
     curl --fail --silent --show-error --insecure --cookie "$cookie_jar" --cookie-jar "$cookie_jar" "${base_url%/}${path}" >/dev/null
   done
 fi

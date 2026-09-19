@@ -47,7 +47,7 @@ export TASKBOARD_ADDR='127.0.0.1:8080'
 go run ./cmd/taskboard
 ```
 
-Open <http://127.0.0.1:8080>. On a new database, Shipyard redirects to `/setup`. Create the first owner account with a password of at least 12 characters; the remaining web interface is protected by a server-side session.
+Open <http://127.0.0.1:8080/app/>. The root URL `/` permanently redirects there, preserving query parameters. On a new database, open `/setup` first to create the owner account with a password of at least 12 characters; the web interface is protected by a server-side session.
 
 If you are working on the React frontend, use a separate terminal:
 
@@ -57,7 +57,7 @@ npm ci
 npm run dev
 ```
 
-The Go server serves the fingerprinted React frontend embedded in the release binary at `/app/`. The classic server-rendered views remain available at the root paths.
+The Go server serves the fingerprinted React frontend embedded in the release binary at `/app/`, which is the canonical Shipyard UI entry point. Direct extensionless client routes below `/app/` receive the app shell; missing asset paths remain 404. API, health, authentication, update, metrics, and MCP routes stay outside the UI fallback.
 
 ## First workflow
 
@@ -98,7 +98,7 @@ Use HTTPS and an access-controlled reverse proxy when exposing Shipyard beyond l
 
 ## Architecture
 
-Shipyard is a Go HTTP service backed by PostgreSQL. The web layer provides server-rendered views, JSON APIs, Server-Sent Events for live updates, and the authenticated MCP transport. The store owns migrations and persistence. The automation worker watches lifecycle events and schedules, prepares isolated Git worktrees, invokes the configured provider, and records the run, logs, usage, and delivery status. The `frontend/` directory contains the optional React, TypeScript, and Vite application.
+Shipyard is a Go HTTP service backed by PostgreSQL. The web layer provides the React control panel at `/app/`, JSON APIs, Server-Sent Events for live updates, and the authenticated MCP transport. The store owns migrations and persistence. The automation worker watches lifecycle events and schedules, prepares isolated Git worktrees, invokes the configured provider, and records the run, logs, usage, and delivery status. The `frontend/` directory contains the React, TypeScript, and Vite application.
 
 ## Agents, automations, and MCP
 

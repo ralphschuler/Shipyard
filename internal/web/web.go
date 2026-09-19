@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -64,12 +65,36 @@ func ValidateEmbeddedApp(expectedVersion, expectedCommit string) error {
 // while using the same embedded filesystem and route shape as Register.
 func EmbeddedAppHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /app/", http.StripPrefix("/app/", http.FileServerFS(appDist)))
+	mux.Handle("GET /app/", embeddedAppHandler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok","database":"embedded-test"}`))
 	})
 	return mux
+}
+
+func embeddedAppHandler() http.Handler {
+	files := http.StripPrefix("/app/", http.FileServerFS(appDist))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		relative := strings.TrimPrefix(r.URL.Path, "/app/")
+		if relative == "" {
+			files.ServeHTTP(w, r)
+			return
+		}
+		if _, err := fs.Stat(appDist, path.Clean(relative)); err == nil {
+			files.ServeHTTP(w, r)
+			return
+		}
+		// React client routes are extensionless. Keep missing assets a hard 404
+		// so stale bundles can never be hidden by the SPA fallback.
+		if path.Ext(relative) != "" {
+			http.NotFound(w, r)
+			return
+		}
+		clone := r.Clone(r.Context())
+		clone.URL.Path = "/app/"
+		files.ServeHTTP(w, clone)
+	})
 }
 
 type App struct {
@@ -555,7 +580,7 @@ func (a *App) Register(m *http.ServeMux) {
 	// The React/shadcn client is part of this binary. Serving only the embedded
 	// release assets prevents a checkout's stale frontend/dist from surviving
 	// an update and keeps HTML, fingerprints, and backend metadata in lockstep.
-	m.Handle("GET /app/", http.StripPrefix("/app/", http.FileServerFS(appDist)))
+	m.Handle("GET /app/", embeddedAppHandler())
 	m.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
 		// Keep the browser console clean without introducing a separately
 		// deployed asset; the actual icon remains embedded under /static.
@@ -616,7 +641,7 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("GET /audit", a.audit)
 	m.HandleFunc("POST /account/tokens", a.createAccountToken)
 	m.HandleFunc("POST /account/tokens/{id}/revoke", a.revokeAccountToken)
-	m.HandleFunc("GET /{$}", a.dashboard)
+	m.HandleFunc("GET /{$}", redirectToApp)
 	m.HandleFunc("GET /boards", a.boards)
 	m.HandleFunc("GET /projects", a.projects)
 	m.HandleFunc("POST /projects", a.createProject)
@@ -718,6 +743,14 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("GET /runs/{id}/diff", a.runDiff)
 	m.HandleFunc("POST /runs/{id}/reject", a.rejectRun)
 	m.HandleFunc("POST /notifications/{id}/read", a.readNotification)
+}
+
+func redirectToApp(w http.ResponseWriter, r *http.Request) {
+	location := "/app/"
+	if r.URL.RawQuery != "" {
+		location += "?" + r.URL.RawQuery
+	}
+	http.Redirect(w, r, location, http.StatusPermanentRedirect)
 }
 
 func (a *App) metrics(w http.ResponseWriter, r *http.Request) {

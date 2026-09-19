@@ -53,6 +53,42 @@ func TestSettingsTabsAreRegistered(t *testing.T) {
 	}
 }
 
+func TestRootRedirectsToCanonicalAppAndPreservesQuery(t *testing.T) {
+	mux := http.NewServeMux()
+	(&App{}).Register(mux)
+	request := httptest.NewRequest(http.MethodGet, "/?board=123&filter=open", nil)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusPermanentRedirect {
+		t.Fatalf("root status = %d, want %d", response.Code, http.StatusPermanentRedirect)
+	}
+	if got := response.Header().Get("Location"); got != "/app/?board=123&filter=open" {
+		t.Fatalf("root Location = %q, want query-preserving app URL", got)
+	}
+	if strings.Contains(response.Body.String(), "Dashboard") {
+		t.Fatal("root response rendered the legacy dashboard")
+	}
+}
+
+func TestAppClientRoutesUseIndexButMissingAssetsStay404(t *testing.T) {
+	mux := http.NewServeMux()
+	(&App{}).Register(mux)
+	for _, path := range []string{"/app/tasks/123", "/app/settings/updates"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `<div id="root">`) {
+			t.Fatalf("%s: status=%d, body is not the app shell", path, response.Code)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "/app/missing.js", nil)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("missing asset status = %d, want %d", response.Code, http.StatusNotFound)
+	}
+}
+
 func TestUpdatesAPIFailsClosedForUnverifiedRelease(t *testing.T) {
 	t.Setenv("TASKBOARD_VERSION", "1.2.0")
 	t.Setenv("TASKBOARD_COMMIT_SHA", "abc123")
