@@ -3518,6 +3518,8 @@ function TaskDetail({ id }: { id: string }) {
   const [handoff, setHandoff] = useState(false);
   const [decision, setDecision] = useState(false);
   const [message, setMessage] = useState("");
+  const [startingAgents, setStartingAgents] = useState<Record<string, boolean>>({});
+  const startingAgentsRef = useRef(new Set<string>());
   useEffect(() => {
     const updateTab = () => setActiveTab(taskTabFromHash());
     addEventListener("hashchange", updateTab);
@@ -3575,9 +3577,21 @@ function TaskDetail({ id }: { id: string }) {
     );
   };
   const start = async (agentID: string) => {
+    if (startingAgentsRef.current.has(agentID)) return;
+    startingAgentsRef.current.add(agentID);
+    setStartingAgents((current) => ({ ...current, [agentID]: true }));
     const form = new FormData();
     form.set("agent_id", agentID);
-    await request("/tasks/" + id + "/runs", form);
+    try {
+      await request("/tasks/" + id + "/runs", form);
+    } finally {
+      startingAgentsRef.current.delete(agentID);
+      setStartingAgents((current) => {
+        const next = { ...current };
+        delete next[agentID];
+        return next;
+      });
+    }
   };
   const remove = async () => {
     if (!confirm("Task wirklich löschen?")) return;
@@ -3888,6 +3902,7 @@ function TaskDetail({ id }: { id: string }) {
                   <Button
                     key={agent.ID}
                     variant="outline"
+                    disabled={startingAgents[agent.ID]}
                     onClick={() => start(agent.ID)}
                   >
                     {agent.Name}

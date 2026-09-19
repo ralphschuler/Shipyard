@@ -7,7 +7,7 @@ const taskFixture = {
   Comments: [],
   History: [],
   Columns: [],
-  Agents: [],
+  Agents: [{ ID: "agent-1", Name: "Delivery Agent", Enabled: true }],
   Runs: [],
   BoardLabels: [],
   Projects: [],
@@ -53,4 +53,26 @@ test("keeps task tabs above the title and switches between conversation and full
     return Boolean(tab && title && (tab.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING));
   });
   expect(tabsAreBeforeTitle).toBe(true);
+});
+
+test("disables the clicked delivery agent until the start request completes", async ({ page }) => {
+  let releaseStartRequest!: () => void;
+  const startRequestReleased = new Promise<void>((resolve) => { releaseStartRequest = resolve; });
+  let startRequests = 0;
+  await page.route("**/tasks/task-tabs/runs", async (route) => {
+    startRequests += 1;
+    await startRequestReleased;
+    await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+  });
+
+  await page.goto("/app/#/tasks/task-tabs?tab=conversation");
+  const startButton = page.getByRole("button", { name: "Delivery Agent" });
+
+  await startButton.click();
+  await expect(startButton).toBeDisabled();
+  await startButton.click({ force: true });
+  expect(startRequests).toBe(1);
+
+  releaseStartRequest();
+  await expect(startButton).toBeEnabled();
 });
