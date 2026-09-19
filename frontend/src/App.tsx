@@ -357,13 +357,13 @@ export default function App() {
             </span>
             {showNavLabels && <span id="shipyard-brand-name"><strong className="block font-semibold">Shipyard</strong><small>Control room</small></span>}
           </div>
-          <nav aria-label={t("navigation")} className="shipyard-nav flex-1 space-y-1 overflow-y-auto p-3">
+          <nav aria-label={t("navigation")} className="shipyard-nav flex flex-1 flex-col gap-1 overflow-y-auto p-3">
             {nav.map((item, index) => {
               const Icon = item.icon;
               const selected = item.path === route || (item.name === "boards" && boardsActive);
               const navIndex = navIndexFor(index);
               return (
-                <div key={item.path} className="space-y-1">
+                <div key={item.path} className="flex flex-col gap-1">
                   {item.name === "boards" ? (
             <button
                       type="button"
@@ -464,7 +464,7 @@ export default function App() {
               </p>
             </div>
             <Badge variant="outline" className="h-fit gap-2 px-3 py-1.5">
-              <span className="size-2 rounded-full bg-emerald-500" />
+              <span className="shipyard-status-dot size-2 rounded-full" />
               {t("connected")}
             </Badge>
           </header>
@@ -653,7 +653,7 @@ function Boards() {
                 <legend className="text-sm font-medium">
                   {text("Workflow-Vorlage", "Workflow template")}
                 </legend>
-                <div className="max-h-56 space-y-2 overflow-auto pr-1">
+                <div className="flex max-h-56 flex-col gap-2 overflow-auto pr-1">
                   {templates.map((value) => (
                     <label
                       key={value.ID}
@@ -3242,8 +3242,8 @@ function DiffReview({ loading, files }: { loading: boolean; files: DiffFile[] })
   if (loading) return <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">Diff wird geladen …</CardContent></Card>;
   if (!files.length) return <Card><CardContent className="py-10 text-center text-sm text-muted-foreground">Der Diff ist leer oder nicht mehr verfügbar.</CardContent></Card>;
   return <div className="grid gap-4 lg:grid-cols-[15rem_minmax(0,1fr)]">
-    <Card className="h-fit"><CardHeader><CardTitle className="text-base">Dateien</CardTitle></CardHeader><CardContent className="p-2"><nav aria-label="Geänderte Dateien" className="grid gap-1">{files.map((file) => <a key={file.path} href={`#change-${file.path}`} className="rounded-md px-3 py-2 text-left text-sm hover:bg-muted"><span className="block truncate font-medium">{file.path}</span><span className="text-xs text-muted-foreground"><span className="text-emerald-700 dark:text-emerald-400">+{file.additions}</span> <span className="text-red-700 dark:text-red-400">−{file.deletions}</span></span></a>)}</nav></CardContent></Card>
-    <div className="min-w-0 space-y-3">{files.map((file, index) => <details key={file.path} id={`change-${file.path}`} open={index === 0} className="overflow-hidden rounded-lg border"><summary className="cursor-pointer list-inside bg-muted px-4 py-3 text-sm font-medium"><span>{file.path}</span><span className="ml-3 text-xs font-normal text-muted-foreground">{file.additions + file.deletions} Änderungen</span></summary><div className="overflow-auto bg-muted/40 font-mono text-xs leading-6">{file.lines.map((line, lineIndex) => <div key={lineIndex} className={`min-w-max px-4 ${line.startsWith("+") ? "bg-emerald-500/15 text-emerald-900 dark:text-emerald-200" : line.startsWith("-") ? "bg-red-500/15 text-red-900 dark:text-red-200" : "text-muted-foreground"}`}><span aria-hidden="true" className="mr-3 inline-block w-3 select-none text-center">{line[0] || " "}</span>{line.slice(1)}</div>)}</div></details>)}</div>
+    <Card className="h-fit"><CardHeader><CardTitle className="text-base">Dateien</CardTitle></CardHeader><CardContent className="p-2"><nav aria-label="Geänderte Dateien" className="grid gap-1">{files.map((file) => <a key={file.path} href={`#change-${file.path}`} className="rounded-md px-3 py-2 text-left text-sm hover:bg-muted"><span className="block truncate font-medium">{file.path}</span><span className="text-xs text-muted-foreground"><span className="shipyard-diff-add">+{file.additions}</span> <span className="shipyard-diff-remove">−{file.deletions}</span></span></a>)}</nav></CardContent></Card>
+    <div className="flex min-w-0 flex-col gap-3">{files.map((file, index) => <details key={file.path} id={`change-${file.path}`} open={index === 0} className="overflow-hidden rounded-lg border"><summary className="cursor-pointer list-inside bg-muted px-4 py-3 text-sm font-medium"><span>{file.path}</span><span className="ml-3 text-xs font-normal text-muted-foreground">{file.additions + file.deletions} Änderungen</span></summary><div className="overflow-auto bg-muted/40 font-mono text-xs leading-6">{file.lines.map((line, lineIndex) => <div key={lineIndex} className={`min-w-max px-4 ${line.startsWith("+") ? "shipyard-diff-add-surface" : line.startsWith("-") ? "shipyard-diff-remove-surface" : "text-muted-foreground"}`}><span aria-hidden="true" className="mr-3 inline-block w-3 select-none text-center">{line[0] || " "}</span>{line.slice(1)}</div>)}</div></details>)}</div>
   </div>;
 }
 
@@ -3296,13 +3296,13 @@ function ChangesTab({ changes, onMessage }: { changes: any[]; onMessage: (messag
         <Button disabled={!candidate || loading || !rawDiff} onClick={() => setConfirmOpen(true)}>Änderungen übernehmen</Button>
       </CardHeader>
       <CardContent>
-        <p className={`text-sm ${candidate ? "text-muted-foreground" : "text-amber-700 dark:text-amber-300"}`} role="status">{candidate ? "Dieser Diff ist geprüft und kann in das zugewiesene Repository übernommen werden." : changeState(latest)}</p>
+        <p className={`text-sm ${candidate ? "text-muted-foreground" : "shipyard-danger-text"}`} role="status">{candidate ? "Dieser Diff ist geprüft und kann in das zugewiesene Repository übernommen werden." : changeState(latest)}</p>
         {applyError && <p className="mt-3 text-sm text-destructive" role="alert">Übernahme fehlgeschlagen: {applyError}</p>}
-        {candidate && <div className="mt-5 flex flex-wrap gap-3 border-t pt-4 text-sm"><span><strong>{files.length || "–"}</strong> Dateien</span><span className="text-emerald-700 dark:text-emerald-400">+{additions} hinzugefügt</span><span className="text-red-700 dark:text-red-400">−{deletions} gelöscht</span></div>}
+        {candidate && <div className="mt-5 flex flex-wrap gap-3 border-t pt-4 text-sm"><span><strong>{files.length || "–"}</strong> Dateien</span><span className="shipyard-diff-add">+{additions} hinzugefügt</span><span className="shipyard-diff-remove">−{deletions} gelöscht</span></div>}
       </CardContent>
     </Card>
     {candidate && <DiffReview loading={loading} files={files} />}
-    <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}><DialogContent><DialogHeader><DialogTitle>Änderungen übernehmen?</DialogTitle><DialogDescription>Die geprüften Änderungen werden in das zugewiesene Repository integriert. Danach wechselt der Task nach Review.</DialogDescription></DialogHeader><div className="rounded-md bg-muted p-3 text-sm"><p><strong>{files.length}</strong> Dateien · <span className="text-emerald-700 dark:text-emerald-400">+{additions}</span> / <span className="text-red-700 dark:text-red-400">−{deletions}</span></p><ul className="mt-2 max-h-32 list-disc overflow-auto pl-5">{files.map((file) => <li key={file.path}>{file.path}</li>)}</ul></div><DialogFooter><Button variant="outline" onClick={() => setConfirmOpen(false)}>Abbrechen</Button><Button disabled={busy} onClick={apply}>Bestätigen und übernehmen</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}><DialogContent><DialogHeader><DialogTitle>Änderungen übernehmen?</DialogTitle><DialogDescription>Die geprüften Änderungen werden in das zugewiesene Repository integriert. Danach wechselt der Task nach Review.</DialogDescription></DialogHeader><div className="rounded-md bg-muted p-3 text-sm"><p><strong>{files.length}</strong> Dateien · <span className="shipyard-diff-add">+{additions}</span> / <span className="shipyard-diff-remove">−{deletions}</span></p><ul className="mt-2 max-h-32 list-disc overflow-auto pl-5">{files.map((file) => <li key={file.path}>{file.path}</li>)}</ul></div><DialogFooter><Button variant="outline" onClick={() => setConfirmOpen(false)}>Abbrechen</Button><Button disabled={busy} onClick={apply}>Bestätigen und übernehmen</Button></DialogFooter></DialogContent></Dialog>
   </div>;
 }
 
@@ -3442,9 +3442,9 @@ function TaskDetail({ id }: { id: string }) {
               {data.Interactions?.map((interaction: any) => (
                 <section
                   key={interaction.ID}
-                  className="mb-5 rounded-lg border border-amber-500/40 bg-amber-500/5 p-4"
+                  className="shipyard-attention mb-5 rounded-lg border p-4"
                 >
-                  <p className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-400">
+                  <p className="text-xs font-semibold uppercase tracking-wide">
                     Entscheidung benötigt
                   </p>
                   <h3 className="mt-1 font-medium">{interaction.Title}</h3>

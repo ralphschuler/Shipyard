@@ -32,6 +32,18 @@
 }
 
 :root {
+  /* Shipyard foundations: one bounded rhythm keeps shell, pages, dialogs and
+     dense operator lists aligned across desktop and tablet. */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --shadow-overlay: 0 1.25rem 3rem oklch(0.1 0.02 250 / 22%);
   --background: oklch(0.985 0.004 250);
   --foreground: oklch(0.22 0.02 255);
   --card: oklch(1 0 0);
@@ -45,6 +57,7 @@
   --accent: oklch(0.93 0.03 235);
   --accent-foreground: oklch(0.3 0.06 235);
   --destructive: oklch(0.56 0.2 25);
+  --success: oklch(0.52 0.14 160);
   --border: oklch(0.89 0.012 250);
   --input: var(--border);
   --ring: oklch(0.56 0.14 235);
@@ -53,6 +66,7 @@
   --radius: 0.75rem;
 }
 .dark {
+  --shadow-overlay: 0 1.25rem 3rem oklch(0.05 0.02 250 / 48%);
   --background: oklch(0.17 0.018 250);
   --foreground: oklch(0.95 0.008 250);
   --card: oklch(0.22 0.02 250);
@@ -66,6 +80,7 @@
   --accent: oklch(0.31 0.035 235);
   --accent-foreground: oklch(0.94 0.02 235);
   --destructive: oklch(0.7 0.16 25);
+  --success: oklch(0.72 0.14 165);
   --border: oklch(1 0 0 / 11%);
   --input: oklch(1 0 0 / 14%);
   --ring: oklch(0.68 0.12 225);
@@ -92,27 +107,22 @@
    tangible beside the workspace; the darker control-room treatment belongs
    exclusively to dark mode. */
 .shipyard-sidebar {
-  --sidebar-bg: oklch(0.975 0.008 250);
-  --sidebar-text: oklch(0.27 0.027 250);
-  --sidebar-muted: oklch(0.48 0.025 250);
-  --sidebar-line: oklch(0.88 0.014 250);
-  --sidebar-active: oklch(0.48 0.13 184);
-  --sidebar-hover: oklch(0.94 0.025 205);
-  --sidebar-active-bg: oklch(0.88 0.075 184);
-  --sidebar-active-line: oklch(0.68 0.12 184 / 45%);
+  --sidebar-bg: var(--card);
+  --sidebar-text: var(--foreground);
+  --sidebar-muted: var(--muted-foreground);
+  --sidebar-line: var(--border);
+  --sidebar-active: var(--primary);
+  --sidebar-hover: var(--muted);
+  --sidebar-active-bg: var(--accent);
+  --sidebar-active-line: color-mix(in oklab, var(--primary) 45%, var(--border));
   background: var(--sidebar-bg);
   border-color: var(--sidebar-line);
   color: var(--sidebar-text);
 }
 .dark .shipyard-sidebar {
-  --sidebar-bg: oklch(0.13 0.028 252);
-  --sidebar-text: oklch(0.87 0.018 245);
-  --sidebar-muted: oklch(0.67 0.03 250);
-  --sidebar-line: oklch(1 0 0 / 10%);
-  --sidebar-active: oklch(0.75 0.12 184);
-  --sidebar-hover: oklch(1 0 0 / 8%);
-  --sidebar-active-bg: oklch(0.75 0.12 184 / 14%);
-  --sidebar-active-line: oklch(0.75 0.12 184 / 30%);
+  --sidebar-bg: color-mix(in oklab, var(--card) 82%, var(--background));
+  --sidebar-hover: color-mix(in oklab, var(--muted) 82%, var(--foreground));
+  --sidebar-active-bg: color-mix(in oklab, var(--accent) 75%, var(--card));
 }
 .shipyard-brand {
   border-color: var(--sidebar-line);
@@ -232,7 +242,7 @@
 }
 @media (max-width: 767px) {
   .shipyard-sidebar {
-    box-shadow: 1.25rem 0 3rem oklch(0.1 0.02 250 / 22%);
+    box-shadow: var(--shadow-overlay);
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -241,6 +251,34 @@
   .shipyard-nav-item svg {
     transition: none;
   }
+}
+
+/* Status roles are shared by shell, task/run detail and diff review. They
+   intentionally resolve through semantic theme tokens; no page needs a
+   light-only or dark-only utility override for these signals. */
+.shipyard-status-dot {
+  background: var(--success);
+}
+.shipyard-success-icon,
+.shipyard-diff-add {
+  color: var(--success);
+}
+.shipyard-diff-remove,
+.shipyard-danger-text {
+  color: var(--destructive);
+}
+.shipyard-diff-add-surface {
+  background: color-mix(in oklab, var(--success) 15%, transparent);
+  color: color-mix(in oklab, var(--success) 75%, var(--foreground));
+}
+.shipyard-diff-remove-surface {
+  background: color-mix(in oklab, var(--destructive) 15%, transparent);
+  color: color-mix(in oklab, var(--destructive) 75%, var(--foreground));
+}
+.shipyard-attention {
+  border-color: color-mix(in oklab, var(--destructive) 40%, var(--border));
+  background: color-mix(in oklab, var(--destructive) 5%, var(--card));
+  color: var(--destructive);
 }
 /* Keep the dialog surface opaque even if a utility stylesheet is unavailable
    during an incremental asset refresh. The modal must always separate its
