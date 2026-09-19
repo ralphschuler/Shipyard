@@ -1,6 +1,9 @@
 package workspace
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 func TestRootsUseLegacyLocationsWithoutConfiguration(t *testing.T) {
 	t.Setenv("TASKBOARD_WORKSPACE_ROOT", "")
@@ -25,5 +28,25 @@ func TestRootsUseConfiguredWorkspaceRoot(t *testing.T) {
 	}
 	if got, want := IntegrationsRoot(), "/srv/codex/workspaces/shipyard/integrations"; got != want {
 		t.Fatalf("IntegrationsRoot() = %q, want %q", got, want)
+	}
+}
+
+func TestValidateConfiguredWorkspace(t *testing.T) {
+	t.Setenv("TASKBOARD_WORKSPACE_ROOT", t.TempDir())
+	status, err := Validate()
+	if err != nil || !status.Ready() {
+		t.Fatalf("Validate() = %#v, %v; want ready workspace", status, err)
+	}
+	for _, path := range []string{status.Projects, status.Runs, status.Integrations} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("managed directory %q missing: %v", path, err)
+		}
+	}
+}
+
+func TestValidateRejectsRootPath(t *testing.T) {
+	t.Setenv("TASKBOARD_WORKSPACE_ROOT", "/")
+	if _, err := Validate(); err == nil {
+		t.Fatal("Validate() accepted filesystem root")
 	}
 }

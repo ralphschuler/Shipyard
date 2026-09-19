@@ -45,6 +45,7 @@ func TestSettingsTabsAreRegistered(t *testing.T) {
 		"/settings/appearance",
 		"/settings/integrations",
 		"/settings/updates",
+		"/settings/workspace",
 	} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		_, pattern := mux.Handler(req)

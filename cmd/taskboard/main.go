@@ -14,6 +14,7 @@ import (
 	"taskboard/internal/store"
 	"taskboard/internal/updates"
 	"taskboard/internal/web"
+	"taskboard/internal/workspace"
 	"time"
 )
 
@@ -85,6 +86,11 @@ func main() {
 
 	if err := s.Migrate(ctx); err != nil {
 		log.Fatalf("Datenbankmigration fehlgeschlagen: %v", err)
+	}
+	if status, err := workspace.Validate(); err != nil {
+		log.Printf("Workspace-Preflight nicht bereit: %s", status.Summary())
+	} else {
+		log.Printf("Workspace-Preflight bereit: %s", status.Summary())
 	}
 
 	worker := &automation.Worker{

@@ -2802,6 +2802,13 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		_ = w.finish(ctx, run, "failed")
 		return
 	}
+	if _, preflightErr := workspace.Validate(); preflightErr != nil {
+		reason := "Workspace-Preflight fehlgeschlagen; Run blockiert: " + preflightErr.Error()
+		_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
+		_ = w.finish(ctx, run, "failed")
+		return
+	}
 	if run.TargetProject != "" {
 		project, projectErr := w.Store.Project(runCtx, run.TargetProject)
 		if projectErr != nil {
