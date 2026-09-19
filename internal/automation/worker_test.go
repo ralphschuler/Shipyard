@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"taskboard/internal/domain"
 	"taskboard/internal/release"
+	"taskboard/internal/sandbox"
 	"testing"
 	"time"
 )
@@ -884,6 +886,80 @@ func TestProviderCommandSplitsConfiguredAdapter(t *testing.T) {
 	command, args := providerCommand("codex exec")
 	if command != "codex" || !reflect.DeepEqual(args, []string{"exec"}) {
 		t.Fatalf("unexpected command: %q %#v", command, args)
+	}
+}
+
+func TestCLISandboxInvocationUsesProfileIsolation(t *testing.T) {
+	command, args, err := cliSandboxInvocation("/workspace/run", "development", "sh", []string{"-c", "printf ok"})
+	if err != nil || command != "bwrap" {
+		t.Fatalf("sandbox wrapper missing: %q %v", command, err)
+	}
+	joined := strings.Join(args, " ")
+	for _, want := range []string{"--unshare-all", "--ro-bind", "--bind", "/workspace"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("sandbox args lack %q: %s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "danger-full-access") {
+		t.Fatal("unsafe sandbox flag leaked")
+	}
+}
+
+func TestCLISandboxBlocksReleaseBridgeDirectExecution(t *testing.T) {
+	if _, _, err := cliSandboxInvocation("/workspace/run", "release-bridge", "sh", nil); err == nil || !strings.Contains(err.Error(), "hostseitigen Release-Bridge") {
+		t.Fatalf("release bridge was not blocked: %v", err)
+	}
+}
+
+func TestValidateRunSandboxSnapshotRejectsManipulatedPolicy(t *testing.T) {
+	workspace := t.TempDir()
+	tests := []struct {
+		name   string
+		policy sandbox.Profile
+	}{
+		{
+			name:   "unapproved mount",
+			policy: sandbox.Profile{Name: "development", Mounts: []string{"host-root"}, NetworkMode: "none", WriteMode: "worktree", Active: true},
+		},
+		{
+			name:   "unapproved network",
+			policy: sandbox.Profile{Name: "development", Mounts: []string{"worktree"}, NetworkMode: "host", WriteMode: "worktree", Active: true},
+		},
+		{
+			name:   "built-in network invariant",
+			policy: sandbox.Profile{Name: "development", Mounts: []string{"worktree"}, NetworkMode: "qa-network", WriteMode: "worktree", Active: true},
+		},
+		{
+			name:   "unapproved write mode",
+			policy: sandbox.Profile{Name: "development", Mounts: []string{"worktree"}, NetworkMode: "none", WriteMode: "host", Active: true},
+		},
+		{
+			name:   "profile name mismatch",
+			policy: sandbox.Profile{Name: "strict", Mounts: []string{"worktree"}, NetworkMode: "none", WriteMode: "worktree", Active: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := json.Marshal(tt.policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			profileName := tt.policy.Name
+			if tt.name == "profile name mismatch" {
+				profileName = "development"
+			}
+			if _, err := validateRunSandboxSnapshot(profileName, payload, workspace); err == nil {
+				t.Fatalf("manipulated sandbox snapshot was accepted: %#v", tt.policy)
+			}
+		})
+	}
+	valid := sandbox.Profile{Name: "development", Mounts: []string{"worktree"}, NetworkMode: "none", WriteMode: "worktree", Active: true}
+	payload, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateRunSandboxSnapshot(valid.Name, payload, workspace); err != nil {
+		t.Fatalf("valid sandbox snapshot was rejected: %v", err)
 	}
 }
 

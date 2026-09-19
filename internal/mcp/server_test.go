@@ -44,6 +44,23 @@ func TestToolSchemasExposeSupportedOptionalArguments(t *testing.T) {
 	}
 }
 
+func TestUpdateSandboxProfileRequiresName(t *testing.T) {
+	for _, tool := range tools() {
+		if tool["name"] != "update_sandbox_profile" {
+			continue
+		}
+		schema := tool["inputSchema"].(map[string]any)
+		required := schema["required"].([]string)
+		for _, field := range required {
+			if field == "name" {
+				return
+			}
+		}
+		t.Fatal("update_sandbox_profile must require name")
+	}
+	t.Fatal("update_sandbox_profile tool is missing")
+}
+
 func TestCreateWebhookRejectsInvalidURLBeforeStoreAccess(t *testing.T) {
 	request := httptest.NewRequest("POST", "/mcp", nil)
 	params, err := json.Marshal(map[string]any{

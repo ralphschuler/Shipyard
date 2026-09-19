@@ -56,6 +56,20 @@ func TestSecretsTemplatePreservesExistingAgentAssignments(t *testing.T) {
 	}
 }
 
+func TestAgentsTemplatePreservesSandboxProfileActiveState(t *testing.T) {
+	page, err := files.ReadFile("templates/agents.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(page)
+	if strings.Contains(html, `name="active" value="true" checked>`) {
+		t.Fatal("sandbox profile active checkbox must not be statically checked")
+	}
+	if !strings.Contains(html, `name="active" value="true"{{if .Active}} checked{{end}}`) {
+		t.Fatal("sandbox profile active checkbox must reflect persisted state")
+	}
+}
+
 func TestTaskTabsRemainAccessibleAndKeepChangesActionsInHeader(t *testing.T) {
 	page, err := files.ReadFile("templates/task.html")
 	if err != nil {

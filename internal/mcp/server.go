@@ -11,6 +11,7 @@ import (
 	"strings"
 	"taskboard/internal/automation"
 	"taskboard/internal/domain"
+	"taskboard/internal/sandbox"
 	"taskboard/internal/store"
 	"taskboard/internal/validate"
 )
@@ -125,8 +126,12 @@ func tools() []map[string]any {
 		{"name": "set_task_targets", "description": "Set task project_ids and group_ids as comma-separated target scopes", "inputSchema": schema("task_id")},
 		{"name": "list_agents", "description": "List configured local agents", "inputSchema": schema()},
 		{"name": "get_agent", "description": "Get an agent and its assigned skills", "inputSchema": schema("agent_id")},
-		{"name": "create_agent", "description": "Create a local Codex agent profile", "inputSchema": schemaWithOptional([]string{"name", "prompt"}, "description", "prompt_prefix", "prompt_suffix", "max_parallel_runs")},
-		{"name": "update_agent", "description": "Update a local Codex agent profile", "inputSchema": schemaWithOptional([]string{"agent_id", "name", "prompt"}, "description", "prompt_prefix", "prompt_suffix", "max_parallel_runs", "enabled")},
+		{"name": "create_agent", "description": "Create a local Codex agent profile", "inputSchema": schemaWithOptional([]string{"name", "prompt"}, "description", "prompt_prefix", "prompt_suffix", "max_parallel_runs", "sandbox_profile")},
+		{"name": "update_agent", "description": "Update a local Codex agent profile", "inputSchema": schemaWithOptional([]string{"agent_id", "name", "prompt"}, "description", "prompt_prefix", "prompt_suffix", "max_parallel_runs", "enabled", "sandbox_profile")},
+		{"name": "list_sandbox_profiles", "description": "List whitelisted sandbox profiles", "inputSchema": schema()},
+		{"name": "set_agent_sandbox_profile", "description": "Assign a sandbox profile to an agent; applies to new runs", "inputSchema": schema("agent_id", "sandbox_profile")},
+		{"name": "create_sandbox_profile", "description": "Create a worktree-only sandbox profile", "inputSchema": schemaWithOptional([]string{"name", "description", "network_mode", "write_mode"}, "active")},
+		{"name": "update_sandbox_profile", "description": "Update description or active state of a validated sandbox profile", "inputSchema": schema("name")},
 		{"name": "delete_agent", "description": "Delete an unused agent profile", "inputSchema": schema("agent_id")},
 		{"name": "set_agent_skills", "description": "Set comma-separated installed skill IDs allowed for an agent", "inputSchema": schema("agent_id")},
 		{"name": "list_installed_skills", "description": "List installed skills available to agents", "inputSchema": schema()},
@@ -285,8 +290,35 @@ func (s *Server) call(r *http.Request, raw json.RawMessage) (any, string) {
 		value = map[string]any{"agent": agent, "skills": skills}
 	case "create_agent":
 		value, err = s.store.CreateAgent(ctx, a["name"], a["description"], a["prompt_prefix"], a["prompt"], a["prompt_suffix"], atoi(a["max_parallel_runs"]))
+		if err == nil && a["sandbox_profile"] != "" {
+			err = s.store.UpdateAgentSandboxProfile(ctx, value.(domain.Agent).ID, a["sandbox_profile"])
+		}
 	case "update_agent":
 		err = s.store.UpdateAgent(ctx, a["agent_id"], a["name"], a["description"], a["prompt_prefix"], a["prompt"], a["prompt_suffix"], atoi(a["max_parallel_runs"]), a["enabled"] != "false")
+		if err == nil && a["sandbox_profile"] != "" {
+			err = s.store.UpdateAgentSandboxProfile(ctx, a["agent_id"], a["sandbox_profile"])
+		}
+		value = map[string]bool{"updated": err == nil}
+	case "list_sandbox_profiles":
+		value, err = s.store.SandboxProfiles(ctx)
+	case "set_agent_sandbox_profile":
+		err = s.store.UpdateAgentSandboxProfile(ctx, a["agent_id"], a["sandbox_profile"])
+		value = map[string]bool{"updated": err == nil}
+	case "create_sandbox_profile":
+		err = s.store.CreateSandboxProfile(ctx, sandbox.Profile{Name: a["name"], Description: a["description"], Mounts: []string{"worktree"}, NetworkMode: a["network_mode"], WriteMode: a["write_mode"], Active: a["active"] != "false"})
+		value = map[string]bool{"created": err == nil}
+	case "update_sandbox_profile":
+		var p sandbox.Profile
+		p, err = s.store.SandboxProfile(ctx, a["name"])
+		if err == nil {
+			if a["description"] != "" {
+				p.Description = a["description"]
+			}
+			if a["active"] != "" {
+				p.Active = a["active"] == "true"
+			}
+			err = s.store.UpdateSandboxProfile(ctx, p)
+		}
 		value = map[string]bool{"updated": err == nil}
 	case "delete_agent":
 		err = s.store.DeleteAgent(ctx, a["agent_id"])

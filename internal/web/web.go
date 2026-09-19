@@ -24,6 +24,7 @@ import (
 	"taskboard/internal/automation"
 	"taskboard/internal/domain"
 	"taskboard/internal/memory"
+	"taskboard/internal/sandbox"
 	"taskboard/internal/skillcatalog"
 	"taskboard/internal/store"
 	"taskboard/internal/updates"
@@ -633,6 +634,8 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("POST /agents/{id}/skills", a.updateAgentSkills)
 	m.HandleFunc("POST /agents/{id}", a.updateAgent)
 	m.HandleFunc("POST /agents/{id}/delete", a.deleteAgent)
+	m.HandleFunc("POST /sandbox-profiles", a.createSandboxProfile)
+	m.HandleFunc("POST /sandbox-profiles/{name}", a.updateSandboxProfile)
 	m.HandleFunc("GET /automations", a.automations)
 	m.HandleFunc("GET /automations/preview", a.automationPreview)
 	m.HandleFunc("GET /schedules", a.schedules)
@@ -868,6 +871,11 @@ func (a *App) agents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
+	profiles, e := a.store.SandboxProfiles(r.Context())
+	if e != nil {
+		http.Error(w, e.Error(), 500)
+		return
+	}
 	views := make([]agentView, 0, len(agents))
 	for _, agent := range agents {
 		assigned, err := a.store.AgentSkills(r.Context(), agent.ID)
@@ -877,7 +885,7 @@ func (a *App) agents(w http.ResponseWriter, r *http.Request) {
 		}
 		views = append(views, agentView{Agent: agent, Skills: assigned})
 	}
-	a.render(r, w, "agents.html", map[string]any{"Agents": views, "Skills": skills})
+	a.render(r, w, "agents.html", map[string]any{"Agents": views, "Skills": skills, "SandboxProfiles": profiles})
 }
 func (a *App) createAgent(w http.ResponseWriter, r *http.Request) {
 	if e := r.ParseForm(); e != nil {
@@ -891,6 +899,10 @@ func (a *App) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e := a.store.UpdateAgentSelection(r.Context(), agent.ID, r.FormValue("model"), r.FormValue("reasoning_effort"), r.FormValue("escalation_policy")); e != nil {
+		http.Error(w, e.Error(), 400)
+		return
+	}
+	if e := a.store.UpdateAgentSandboxProfile(r.Context(), agent.ID, defaultFormValue(r.FormValue("sandbox_profile"), "strict")); e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
@@ -925,7 +937,42 @@ func (a *App) updateAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 400)
 		return
 	}
+	if e := a.store.UpdateAgentSandboxProfile(r.Context(), r.PathValue("id"), defaultFormValue(r.FormValue("sandbox_profile"), "strict")); e != nil {
+		http.Error(w, e.Error(), 400)
+		return
+	}
 	http.Redirect(w, r, "/agents", 303)
+}
+
+func defaultFormValue(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return strings.TrimSpace(value)
+}
+
+func (a *App) createSandboxProfile(w http.ResponseWriter, r *http.Request) {
+	p := sandbox.Profile{Name: strings.TrimSpace(r.FormValue("name")), Description: r.FormValue("description"), Mounts: []string{"worktree"}, NetworkMode: r.FormValue("network_mode"), WriteMode: r.FormValue("write_mode"), Active: true}
+	if err := a.store.CreateSandboxProfile(r.Context(), p); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/agents", http.StatusSeeOther)
+}
+
+func (a *App) updateSandboxProfile(w http.ResponseWriter, r *http.Request) {
+	p, err := a.store.SandboxProfile(r.Context(), r.PathValue("name"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	p.Description = r.FormValue("description")
+	p.Active = r.FormValue("active") == "true"
+	if err := a.store.UpdateSandboxProfile(r.Context(), p); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/agents", http.StatusSeeOther)
 }
 
 func (a *App) deleteAgent(w http.ResponseWriter, r *http.Request) {

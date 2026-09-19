@@ -162,7 +162,7 @@ type CatalogSkill struct {
 }
 type Agent struct {
 	ID, Name, Description, Adapter, Prompt, PromptPrefix, PromptSuffix string
-	Model, ReasoningEffort, EscalationPolicy                           string
+	Model, ReasoningEffort, EscalationPolicy, SandboxProfile           string
 	Enabled                                                            bool
 	MaxParallelRuns                                                    int
 	CreatedAt                                                          time.Time
