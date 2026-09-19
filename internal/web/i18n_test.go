@@ -68,6 +68,12 @@ func TestAccountLanguageOverridesBrowserAndFallbackUsesEnglish(t *testing.T) {
 	}
 }
 
+func TestEnglishServerFallbackNeverReturnsGermanSourceText(t *testing.T) {
+	if got := translate(languageEnglish, "missing.key", "Deutscher Rohtext"); got == "Deutscher Rohtext" || got == "missing.key" {
+		t.Fatalf("English fallback exposed source text: %q", got)
+	}
+}
+
 func TestLocalizeHTMLTranslatesLegacyViewAndKeepsGermanDefault(t *testing.T) {
 	html := `<html lang="dynamic"><nav aria-label="Hauptnavigation"><a>Übersicht</a></nav><h1>Neue Aufgabe</h1><p>Eigener Task-Titel</p></html>`
 	english := localizeHTML(html, "en")

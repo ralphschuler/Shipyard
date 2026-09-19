@@ -678,7 +678,7 @@ func formatTaskContext(task domain.Task, board domain.Board, projects []domain.P
 	if len(projects) > 0 {
 		b.WriteString("\nProjektziele:\n")
 		for _, project := range projects {
-			fmt.Fprintf(&b, "- %s | %s | Branch: %s | Projekt-ID: %s\n", project.Name, project.RepositoryURL, project.DefaultBranch, project.ID)
+			fmt.Fprintf(&b, "- %s | %s | Branch: %s | Project ID: %s\n", project.Name, project.RepositoryURL, project.DefaultBranch, project.ID)
 		}
 	}
 	if len(groups) > 0 {
@@ -704,7 +704,7 @@ func formatTaskContext(task domain.Task, board domain.Board, projects []domain.P
 		for _, decision := range decisions {
 			fmt.Fprintf(&b, "- [%s] %s (%s): %s", decision.Key, decision.Title, decision.ResolvedAt.Format(time.RFC3339), string(decision.Response))
 			if strings.TrimSpace(decision.FreeformAnswer) != "" {
-				fmt.Fprintf(&b, "\n  Freitext: %s", decision.FreeformAnswer)
+				fmt.Fprintf(&b, "\n  Free text: %s", decision.FreeformAnswer)
 			}
 			b.WriteString("\n")
 		}
