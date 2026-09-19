@@ -54,7 +54,7 @@ func TestMigrationGateBlocksRunValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("TASKBOARD_WORKSPACE_ROOT", root)
-	gate, err := acquireGate(root, true)
+	gate, err := acquireMigrationGate(root)
 	if err != nil {
 		t.Fatal(err)
 	}

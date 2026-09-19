@@ -2828,7 +2828,15 @@ func (a *App) startRun(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Dieser Agent arbeitet bereits an dieser Aufgabe. Öffne den laufenden Run oder warte auf dessen Abschluss.", http.StatusConflict)
 			return
 		}
-		http.Error(w, e.Error(), 409)
+		if errors.Is(e, store.ErrTargetSelectionRequired) {
+			http.Error(w, "Repository-Ziel fehlt. Lege unter Zielbereiche mindestens ein Repository fest.", http.StatusConflict)
+			return
+		}
+		if errors.Is(e, store.ErrWorkspaceBusy) || strings.Contains(strings.ToLower(e.Error()), "workspace") {
+			http.Error(w, "Der Workspace ist belegt. Warte auf den laufenden Run und versuche es erneut.", http.StatusConflict)
+			return
+		}
+		http.Error(w, "Delivery Agent konnte nicht gestartet werden. Prüfe Agent, Berechtigungen und Repository-Ziel.", http.StatusConflict)
 		return
 	}
 	go a.worker.Process(context.Background())

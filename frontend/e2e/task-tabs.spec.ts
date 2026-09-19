@@ -7,7 +7,7 @@ const taskFixture = {
   Comments: [],
   History: [],
   Columns: [],
-  Agents: [],
+  Agents: [{ ID: "agent-1", Name: "Delivery Agent", Enabled: true }],
   Runs: [],
   BoardLabels: [],
   Projects: [],
@@ -53,4 +53,28 @@ test("keeps task tabs above the title and switches between conversation and full
     return Boolean(tab && title && (tab.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING));
   });
   expect(tabsAreBeforeTitle).toBe(true);
+});
+
+test("starts a delivery run once and navigates to the created run", async ({ page }) => {
+  let requests = 0;
+  await page.route("**/tasks/task-tabs/runs", async (route) => {
+    requests += 1;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await route.fulfill({ status: 303, headers: { location: "/runs/run-new" } });
+  });
+  await page.goto("/app/#/tasks/task-tabs");
+  const button = page.getByRole("button", { name: "Delivery Agent" });
+  await button.click();
+  await expect(button).toBeDisabled();
+  await expect(page).toHaveURL(/#\/runs\/run-new$/);
+  expect(requests).toBe(1);
+});
+
+test("shows an actionable delivery-start error", async ({ page }) => {
+  await page.route("**/tasks/task-tabs/runs", (route) =>
+    route.fulfill({ status: 409, contentType: "text/plain", body: "Repository-Ziel fehlt" }),
+  );
+  await page.goto("/app/#/tasks/task-tabs");
+  await page.getByRole("button", { name: "Delivery Agent" }).click();
+  await expect(page.getByText(/Repository-Ziel fehlt/)).toBeVisible();
 });

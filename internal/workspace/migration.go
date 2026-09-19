@@ -15,9 +15,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// RunGate is a shared lease for run creation/start. Migration takes the same
-// lock exclusively, so no run can pass its final gate while files are being
-// copied or switched.
+// RunGate is a shared lease for run creation/start. Migration has a separate
+// lock so normal independent runs do not look like an active migration.
 type RunGate struct{ file *os.File }
 
 func (g *RunGate) Close() error {
@@ -55,6 +54,22 @@ func acquireGate(root string, exclusive bool) (*RunGate, error) {
 	return &RunGate{file: f}, nil
 }
 
+func acquireMigrationGate(root string) (*RunGate, error) {
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		return nil, errors.New("Workspace-Root ist nicht verfügbar")
+	}
+	f, err := os.OpenFile(filepath.Join(root, ".shipyard-migration.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, errors.New("Migrations-Sperre konnte nicht geöffnet werden")
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		_ = f.Close()
+		return nil, errors.New("Migrations-Sperre konnte nicht übernommen werden")
+	}
+	return &RunGate{file: f}, nil
+}
+
 // AcquireRunGate is used around queue insertion and run claiming.
 func AcquireRunGate() (*RunGate, error) { return acquireGate(configuredRoot(), false) }
 
@@ -77,12 +92,12 @@ func Migrate(sourceRoot, targetRoot string, activeRunPaths map[string]bool) (Mig
 	if sourceRoot == targetRoot {
 		return MigrationState{}, errors.New("Quell- und Ziel-Workspace müssen verschieden sein")
 	}
-	sourceGate, err := acquireGate(sourceRoot, true)
+	sourceGate, err := acquireMigrationGate(sourceRoot)
 	if err != nil {
 		return MigrationState{}, err
 	}
 	defer sourceGate.Close()
-	gate, err := acquireGate(targetRoot, true)
+	gate, err := acquireMigrationGate(targetRoot)
 	if err != nil {
 		return MigrationState{}, err
 	}

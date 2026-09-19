@@ -136,11 +136,11 @@ func invalidStatus(root, message string) (Status, error) {
 }
 
 func migrationInProgress(root string) bool {
-	// Never create a lock path during validation. A missing mount must remain a
-	// hard failure instead of becoming a local directory with a new lock file.
-	f, err := os.Open(root)
+	// Migration uses a dedicated lock. The shared run gate is intentionally not
+	// inspected here because ordinary runs may hold it for their full lifetime.
+	f, err := os.Open(filepath.Join(root, ".shipyard-migration.lock"))
 	if err != nil {
-		return true
+		return !os.IsNotExist(err)
 	}
 	defer f.Close()
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {

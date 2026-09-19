@@ -244,20 +244,33 @@ export default function App() {
     applyLegacyReactLanguage(language);
   }, [language, route]);
   useEffect(() => {
-    const stream = new EventSource("/events");
-    // Never remount the application for a database notification. Components
-    // subscribe below and refresh just their remote projection, keeping forms,
-    // dialogs, focus and scroll position intact.
-    stream.addEventListener("change", (event) => {
-      let change: LiveChange = {};
-      try {
-        change = JSON.parse((event as MessageEvent).data) as LiveChange;
-      } catch {
-        // A malformed external notification must never break the live stream.
-      }
-      refreshData(change);
-    });
-    return () => stream.close();
+    let stopped = false;
+    let stream: EventSource | undefined;
+    let retry = 0;
+    let timer: number | undefined;
+    const connect = () => {
+      if (stopped) return;
+      stream = new EventSource("/events");
+      stream.addEventListener("change", (event) => {
+        let change: LiveChange = {};
+        try { change = JSON.parse((event as MessageEvent).data) as LiveChange; } catch { /* ignore malformed notifications */ }
+        refreshData(change);
+      });
+      stream.onopen = () => {
+        const wasReconnect = retry > 0;
+        retry = 0;
+        // A reconnect may have missed events; every projection resynchronizes.
+        if (wasReconnect) refreshData();
+      };
+      stream.onerror = () => {
+        stream?.close();
+        if (stopped || timer !== undefined) return;
+        const delay = Math.min(10000, 500 * 2 ** retry++);
+        timer = window.setTimeout(() => { timer = undefined; connect(); }, delay);
+      };
+    };
+    connect();
+    return () => { stopped = true; if (timer !== undefined) window.clearTimeout(timer); stream?.close(); };
   }, []);
   useEffect(() => {
     localStorage.setItem("shipyard-nav-open", String(navOpen));
@@ -3518,6 +3531,7 @@ function TaskDetail({ id }: { id: string }) {
   const [handoff, setHandoff] = useState(false);
   const [decision, setDecision] = useState(false);
   const [message, setMessage] = useState("");
+  const [startingAgent, setStartingAgent] = useState<string>();
   useEffect(() => {
     const updateTab = () => setActiveTab(taskTabFromHash());
     addEventListener("hashchange", updateTab);
@@ -3575,9 +3589,28 @@ function TaskDetail({ id }: { id: string }) {
     );
   };
   const start = async (agentID: string) => {
+    if (startingAgent) return;
+    setMessage("");
+    setStartingAgent(agentID);
     const form = new FormData();
     form.set("agent_id", agentID);
-    await request("/tasks/" + id + "/runs", form);
+    try {
+      const response = await mutation("/tasks/" + id + "/runs", { method: "POST", body: form });
+      refreshData();
+      const runID = response.url.match(/\/runs\/([^/?#]+)/)?.[1];
+      if (!runID) throw new Error("Run wurde erstellt, aber die Zieladresse fehlt. Öffne die Runs-Übersicht und prüfe den Status.");
+      location.hash = "/runs/" + runID;
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      const lower = raw.toLowerCase();
+      if (lower.includes("repository") || lower.includes("ziel")) setMessage("Start abgelehnt: Repository-Ziel fehlt. Lege unter „Zielbereiche“ mindestens ein Repository fest.");
+      else if (lower.includes("busy") || lower.includes("belegt") || lower.includes("migration")) setMessage("Start abgelehnt: Der Workspace ist belegt. Warte auf den laufenden Run und versuche es erneut.");
+      else if (lower.includes("bereits") || lower.includes("active")) setMessage("Für diesen Agenten läuft bereits ein Run. Öffne den bestehenden Run oder warte, bis er beendet ist.");
+      else if (lower.includes("permission") || lower.includes("berechtigung") || lower.includes("forbidden")) setMessage("Start abgelehnt: Dir fehlt die Berechtigung. Bitte wende dich an einen Workspace-Administrator.");
+      else setMessage("Delivery Agent konnte nicht gestartet werden. Prüfe die Task-Ziele und versuche es erneut.");
+    } finally {
+      setStartingAgent(undefined);
+    }
   };
   const remove = async () => {
     if (!confirm("Task wirklich löschen?")) return;
@@ -3888,9 +3921,10 @@ function TaskDetail({ id }: { id: string }) {
                   <Button
                     key={agent.ID}
                     variant="outline"
+                    disabled={Boolean(startingAgent)}
                     onClick={() => start(agent.ID)}
                   >
-                    {agent.Name}
+                    {startingAgent === agent.ID ? <><LoaderCircle className="animate-spin" /> Start wird vorbereitet …</> : agent.Name}
                   </Button>
                 ),
               )}
