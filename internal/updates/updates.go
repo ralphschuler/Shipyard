@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 )
 
 var (
@@ -25,6 +26,8 @@ var (
 )
 
 const maxLocalChangelogSize = 1 << 20
+
+const defaultRequestTimeout = 15 * time.Second
 
 var (
 	ErrReleaseAllowlistMissing   = errors.New("release allowlist is not configured")
@@ -219,6 +222,7 @@ type Client struct {
 	GOOS, GOARCH       string
 	ApprovedTags       []string
 	LocalChangelogPath string
+	RequestTimeout     time.Duration
 }
 
 // LoadLocalChangelog reads an operator-selected Markdown file or the first
@@ -315,7 +319,9 @@ func (c Client) DownloadAndVerify(ctx context.Context, artifactURL, expected str
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, artifactURL, nil)
+	requestCtx, cancel := c.withRequestTimeout(ctx)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, artifactURL, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +354,9 @@ func (c Client) latest(ctx context.Context, repo string) (githubRelease, error) 
 	if base == "" {
 		base = "https://api.github.com"
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/repos/"+repo+"/releases/latest", nil)
+	requestCtx, cancel := c.withRequestTimeout(ctx)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, base+"/repos/"+repo+"/releases/latest", nil)
 	if err != nil {
 		return githubRelease{}, err
 	}
@@ -374,7 +382,9 @@ func (c Client) tagCommit(ctx context.Context, repo, tag string) (githubCommit, 
 	if base == "" {
 		base = "https://api.github.com"
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/repos/"+repo+"/commits/"+tag, nil)
+	requestCtx, cancel := c.withRequestTimeout(ctx)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, base+"/repos/"+repo+"/commits/"+tag, nil)
 	if err != nil {
 		return githubCommit{}, err
 	}
@@ -401,7 +411,9 @@ func (c Client) branchContains(ctx context.Context, repo, branch, commit string)
 	if base == "" {
 		base = "https://api.github.com"
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/repos/"+repo+"/compare/"+url.PathEscape(branch)+"..."+url.PathEscape(commit), nil)
+	requestCtx, cancel := c.withRequestTimeout(ctx)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, base+"/repos/"+repo+"/compare/"+url.PathEscape(branch)+"..."+url.PathEscape(commit), nil)
 	if err != nil {
 		return false, err
 	}
@@ -428,6 +440,14 @@ func (c Client) httpClient() *http.Client {
 		return c.HTTP
 	}
 	return http.DefaultClient
+}
+
+func (c Client) withRequestTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := c.RequestTimeout
+	if timeout <= 0 {
+		timeout = defaultRequestTimeout
+	}
+	return context.WithTimeout(ctx, timeout)
 }
 
 // authorize shares the configured credential across release metadata and
@@ -457,11 +477,6 @@ func Resolve(ctx context.Context, current Current, repo, branch string, client C
 	if err := ValidateReleaseAllowlist(client.ApprovedTags); err != nil {
 		s.Status = "unverified"
 		s.Reason = releasePolicyReason(err)
-		return s
-	}
-	if strings.TrimSpace(client.Token) == "" {
-		s.Status = "unavailable"
-		s.Reason = "TASKBOARD_GITHUB_TOKEN ist nicht konfiguriert. Hinterlege ein least-privilege GitHub-Token mit reinem Leserecht."
 		return s
 	}
 	r, err := client.latest(ctx, repo)
@@ -542,6 +557,12 @@ func releasePolicyReason(err error) string {
 }
 
 func githubErrorReason(err error, token string) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "Die GitHub-Release-Prüfung ist wegen einer Zeitüberschreitung fehlgeschlagen. Prüfe die Netzwerkverbindung und versuche es erneut."
+	}
+	if errors.Is(err, context.Canceled) {
+		return "Die GitHub-Release-Prüfung wurde abgebrochen. Versuche es erneut."
+	}
 	var apiErr *githubAPIError
 	if !errors.As(err, &apiErr) {
 		return "GitHub-Release konnte nicht sicher geprüft werden. Prüfe Netzwerk und GitHub-Konfiguration."

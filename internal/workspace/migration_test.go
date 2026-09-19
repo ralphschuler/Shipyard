@@ -48,7 +48,7 @@ func TestMigrateIsIdempotentAndLeavesActiveRunInPlace(t *testing.T) {
 	}
 }
 
-func TestMigrationGateBlocksRunValidation(t *testing.T) {
+func TestMigrationGateBlocksRunAcquisitionWithoutMisclassifyingSharedRuns(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, markerName), []byte("shipyard workspace\n"), 0o640); err != nil {
 		t.Fatal(err)
@@ -59,9 +59,27 @@ func TestMigrationGateBlocksRunValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer gate.Close()
-	status, err := Validate()
-	if err == nil || !status.Migration || status.Ready() {
-		t.Fatalf("Validate() = %#v, %v; want migration block", status, err)
+	if _, err := AcquireRunGate(); err == nil {
+		t.Fatal("AcquireRunGate() succeeded during migration")
+	}
+	if status, err := Validate(); err != nil || !status.Ready() {
+		t.Fatalf("Validate() = %#v, %v; shared run gate must not be mistaken for migration", status, err)
+	}
+}
+
+func TestSharedRunGateCanValidateWhileHeld(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, markerName), []byte("shipyard workspace\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TASKBOARD_WORKSPACE_ROOT", root)
+	gate, err := AcquireRunGate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Close()
+	if status, err := Validate(); err != nil || !status.Ready() {
+		t.Fatalf("Validate() = %#v, %v; want ready while shared gate is held", status, err)
 	}
 }
 

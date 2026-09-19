@@ -322,18 +322,42 @@ func TestResolveReportsPublicAPIRateLimitWithoutProviderBody(t *testing.T) {
 	}
 }
 
-func TestResolveFailsClosedWhenGitHubTokenIsMissing(t *testing.T) {
-	requests := 0
-	client := Client{ApprovedTags: []string{"v0.1.*"}, HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		requests++
-		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"tag_name":"v0.1.5"}`)), Header: make(http.Header)}, nil
+func TestResolveChecksPublicGitHubReleaseWithoutToken(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	client := Client{ApprovedTags: []string{"v0.1.*"}, GOOS: "linux", GOARCH: "amd64", HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("anonymous request carried authorization: %q", got)
+		}
+		var body string
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/releases/latest"):
+			body = fmt.Sprintf(`{"tag_name":"v0.1.5","html_url":"https://github.com/ralphschuler/Shipyard/releases/tag/v0.1.5","target_commitish":"master","assets":[{"name":"shipyard-linux-amd64","browser_download_url":"https://github.com/ralphschuler/Shipyard/releases/download/v0.1.5/shipyard-linux-amd64","digest":"sha256:%s"}]}`, strings.Repeat("0", 64))
+		case strings.HasSuffix(r.URL.Path, "/commits/v0.1.5"):
+			body = fmt.Sprintf(`{"sha":"%s","commit":{"verification":{"verified":true}}}`, commit)
+		case strings.HasSuffix(r.URL.Path, "/compare/master..."+commit):
+			body = `{"status":"identical"}`
+		default:
+			t.Fatalf("unexpected GitHub path %s", r.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 	})}}
 	snapshot := Resolve(context.Background(), Current{Version: "v0.1.3"}, "ralphschuler/Shipyard", "master", client)
-	if snapshot.Status != "unavailable" || !strings.Contains(snapshot.Reason, "TASKBOARD_GITHUB_TOKEN") {
-		t.Fatalf("snapshot = %#v, want actionable missing-token status", snapshot)
+	if snapshot.Status != "update_available" || !snapshot.Installable {
+		t.Fatalf("snapshot = %#v, want installable public release", snapshot)
 	}
-	if requests != 0 {
-		t.Fatalf("missing-token configuration should fail before GitHub requests, got %d", requests)
+	if snapshot.Reason != "" {
+		t.Fatalf("successful public release has reason: %q", snapshot.Reason)
+	}
+}
+
+func TestResolveReportsBoundedGitHubTimeout(t *testing.T) {
+	client := Client{RequestTimeout: 10 * time.Millisecond, ApprovedTags: []string{"v0.1.*"}, HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}}
+	snapshot := Resolve(context.Background(), Current{Version: "v0.1.3"}, "ralphschuler/Shipyard", "master", client)
+	if snapshot.Status != "unavailable" || !strings.Contains(snapshot.Reason, "Zeitüberschreitung") || strings.Contains(snapshot.Reason, "TASKBOARD_GITHUB_TOKEN") {
+		t.Fatalf("snapshot = %#v, want stable timeout status", snapshot)
 	}
 }
 

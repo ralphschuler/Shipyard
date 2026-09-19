@@ -55,8 +55,25 @@ func acquireGate(root string, exclusive bool) (*RunGate, error) {
 	return &RunGate{file: f}, nil
 }
 
-// AcquireRunGate is used around queue insertion and run claiming.
-func AcquireRunGate() (*RunGate, error) { return acquireGate(configuredRoot(), false) }
+// AcquireRunGate is used around queue insertion and run claiming. A
+// non-blocking shared lock lets callers report a migration immediately while
+// allowing multiple normal runs to share the gate.
+func AcquireRunGate() (*RunGate, error) {
+	root := configuredRoot()
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		return nil, errors.New("Workspace-Root ist nicht verfügbar")
+	}
+	f, err := os.Open(root)
+	if err != nil {
+		return nil, errors.New("Workspace-Sperre konnte nicht geöffnet werden")
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return nil, errors.New("Workspace-Migration blockiert neue Runs")
+	}
+	return &RunGate{file: f}, nil
+}
 
 type MigrationItem struct{ Kind, Name, Status string }
 type MigrationState struct {

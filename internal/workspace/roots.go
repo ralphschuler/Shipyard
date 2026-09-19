@@ -96,11 +96,6 @@ func Validate() (Status, error) {
 		}
 		status.Marker = true
 	}
-	status.Migration = migrationInProgress(root)
-	if status.Migration {
-		status.Error = "Workspace-Migration läuft; neue Runs sind pausiert"
-		return status, errors.New(status.Error)
-	}
 	if err := os.MkdirAll(status.Projects, 0o750); err != nil {
 		status.Error = "Workspace-Root ist nicht verfügbar: " + err.Error()
 		return status, errors.New(status.Error)
