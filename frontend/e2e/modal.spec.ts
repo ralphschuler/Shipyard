@@ -104,7 +104,7 @@ const legacyStyles = await readFile(path.resolve(import.meta.dirname, "../../int
 
 async function mockReactBackend(page: Page) {
   await page.route("**/events", (route) => route.abort());
-  await page.route("**/api/**", async (route) => {
+  await page.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url());
     const fixture = apiFixtures[url.pathname];
     await route.fulfill({

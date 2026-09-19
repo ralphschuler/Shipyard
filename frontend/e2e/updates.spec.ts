@@ -59,7 +59,7 @@ const updateFixture = {
 
 test("manual update check shows failure and retry without duplicate requests", async ({ page }) => {
   let checks = 0;
-  await page.route("**/api/**", async (route) => {
+  await page.route("**/api/v1/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/v1/settings/appearance") {
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ Theme: "light", Language: "en" }) });
@@ -116,7 +116,7 @@ test("manual update check reports an available release", async ({ page }) => {
     installable: false,
     release: { version: "1.1.0", commit: "latest-sha", url: "https://github.com/example/shipyard/releases/tag/v1.1.0" },
   };
-  await page.route("**/api/**", async (route) => {
+  await page.route("**/api/v1/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/v1/settings/appearance") {
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ Theme: "light", Language: "en" }) });
@@ -141,7 +141,7 @@ test("manual update check treats malformed responses as a readable failure", asy
     ...updateFixture,
     current: { ...updateFixture.current, builtAt: { unexpected: true } },
   };
-  await page.route("**/api/**", async (route) => {
+  await page.route("**/api/v1/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/v1/settings/appearance") {
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ Theme: "light", Language: "en" }) });
