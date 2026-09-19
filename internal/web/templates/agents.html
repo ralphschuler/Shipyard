@@ -27,7 +27,7 @@
         </header>
         <section aria-label="Sandbox-Profile"><h2>Sandbox-Profile</h2><p><small>Whitelisted Richtlinien; Mounts sind fest auf den Worktree begrenzt.</small></p><div class="management-list">{{range .SandboxProfiles}}<form method="post" action="/sandbox-profiles/{{.Name}}"><label>{{.Name}}<input name="description" value="{{.Description}}" required></label><small>Mount: worktree · Netzwerk: {{.NetworkMode}} · Schreiben: {{.WriteMode}}</small><input type="hidden" name="network_mode" value="{{.NetworkMode}}"><input type="hidden" name="write_mode" value="{{.WriteMode}}"><label><input type="checkbox" name="active" value="true"{{if .Active}} checked{{end}}> Aktiv</label><button class="secondary">Profil speichern</button></form>{{end}}<form method="post" action="/sandbox-profiles"><h3>Profil anlegen</h3><input name="name" placeholder="z. B. qa-local" required pattern="[a-z][a-z0-9-]{1,63}"><input name="description" placeholder="Beschreibung" required><select name="network_mode"><option value="none">none</option><option value="qa-network">qa-network</option><option value="bridge-only">bridge-only</option></select><select name="write_mode"><option value="readonly">readonly</option><option value="worktree">worktree</option></select><button>Sandbox-Profil anlegen</button></form></div></section>
         <section class="management-list agent-list" aria-label="Agent-Profile">
-          {{range .Agents}}
+          {{range .Agents}}{{$agent := .}}
           <article>
             <header>
               <div>
@@ -71,6 +71,7 @@
                     name="max_parallel_runs"
                     value="{{.MaxParallelRuns}}"
                     min="1" /></label
+                ><label>Sandbox-Profil<select name="sandbox_profile" required>{{range $.SandboxProfiles}}<option value="{{.Name}}"{{if eq .Name $agent.SandboxProfile}} selected{{end}}>{{.Name}} — {{.Description}}</option>{{end}}</select></label
                 ><label>Modell<select name="model" required><option value="{{.Model}}" selected>{{if .Model}}{{.Model}}{{else}}Aus Discovery wählen{{end}}</option><option value="gpt-5">gpt-5</option><option value="gpt-5-mini">gpt-5-mini</option></select></label
                 ><label>Reasoning-Effort<select name="reasoning_effort" required><option value="low"{{if eq .ReasoningEffort "low"}} selected{{end}}>low</option><option value="medium"{{if eq .ReasoningEffort "medium"}} selected{{end}}>medium</option><option value="high"{{if eq .ReasoningEffort "high"}} selected{{end}}>high</option><option value="xhigh"{{if eq .ReasoningEffort "xhigh"}} selected{{end}}>xhigh</option></select></label
                 ><label>Eskalationspolicy (JSON)<textarea name="escalation_policy">{{.EscalationPolicy}}</textarea></label
@@ -172,6 +173,7 @@
               value="1"
               min="1"
           /></label>
+          <label>Sandbox-Profil<select name="sandbox_profile" required>{{range .SandboxProfiles}}<option value="{{.Name}}"{{if eq .Name "strict"}} selected{{end}}>{{.Name}} — {{.Description}}</option>{{end}}</select></label>
           <label>Modell<select name="model" required><option value="gpt-5">gpt-5</option><option value="gpt-5-mini">gpt-5-mini</option></select></label>
           <label>Reasoning-Effort<select name="reasoning_effort" required><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
           <label>Eskalationspolicy (JSON)<textarea name="escalation_policy">{}</textarea></label>

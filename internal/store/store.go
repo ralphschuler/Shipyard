@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strings"
 	"taskboard/internal/domain"
+	"taskboard/internal/sandbox"
 	"time"
 )
 
@@ -2426,7 +2427,7 @@ func defaultString(v, d string) string {
 	return v
 }
 func (s *Store) Agents(c context.Context) ([]domain.Agent, error) {
-	r, e := s.DB.Query(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,model,reasoning_effort,escalation_policy::text,enabled,max_parallel_runs,created_at FROM agents WHERE retired_at IS NULL ORDER BY name")
+	r, e := s.DB.Query(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,model,reasoning_effort,escalation_policy::text,COALESCE(sandbox_profile,'strict'),enabled,max_parallel_runs,created_at FROM agents WHERE retired_at IS NULL ORDER BY name")
 	if e != nil {
 		return nil, e
 	}
@@ -2435,7 +2436,7 @@ func (s *Store) Agents(c context.Context) ([]domain.Agent, error) {
 }
 func (s *Store) GetAgent(c context.Context, id string) (domain.Agent, error) {
 	var a domain.Agent
-	e := s.DB.QueryRow(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,model,reasoning_effort,escalation_policy::text,enabled,max_parallel_runs,created_at FROM agents WHERE id=$1", id).Scan(&a.ID, &a.Name, &a.Description, &a.Adapter, &a.Prompt, &a.PromptPrefix, &a.PromptSuffix, &a.Model, &a.ReasoningEffort, &a.EscalationPolicy, &a.Enabled, &a.MaxParallelRuns, &a.CreatedAt)
+	e := s.DB.QueryRow(c, "SELECT id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,model,reasoning_effort,escalation_policy::text,COALESCE(sandbox_profile,'strict'),enabled,max_parallel_runs,created_at FROM agents WHERE id=$1", id).Scan(&a.ID, &a.Name, &a.Description, &a.Adapter, &a.Prompt, &a.PromptPrefix, &a.PromptSuffix, &a.Model, &a.ReasoningEffort, &a.EscalationPolicy, &a.SandboxProfile, &a.Enabled, &a.MaxParallelRuns, &a.CreatedAt)
 	return a, e
 }
 func (s *Store) CreateAgent(c context.Context, name, desc, prefix, prompt, suffix string, max int) (domain.Agent, error) {
@@ -2443,7 +2444,7 @@ func (s *Store) CreateAgent(c context.Context, name, desc, prefix, prompt, suffi
 	if max < 1 {
 		max = 1
 	}
-	e := s.DB.QueryRow(c, "INSERT INTO agents(name,description,prompt_prefix,prompt,prompt_suffix,max_parallel_runs) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,model,reasoning_effort,escalation_policy::text,enabled,max_parallel_runs,created_at", strings.TrimSpace(name), desc, prefix, prompt, suffix, max).Scan(&a.ID, &a.Name, &a.Description, &a.Adapter, &a.Prompt, &a.PromptPrefix, &a.PromptSuffix, &a.Model, &a.ReasoningEffort, &a.EscalationPolicy, &a.Enabled, &a.MaxParallelRuns, &a.CreatedAt)
+	e := s.DB.QueryRow(c, "INSERT INTO agents(name,description,prompt_prefix,prompt,prompt_suffix,max_parallel_runs) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,name,description,adapter,prompt,prompt_prefix,prompt_suffix,model,reasoning_effort,escalation_policy::text,COALESCE(sandbox_profile,'strict'),enabled,max_parallel_runs,created_at", strings.TrimSpace(name), desc, prefix, prompt, suffix, max).Scan(&a.ID, &a.Name, &a.Description, &a.Adapter, &a.Prompt, &a.PromptPrefix, &a.PromptSuffix, &a.Model, &a.ReasoningEffort, &a.EscalationPolicy, &a.SandboxProfile, &a.Enabled, &a.MaxParallelRuns, &a.CreatedAt)
 	return a, e
 }
 func (s *Store) UpdateAgent(c context.Context, id, name, desc, prefix, prompt, suffix string, max int, enabled bool) error {
@@ -2452,6 +2453,93 @@ func (s *Store) UpdateAgent(c context.Context, id, name, desc, prefix, prompt, s
 	}
 	_, err := s.DB.Exec(c, "UPDATE agents SET name=$2,description=$3,prompt_prefix=$4,prompt=$5,prompt_suffix=$6,max_parallel_runs=$7,enabled=$8 WHERE id=$1 AND retired_at IS NULL", id, strings.TrimSpace(name), desc, prefix, prompt, suffix, max, enabled)
 	return err
+}
+
+func (s *Store) SandboxProfiles(c context.Context) ([]sandbox.Profile, error) {
+	rows, err := s.DB.Query(c, `SELECT name,description,mounts,network_mode,write_mode,active FROM sandbox_profiles ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []sandbox.Profile
+	for rows.Next() {
+		var p sandbox.Profile
+		var mounts []byte
+		if err := rows.Scan(&p.Name, &p.Description, &mounts, &p.NetworkMode, &p.WriteMode, &p.Active); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(mounts, &p.Mounts); err != nil {
+			return nil, err
+		}
+		if err := sandbox.ValidateProfile(p); err != nil {
+			return nil, fmt.Errorf("sandbox profile %q is invalid: %w", p.Name, err)
+		}
+		result = append(result, p)
+	}
+	return result, rows.Err()
+}
+
+func (s *Store) SandboxProfile(c context.Context, name string) (sandbox.Profile, error) {
+	var p sandbox.Profile
+	var mounts []byte
+	err := s.DB.QueryRow(c, `SELECT name,description,mounts,network_mode,write_mode,active FROM sandbox_profiles WHERE name=$1`, strings.TrimSpace(name)).Scan(&p.Name, &p.Description, &mounts, &p.NetworkMode, &p.WriteMode, &p.Active)
+	if err != nil {
+		return p, err
+	}
+	if err := json.Unmarshal(mounts, &p.Mounts); err != nil {
+		return p, err
+	}
+	if err := sandbox.ValidateProfile(p); err != nil {
+		return p, err
+	}
+	return p, nil
+}
+
+func (s *Store) CreateSandboxProfile(c context.Context, p sandbox.Profile) error {
+	if err := sandbox.ValidateProfile(p); err != nil {
+		return err
+	}
+	mounts, _ := json.Marshal(p.Mounts)
+	_, err := s.DB.Exec(c, `INSERT INTO sandbox_profiles(name,description,mounts,network_mode,write_mode,active) VALUES($1,$2,$3,$4,$5,$6)`, p.Name, p.Description, mounts, p.NetworkMode, p.WriteMode, p.Active)
+	return err
+}
+
+func (s *Store) UpdateSandboxProfile(c context.Context, p sandbox.Profile) error {
+	if err := sandbox.ValidateProfile(p); err != nil {
+		return err
+	}
+	mounts, _ := json.Marshal(p.Mounts)
+	_, err := s.DB.Exec(c, `UPDATE sandbox_profiles SET description=$2,mounts=$3,network_mode=$4,write_mode=$5,active=$6 WHERE name=$1`, p.Name, p.Description, mounts, p.NetworkMode, p.WriteMode, p.Active)
+	return err
+}
+
+func (s *Store) UpdateAgentSandboxProfile(c context.Context, agentID, profile string) error {
+	p, err := s.SandboxProfile(c, profile)
+	if err != nil || !p.Active {
+		return errors.New("sandbox profile is unknown or inactive")
+	}
+	var active bool
+	if err = s.DB.QueryRow(c, `SELECT EXISTS(SELECT 1 FROM agent_runs WHERE agent_id=$1 AND status IN ('queued','running'))`, agentID).Scan(&active); err != nil {
+		return err
+	}
+	if active {
+		return errors.New("sandbox profile changes apply only to new runs")
+	}
+	_, err = s.DB.Exec(c, `UPDATE agents SET sandbox_profile=$2 WHERE id=$1 AND retired_at IS NULL`, agentID, p.Name)
+	return err
+}
+
+func (s *Store) RunSandboxPolicy(c context.Context, runID string) (sandbox.Profile, error) {
+	var raw []byte
+	var name string
+	if err := s.DB.QueryRow(c, `SELECT sandbox_profile,sandbox_effective FROM agent_runs WHERE id=$1`, runID).Scan(&name, &raw); err != nil {
+		return sandbox.Profile{}, err
+	}
+	var p sandbox.Profile
+	if len(raw) > 0 && json.Unmarshal(raw, &p) == nil && p.Name == name {
+		return sandbox.EffectiveProfile(p, "/workspace")
+	}
+	return s.SandboxProfile(c, name)
 }
 
 func (s *Store) UpdateAgentSelection(c context.Context, id, model, effort, policy string) error {
@@ -2756,7 +2844,16 @@ func (s *Store) CreateRun(c context.Context, task, agent, rule string) (domain.A
 }
 func (s *Store) createRunWithWorkspace(c context.Context, task string, a domain.Agent, agent, rule, workspace, targetProject, batchID string) (domain.AgentRun, error) {
 	var r domain.AgentRun
-	e := s.DB.QueryRow(c, "INSERT INTO agent_runs(task_id,agent_id,rule_id,batch_id,prompt_snapshot,workspace_snapshot,source_workspace,target_project_id,skill_snapshot) VALUES($1,$2,NULLIF($3,'')::uuid,NULLIF($4,'')::uuid,$5,$6,$6,NULLIF($7,'')::uuid,COALESCE((SELECT jsonb_agg(jsonb_build_object('name',s.name,'path',i.install_path)) FROM agent_skills x JOIN installed_skills i ON i.id=x.installed_skill_id JOIN skills s ON s.id=i.skill_id WHERE x.agent_id=$2),'[]'::jsonb)) RETURNING id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at", task, agent, rule, batchID, a.Prompt, workspace, targetProject).Scan(&r.ID, &r.TaskID, &r.AgentID, &r.RuleID, &r.BatchID, &r.Status, &r.PromptSnapshot, &r.WorkspaceSnapshot, &r.TargetProject, &r.Summary, &r.ErrorMessage, &r.StartedAt, &r.FinishedAt, &r.CreatedAt)
+	profile, err := s.SandboxProfile(c, defaultString(a.SandboxProfile, "strict"))
+	if err != nil || !profile.Active {
+		return r, errors.New("sandbox profile is unknown or inactive")
+	}
+	policy, err := sandbox.EffectiveProfile(profile, workspace)
+	if err != nil {
+		return r, err
+	}
+	effective, _ := json.Marshal(policy)
+	e := s.DB.QueryRow(c, "INSERT INTO agent_runs(task_id,agent_id,rule_id,batch_id,prompt_snapshot,workspace_snapshot,source_workspace,target_project_id,skill_snapshot,sandbox_profile,sandbox_effective) VALUES($1,$2,NULLIF($3,'')::uuid,NULLIF($4,'')::uuid,$5,$6,$6,NULLIF($7,'')::uuid,COALESCE((SELECT jsonb_agg(jsonb_build_object('name',s.name,'path',i.install_path)) FROM agent_skills x JOIN installed_skills i ON i.id=x.installed_skill_id JOIN skills s ON s.id=i.skill_id WHERE x.agent_id=$2),'[]'::jsonb),$8,$9) RETURNING id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at", task, agent, rule, batchID, a.Prompt, workspace, targetProject, profile.Name, effective).Scan(&r.ID, &r.TaskID, &r.AgentID, &r.RuleID, &r.BatchID, &r.Status, &r.PromptSnapshot, &r.WorkspaceSnapshot, &r.TargetProject, &r.Summary, &r.ErrorMessage, &r.StartedAt, &r.FinishedAt, &r.CreatedAt)
 	if e != nil {
 		return r, e
 	}
@@ -2869,12 +2966,26 @@ func lockWorkspaceTx(c context.Context, tx pgx.Tx, workspace string) error {
 // false created result denotes an idempotent event conflict.
 func createRunTx(c context.Context, tx pgx.Tx, task string, a domain.Agent, agent, rule, event, batch, workspace, targetProject string) (domain.AgentRun, bool, error) {
 	var run domain.AgentRun
-	err := tx.QueryRow(c, `INSERT INTO agent_runs(task_id,agent_id,rule_id,event_id,batch_id,prompt_snapshot,workspace_snapshot,source_workspace,target_project_id,skill_snapshot)
+	profileName := defaultString(a.SandboxProfile, "strict")
+	var profile sandbox.Profile
+	var mounts []byte
+	if err := tx.QueryRow(c, `SELECT name,description,mounts,network_mode,write_mode,active FROM sandbox_profiles WHERE name=$1`, profileName).Scan(&profile.Name, &profile.Description, &mounts, &profile.NetworkMode, &profile.WriteMode, &profile.Active); err != nil {
+		return run, false, err
+	}
+	if err := json.Unmarshal(mounts, &profile.Mounts); err != nil {
+		return run, false, err
+	}
+	policy, err := sandbox.EffectiveProfile(profile, workspace)
+	if err != nil || !profile.Active {
+		return run, false, errors.New("sandbox profile is unknown or inactive")
+	}
+	effective, _ := json.Marshal(policy)
+	err = tx.QueryRow(c, `INSERT INTO agent_runs(task_id,agent_id,rule_id,event_id,batch_id,prompt_snapshot,workspace_snapshot,source_workspace,target_project_id,skill_snapshot,sandbox_profile,sandbox_effective)
 		VALUES($1,$2,NULLIF($3,'')::uuid,NULLIF($4,'')::uuid,NULLIF($5,'')::uuid,$6,$7,$7,NULLIF($8,'')::uuid,
-		COALESCE((SELECT jsonb_agg(jsonb_build_object('name',s.name,'path',i.install_path)) FROM agent_skills x JOIN installed_skills i ON i.id=x.installed_skill_id JOIN skills s ON s.id=i.skill_id WHERE x.agent_id=$2),'[]'::jsonb))
+		COALESCE((SELECT jsonb_agg(jsonb_build_object('name',s.name,'path',i.install_path)) FROM agent_skills x JOIN installed_skills i ON i.id=x.installed_skill_id JOIN skills s ON s.id=i.skill_id WHERE x.agent_id=$2),'[]'::jsonb),$9,$10)
 		ON CONFLICT DO NOTHING
 		RETURNING id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at`,
-		task, agent, rule, event, batch, a.Prompt, workspace, targetProject).
+		task, agent, rule, event, batch, a.Prompt, workspace, targetProject, profile.Name, effective).
 		Scan(&run.ID, &run.TaskID, &run.AgentID, &run.RuleID, &run.BatchID, &run.Status, &run.PromptSnapshot, &run.WorkspaceSnapshot, &run.TargetProject, &run.Summary, &run.ErrorMessage, &run.StartedAt, &run.FinishedAt, &run.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return domain.AgentRun{}, false, nil

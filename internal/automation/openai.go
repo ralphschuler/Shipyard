@@ -212,12 +212,6 @@ func openAISandboxArgsForProfile(worktree, command, profile string) ([]string, e
 	if err != nil {
 		return nil, err
 	}
-	args := []string{"--die-with-parent", "--unshare-all", "--new-session"}
-	for _, directory := range []string{"/usr", "/bin", "/lib", "/lib64"} {
-		if _, statErr := os.Stat(directory); statErr == nil {
-			args = append(args, "--ro-bind", directory, directory)
-		}
-	}
 	policy, err := sandbox.Effective(profile, abs)
 	if err != nil || policy.NetworkMode == "bridge-only" {
 		return nil, errors.New("sandbox profile does not permit direct provider commands")
@@ -230,6 +224,9 @@ func openAISandboxArgsForPolicy(abs, command string, policy sandbox.Profile) ([]
 		return nil, errors.New("sandbox profile does not permit direct provider commands")
 	}
 	args := []string{"--die-with-parent", "--unshare-all", "--new-session"}
+	if policy.NetworkMode == "qa-network" {
+		args = append(args, "--share-net")
+	}
 	for _, directory := range []string{"/usr", "/bin", "/lib", "/lib64"} {
 		if _, statErr := os.Stat(directory); statErr == nil {
 			args = append(args, "--ro-bind", directory, directory)

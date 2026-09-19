@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"taskboard/internal/domain"
 	"taskboard/internal/release"
+	"taskboard/internal/sandbox"
 	"taskboard/internal/store"
 	"taskboard/internal/usage"
 	"time"
@@ -905,6 +906,41 @@ func managedCheckoutProblem(kind, files, detail string) error {
 
 func taskIntegrationBranch(taskID string) string {
 	return "task/" + strings.TrimSpace(taskID)
+}
+
+// validateRunSandboxSnapshot treats the profile persisted with a run as the
+// execution contract. It rejects malformed or substituted snapshots before a
+// worker can use them after an agent configuration has changed.
+func validateRunSandboxSnapshot(name string, payload []byte, workspace string) (sandbox.Profile, error) {
+	var profile sandbox.Profile
+	if err := json.Unmarshal(payload, &profile); err != nil {
+		return sandbox.Profile{}, err
+	}
+	if strings.TrimSpace(profile.Name) != strings.TrimSpace(name) {
+		return sandbox.Profile{}, errors.New("sandbox snapshot profile mismatch")
+	}
+	return sandbox.EffectiveProfile(profile, workspace)
+}
+
+// cliSandboxInvocation builds the same worktree-only bubblewrap envelope for
+// local CLI adapters. The caller still controls provider-specific arguments.
+func cliSandboxInvocation(worktree, profileName, command string, commandArgs []string) (string, []string, error) {
+	profile, err := sandbox.Effective(profileName, worktree)
+	if err != nil {
+		return "", nil, err
+	}
+	if profile.NetworkMode == "bridge-only" {
+		return "", nil, errors.New("release-bridge erlaubt nur den hostseitigen Release-Bridge-Dienst")
+	}
+	args, err := openAISandboxArgsForPolicy(worktree, "true", profile)
+	if err != nil {
+		return "", nil, err
+	}
+	// Replace the harmless sentinel command with the requested executable.
+	args = args[:len(args)-3]
+	args = append(args, command)
+	args = append(args, commandArgs...)
+	return "bwrap", args, nil
 }
 
 func integrationPushArgs(branch, defaultBranch string) ([]string, error) {
@@ -2899,6 +2935,16 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	}
 	provider.Model = agent.Model
 	_ = w.Store.AddRunLog(ctx, run.ID, "info", fmt.Sprintf("Agent-Auswahl: Modell=%s Effort=%s Eskalationsstufe=0 Policy=%s Discovery=agent-selection Fallback=none Budget=not-evaluated", agent.Model, agent.ReasoningEffort, policyVersion(agent)))
+	runSandbox, sandboxErr := w.Store.RunSandboxPolicy(ctx, run.ID)
+	if sandboxErr != nil {
+		reason := "Sandbox-Profil des Runs ist ungültig oder nicht verfügbar"
+		w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "sandbox_profile_invalid")
+		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
+		_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+		_ = w.finish(ctx, run, "failed")
+		return
+	}
+	_ = w.Store.AddRunLog(ctx, run.ID, "info", fmt.Sprintf("Sandbox-Profil: %s · Netzwerk=%s · Schreiben=%s", runSandbox.Name, runSandbox.NetworkMode, runSandbox.WriteMode))
 	secretValues, secretErr := w.Store.SecretValuesForAgent(ctx, run.AgentID)
 	if secretErr != nil {
 		w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "secret_load_failed")
@@ -2926,12 +2972,19 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			w.failSecretAudit(ctx, run, provider.Provider, provider.Model)
 			return
 		}
-		text, usage, responseErr := runOpenAIResponsesForProfile(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot, agent.SandboxProfile)
+		text, usage, responseErr := runOpenAIResponsesWithPolicy(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot, runSandbox)
 		out, tokenUsage, inputTokens, outputTokens, estimatedCostMicrousd, err = []byte(text), usage.TotalTokens, usage.InputTokens, usage.OutputTokens, usage.EstimatedCostMicrousd, responseErr
 		cachedInputTokens, cacheWriteTokens, reasoningTokens = usage.CachedInputTokens, usage.CacheWriteTokens, usage.ReasoningTokens
 		apiCalls, nativeCostMicrousd = usage.APICalls, usage.NativeCostMicrousd
 		serviceTier = usage.ServiceTier
 	} else {
+		if runSandbox.NetworkMode == "bridge-only" {
+			reason := "release-bridge blockiert direkte Provider-Kommandos"
+			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "release_bridge_unavailable")
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
 		command, args, stdin, commandErr := cliInvocationForAgent(provider, agent, prompt)
 		if commandErr != nil {
 			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "adapter_configuration_error")

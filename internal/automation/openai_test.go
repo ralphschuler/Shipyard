@@ -106,3 +106,19 @@ func TestOpenAIToolSandboxArgumentsContainOnlyTheWorktreeAsWritableHostPath(t *t
 		t.Fatalf("sandbox contract unexpectedly changed: %s", got)
 	}
 }
+
+func TestOpenAIToolSandboxArgumentsAllowNetworkOnlyForQAPolicy(t *testing.T) {
+	dir := t.TempDir()
+	policy := sandbox.Profile{Name: "qa-network", Mounts: []string{"worktree"}, NetworkMode: "qa-network", WriteMode: "readonly", Active: true}
+	args, err := openAISandboxArgsForPolicy(dir, "printf ok", policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--share-net") {
+		t.Fatalf("QA network policy did not enable network sharing: %s", joined)
+	}
+	if strings.Index(joined, "--share-net") > strings.Index(joined, "--ro-bind") {
+		t.Fatalf("network option appears after mount options: %s", joined)
+	}
+}
