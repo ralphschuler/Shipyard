@@ -2872,6 +2872,8 @@ function matchesBoardFilters(task: any, boardID: string, columns: any[], filters
 }
 
 function BoardDetail({ id }: { id: string }) {
+  const TOUCH_LONG_PRESS_DELAY = 425;
+  const TOUCH_MOVE_TOLERANCE = 10;
   const { data, error } = useAPI<any>("/api/v1/boards/" + id);
   const [open, setOpen] = useState(false);
   const [labelsOpen, setLabelsOpen] = useState(false);
@@ -2884,8 +2886,14 @@ function BoardDetail({ id }: { id: string }) {
   const filterBoardID = useRef(id);
   const boardChanged = filterBoardID.current !== id;
   const [draggedTask, setDraggedTask] = useState("");
-  const touchDrag = useRef<{ taskID: string; startX: number; startY: number; active: boolean } | undefined>(undefined);
+  const touchDrag = useRef<{ taskID: string; startX: number; startY: number; active: boolean; timer: number } | undefined>(undefined);
   const suppressTaskClick = useRef(false);
+  const cancelTouchDrag = () => {
+    const pending = touchDrag.current;
+    if (pending) window.clearTimeout(pending.timer);
+    touchDrag.current = undefined;
+    setDraggedTask("");
+  };
   useEffect(() => {
     const next = readBoardFilters(id);
     filterBoardID.current = id;
@@ -2900,6 +2908,21 @@ function BoardDetail({ id }: { id: string }) {
     }, 180);
     return () => window.clearTimeout(timer);
   }, [searchInput]);
+  useEffect(() => {
+    const cancel = () => cancelTouchDrag();
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("blur", cancel);
+    document.addEventListener("visibilitychange", cancel);
+    return () => {
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("blur", cancel);
+      document.removeEventListener("visibilitychange", cancel);
+      cancelTouchDrag();
+    };
+  }, [id]);
+  useEffect(() => {
+    if (open || labelsOpen || settings) cancelTouchDrag();
+  }, [open, labelsOpen, settings]);
   useEffect(() => {
     // During a board transition, the render still contains the previous
     // board's filters. Wait for the board-change effect to hydrate the new
@@ -3169,18 +3192,32 @@ function BoardDetail({ id }: { id: string }) {
                   }}
                   onPointerDown={(event) => {
                     if (event.pointerType !== "touch") return;
-                    touchDrag.current = { taskID: task.ID, startX: event.clientX, startY: event.clientY, active: false };
+                    if (!event.isPrimary) {
+                      cancelTouchDrag();
+                      return;
+                    }
+                    cancelTouchDrag();
+                    const pending = { taskID: task.ID, startX: event.clientX, startY: event.clientY, active: false, timer: 0 };
+                    const cardElement = event.currentTarget;
+                    pending.timer = window.setTimeout(() => {
+                      if (touchDrag.current !== pending) return;
+                      pending.active = true;
+                      setDraggedTask(task.ID);
+                      cardElement.setPointerCapture?.(event.pointerId);
+                      if (navigator.vibrate) navigator.vibrate(12);
+                    }, TOUCH_LONG_PRESS_DELAY);
+                    touchDrag.current = pending;
                   }}
                   onPointerMove={(event) => {
                     const active = touchDrag.current;
                     if (event.pointerType !== "touch" || !active || active.taskID !== task.ID) return;
-                    if (Math.hypot(event.clientX - active.startX, event.clientY - active.startY) > 12) {
-                      active.active = true;
-                      setDraggedTask(task.ID);
+                    if (!active.active && Math.hypot(event.clientX - active.startX, event.clientY - active.startY) > TOUCH_MOVE_TOLERANCE) {
+                      cancelTouchDrag();
                     }
                   }}
                   onPointerUp={(event) => {
                     const active = touchDrag.current;
+                    if (active) window.clearTimeout(active.timer);
                     touchDrag.current = undefined;
                     if (event.pointerType !== "touch" || !active?.active) return;
                     event.preventDefault();
@@ -3191,7 +3228,9 @@ function BoardDetail({ id }: { id: string }) {
                     if (targetColumnID) void moveTask(task.ID, targetColumnID);
                     else setDraggedTask("");
                   }}
-                  className={"block rounded-lg border bg-card p-3 text-sm shadow-sm transition hover:border-primary touch-none " + (draggedTask === task.ID ? "dragging opacity-60 ring-2 ring-primary" : "")}
+                  onPointerCancel={() => cancelTouchDrag()}
+                  data-touch-dragging={draggedTask === task.ID ? "true" : undefined}
+                  className={"block rounded-lg border bg-card p-3 text-sm shadow-sm transition hover:border-primary " + (draggedTask === task.ID ? "dragging opacity-60 ring-2 ring-primary" : "")}
                 >
                   <strong>{task.Title}</strong>
                   {task.Description && (
