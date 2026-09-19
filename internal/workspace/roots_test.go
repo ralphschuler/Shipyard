@@ -62,3 +62,27 @@ func TestValidateRejectsUnmarkedConfiguredRoot(t *testing.T) {
 		t.Fatalf("Validate() = %#v, %v; want actionable marker error", status, err)
 	}
 }
+
+func TestValidateRejectsNFSMarkerOnNonNFSStorage(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("TASKBOARD_WORKSPACE_ROOT", root)
+	if err := os.WriteFile(MarkerPath(), []byte("shipyard workspace\nstorage=nfs\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	status, err := Validate()
+	if err == nil || status.Ready() || status.Error == "" {
+		t.Fatalf("Validate() = %#v, %v; want storage mismatch", status, err)
+	}
+}
+
+func TestValidateMissingRootDoesNotCreateLocalFallback(t *testing.T) {
+	root := t.TempDir() + "/missing"
+	t.Setenv("TASKBOARD_WORKSPACE_ROOT", root)
+	_, err := Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted missing root")
+	}
+	if _, statErr := os.Stat(root); !os.IsNotExist(statErr) {
+		t.Fatalf("Validate() created missing root: %v", statErr)
+	}
+}

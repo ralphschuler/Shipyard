@@ -80,6 +80,21 @@ func TestMigrateRejectsUnmarkedTargetWithoutCreatingLocalFallback(t *testing.T) 
 	}
 }
 
+func TestMigrateRejectsMissingTargetWithoutCreatingLocalFallback(t *testing.T) {
+	source := t.TempDir()
+	target := filepath.Join(t.TempDir(), "missing-target")
+	if err := os.MkdirAll(filepath.Join(source, "projects"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Migrate(source, target, nil)
+	if err == nil || !strings.Contains(err.Error(), "verfügbar") {
+		t.Fatalf("Migrate() error = %v, want unavailable target diagnostic", err)
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("migration created missing target: %v", statErr)
+	}
+}
+
 func TestMigrateRejectsNFSMarkerOnNonNFSStorage(t *testing.T) {
 	source, target := t.TempDir(), t.TempDir()
 	if err := os.MkdirAll(filepath.Join(source, "projects"), 0o750); err != nil {

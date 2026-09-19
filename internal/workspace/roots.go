@@ -59,7 +59,7 @@ func Validate() (Status, error) {
 		return invalidStatus(root, "TASKBOARD_WORKSPACE_ROOT muss ein absoluter Nicht-Root-Pfad sein")
 	}
 	root = filepath.Clean(root)
-	status := Status{Root: root, Projects: ProjectsRoot(), Runs: RunsRoot(), Integrations: IntegrationsRoot(), Migration: migrationInProgress(root)}
+	status := Status{Root: root, Projects: ProjectsRoot(), Runs: RunsRoot(), Integrations: IntegrationsRoot()}
 	if status.Integrations == "" {
 		status.Integrations = filepath.Join(root, "integrations")
 	}
@@ -79,13 +79,24 @@ func Validate() (Status, error) {
 		status.Storage = "unbekannt"
 	}
 	if Root() != "" {
-		markerInfo, err := os.Lstat(filepath.Join(root, markerName))
+		markerPath := filepath.Join(root, markerName)
+		markerInfo, err := os.Lstat(markerPath)
 		if err != nil || !markerInfo.Mode().IsRegular() {
 			status.Error = "Workspace-Root ist nicht als Shipyard-Speicher markiert"
 			return status, errors.New(status.Error)
 		}
+		markerContent, readErr := os.ReadFile(markerPath)
+		if readErr != nil {
+			status.Error = "Shipyard-Speichermarker konnte nicht gelesen werden"
+			return status, errors.New(status.Error)
+		}
+		if strings.Contains(strings.ToLower(string(markerContent)), "storage=nfs") && status.Storage != "NFS" {
+			status.Error = "Workspace-Speicher ist als NFS markiert, aber kein NFS-Mount"
+			return status, errors.New(status.Error)
+		}
 		status.Marker = true
 	}
+	status.Migration = migrationInProgress(root)
 	if status.Migration {
 		status.Error = "Workspace-Migration läuft; neue Runs sind pausiert"
 		return status, errors.New(status.Error)
@@ -125,7 +136,9 @@ func invalidStatus(root, message string) (Status, error) {
 }
 
 func migrationInProgress(root string) bool {
-	f, err := os.OpenFile(filepath.Join(root, ".shipyard-migration.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	// Never create a lock path during validation. A missing mount must remain a
+	// hard failure instead of becoming a local directory with a new lock file.
+	f, err := os.Open(root)
 	if err != nil {
 		return true
 	}

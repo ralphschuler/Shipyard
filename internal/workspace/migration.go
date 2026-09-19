@@ -33,10 +33,14 @@ func (g *RunGate) Close() error {
 }
 
 func acquireGate(root string, exclusive bool) (*RunGate, error) {
-	if err := os.MkdirAll(root, 0o750); err != nil {
-		return nil, err
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		return nil, errors.New("Workspace-Root ist nicht verfügbar")
 	}
-	f, err := os.OpenFile(filepath.Join(root, ".shipyard-migration.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	// Lock the existing root directory itself. In particular, do not create a
+	// lock file: doing so at a missing NFS mountpoint would silently prepare a
+	// local fallback and defeat the fail-closed preflight.
+	f, err := os.Open(root)
 	if err != nil {
 		return nil, errors.New("Workspace-Sperre konnte nicht geöffnet werden")
 	}
@@ -72,9 +76,6 @@ func Migrate(sourceRoot, targetRoot string, activeRunPaths map[string]bool) (Mig
 	}
 	if sourceRoot == targetRoot {
 		return MigrationState{}, errors.New("Quell- und Ziel-Workspace müssen verschieden sein")
-	}
-	if _, err := os.Stat(sourceRoot); err != nil {
-		return MigrationState{}, errors.New("Quell-Workspace ist nicht verfügbar")
 	}
 	sourceGate, err := acquireGate(sourceRoot, true)
 	if err != nil {
