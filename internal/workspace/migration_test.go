@@ -80,6 +80,21 @@ func TestMigrateRejectsUnmarkedTargetWithoutCreatingLocalFallback(t *testing.T) 
 	}
 }
 
+func TestMigrateRejectsNFSMarkerOnNonNFSStorage(t *testing.T) {
+	source, target := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(source, "projects"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(target, markerName), []byte("shipyard workspace\nstorage=nfs\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Migrate(source, target, nil)
+	if err == nil || !strings.Contains(err.Error(), "NFS") {
+		t.Fatalf("Migrate() error = %v, want NFS storage diagnostic", err)
+	}
+}
+
 func TestCopyPublishedPreservesExistingDestinationForRollback(t *testing.T) {
 	parent := t.TempDir()
 	source := filepath.Join(parent, "source")
@@ -111,5 +126,39 @@ func TestCopyPublishedPreservesExistingDestinationForRollback(t *testing.T) {
 	old, err := os.ReadFile(filepath.Join(rollback[0], "value"))
 	if err != nil || string(old) != "old\n" {
 		t.Fatalf("rollback content = %q, %v; want old content", old, err)
+	}
+}
+
+func TestAtomicReplaceDirectoryExchangesExistingDestinationWithoutGap(t *testing.T) {
+	parent := t.TempDir()
+	oldPath := filepath.Join(parent, "workspace")
+	newPath := filepath.Join(parent, "workspace.new")
+	if err := os.MkdirAll(oldPath, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(newPath, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldPath, "value"), []byte("old\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(newPath, "value"), []byte("new\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	rollback, err := atomicReplaceDirectory(newPath, oldPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rollback == "" {
+		t.Fatal("atomicReplaceDirectory() returned no recovery path")
+	}
+	got, err := os.ReadFile(filepath.Join(oldPath, "value"))
+	if err != nil || string(got) != "new\n" {
+		t.Fatalf("published content = %q, %v; want new content", got, err)
+	}
+	old, err := os.ReadFile(filepath.Join(rollback, "value"))
+	if err != nil || string(old) != "old\n" {
+		t.Fatalf("recovery content = %q, %v; want old content", old, err)
 	}
 }

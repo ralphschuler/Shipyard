@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // RunGate is a shared lease for run creation/start. Migration takes the same
@@ -74,9 +76,6 @@ func Migrate(sourceRoot, targetRoot string, activeRunPaths map[string]bool) (Mig
 	if _, err := os.Stat(sourceRoot); err != nil {
 		return MigrationState{}, errors.New("Quell-Workspace ist nicht verfügbar")
 	}
-	if err := validateMigrationTarget(targetRoot); err != nil {
-		return MigrationState{}, err
-	}
 	sourceGate, err := acquireGate(sourceRoot, true)
 	if err != nil {
 		return MigrationState{}, err
@@ -87,6 +86,12 @@ func Migrate(sourceRoot, targetRoot string, activeRunPaths map[string]bool) (Mig
 		return MigrationState{}, err
 	}
 	defer gate.Close()
+	// Validate only after taking the target lock. This closes the TOCTOU window
+	// in which an NFS mount could disappear after preflight and a local path
+	// could be created or reused before copying starts.
+	if err := validateMigrationTarget(targetRoot); err != nil {
+		return MigrationState{}, err
+	}
 	state := MigrationState{Source: sourceRoot, Target: targetRoot}
 	statePath := filepath.Join(targetRoot, ".shipyard-migration.json")
 	for _, kind := range []string{"projects", "runs", "integrations"} {
@@ -153,15 +158,13 @@ func copyPublished(src, dst string) error {
 		return err
 	}
 	if _, err := os.Lstat(dst); err == nil {
-		rollback := fmt.Sprintf("%s.shipyard-rollback-%d", dst, time.Now().UnixNano())
-		if err := os.Rename(dst, rollback); err != nil {
-			_ = os.RemoveAll(tmp)
-			return errors.New("bestehender Workspace konnte nicht für Rollback gesichert werden")
-		}
-		if err := os.Rename(tmp, dst); err != nil {
-			_ = os.Rename(rollback, dst)
-			_ = os.RemoveAll(tmp)
-			return errors.New("migrierter Workspace konnte nicht atomar veröffentlicht werden")
+		if recovery, err := atomicReplaceDirectory(tmp, dst); err != nil {
+			// After a successful exchange, prepared contains the old
+			// destination and is the only recovery copy. Never delete it.
+			if recovery == "" {
+				_ = os.RemoveAll(tmp)
+			}
+			return err
 		}
 		return nil
 	}
@@ -170,6 +173,23 @@ func copyPublished(src, dst string) error {
 		return err
 	}
 	return nil
+}
+
+// atomicReplaceDirectory exchanges two directories in one namespace
+// operation. Unlike rename(old, rollback) followed by rename(tmp, dst), the
+// destination never disappears, so a crash cannot expose a half-switched
+// workspace. The old destination is then retained as a recovery directory;
+// if that second rename fails, the new destination is still live and the old
+// tree remains at prepared.
+func atomicReplaceDirectory(prepared, destination string) (string, error) {
+	rollback := fmt.Sprintf("%s.shipyard-rollback-%d", destination, time.Now().UnixNano())
+	if err := unix.Renameat2(unix.AT_FDCWD, prepared, unix.AT_FDCWD, destination, unix.RENAME_EXCHANGE); err != nil {
+		return "", errors.New("migrierter Workspace konnte nicht atomar veröffentlicht werden")
+	}
+	if err := os.Rename(prepared, rollback); err != nil {
+		return prepared, fmt.Errorf("neuer Workspace ist veröffentlicht, alter Stand liegt zur Wiederaufnahme unter %s", prepared)
+	}
+	return rollback, nil
 }
 
 // validateMigrationTarget requires an operator-created marker before any
@@ -183,6 +203,16 @@ func validateMigrationTarget(root string) error {
 	marker, err := os.Lstat(filepath.Join(root, markerName))
 	if err != nil || !marker.Mode().IsRegular() {
 		return errors.New("Ziel-Workspace ist nicht als Shipyard-Speicher markiert")
+	}
+	markerContent, err := os.ReadFile(filepath.Join(root, markerName))
+	if err != nil {
+		return errors.New("Shipyard-Speichermarker konnte nicht gelesen werden")
+	}
+	if strings.Contains(strings.ToLower(string(markerContent)), "storage=nfs") {
+		fs := new(syscall.Statfs_t)
+		if err := syscall.Statfs(root, fs); err != nil || uint64(fs.Type) != 0x6969 {
+			return errors.New("Ziel-Workspace ist nicht als NFS eingehängt")
+		}
 	}
 	tmp, err := os.CreateTemp(root, ".shipyard-migration-preflight-*")
 	if err != nil {
