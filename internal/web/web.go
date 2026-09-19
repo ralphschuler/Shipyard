@@ -30,6 +30,7 @@ import (
 	"taskboard/internal/store"
 	"taskboard/internal/updates"
 	"taskboard/internal/validate"
+	"taskboard/internal/workspace"
 	"time"
 )
 
@@ -1889,7 +1890,7 @@ func (a *App) syncProjectRepo(ctx context.Context, p domain.Project) error {
 	}
 	path := p.LocalPath
 	if path == "" {
-		path = filepath.Join("/home/agent/.taskboard-projects", p.ID)
+		path = filepath.Join(workspace.ProjectsRoot(), p.ID)
 	}
 	if !filepath.IsAbs(path) {
 		return a.store.RecordProjectSync(ctx, p.ID, "Lokaler Pfad muss absolut sein")

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"taskboard/internal/domain"
 	"taskboard/internal/sandbox"
+	workspacecfg "taskboard/internal/workspace"
 	"time"
 )
 
@@ -792,7 +793,7 @@ func runRepositoryTargets(targets []domain.RepositoryTarget) ([]domain.Repositor
 			return nil, errors.New("Das Projektziel ist nicht verfügbar. Wähle ein registriertes Projekt mit Repository und starte den Run erneut.")
 		}
 		if strings.TrimSpace(resolved[i].LocalPath) == "" {
-			resolved[i].LocalPath = filepath.Join("/home/agent/.taskboard-projects", resolved[i].ProjectID)
+			resolved[i].LocalPath = filepath.Join(workspacecfg.ProjectsRoot(), resolved[i].ProjectID)
 		}
 	}
 	return resolved, nil
@@ -993,7 +994,7 @@ func (s *Store) CreateProject(c context.Context, name, repo, branch, path string
 		return p, err
 	}
 	if p.RepositoryURL != "" && p.LocalPath == "" {
-		p.LocalPath = filepath.Join("/home/agent/.taskboard-projects", p.ID)
+		p.LocalPath = filepath.Join(workspacecfg.ProjectsRoot(), p.ID)
 		if _, err = tx.Exec(c, `UPDATE projects SET local_path=$2 WHERE id=$1`, p.ID, p.LocalPath); err != nil {
 			return p, err
 		}
@@ -2834,7 +2835,7 @@ func (s *Store) CreateRun(c context.Context, task, agent, rule string) (domain.A
 	}
 	workspace, targetProject := targets[0].LocalPath, targets[0].ProjectID
 	if workspace == "" {
-		workspace = filepath.Join("/home/agent/.taskboard-projects", targetProject)
+		workspace = filepath.Join(workspacecfg.ProjectsRoot(), targetProject)
 	}
 	targets, err = runRepositoryTargets(targets)
 	if err != nil {
