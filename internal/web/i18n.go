@@ -163,24 +163,24 @@ func localizeHTML(html, lang string) string {
 			html = strings.ReplaceAll(html, old, replacement)
 		}
 	}
-	return localizeTextNodes(html, dictionary)
+	return localizeTextNodes(html, dictionary, normalizeLanguage(lang) == languageEnglish)
 }
 
 // localizeTextNodes handles prose nested in labels and controls, such as
 // <label>Name<input ...>. It deliberately translates only a complete text
 // node (after trimming whitespace), never an arbitrary substring. As a
 // result a user-created title containing a translated phrase remains intact.
-func localizeTextNodes(html string, dictionary map[string]string) string {
+func localizeTextNodes(html string, dictionary map[string]string, english bool) string {
 	var out strings.Builder
 	textStart := 0
 	for textStart < len(html) {
 		rel := strings.IndexByte(html[textStart:], '<')
 		if rel < 0 {
-			out.WriteString(translateTextNode(html[textStart:], dictionary))
+			out.WriteString(translateTextNode(html[textStart:], dictionary, english))
 			break
 		}
 		textEnd := textStart + rel
-		out.WriteString(translateTextNode(html[textStart:textEnd], dictionary))
+		out.WriteString(translateTextNode(html[textStart:textEnd], dictionary, english))
 		tagEnd := strings.IndexByte(html[textEnd:], '>')
 		if tagEnd < 0 {
 			out.WriteString(html[textEnd:])
@@ -193,13 +193,17 @@ func localizeTextNodes(html string, dictionary map[string]string) string {
 	return out.String()
 }
 
-func translateTextNode(node string, dictionary map[string]string) string {
+func translateTextNode(node string, dictionary map[string]string, english bool) string {
 	trimmed := strings.TrimSpace(node)
 	if trimmed == "" {
 		return node
 	}
 	value, ok := dictionary[trimmed]
 	if !ok {
+		if english && isGermanText(trimmed) {
+			start := strings.Index(node, trimmed)
+			return node[:start] + "Translation unavailable" + node[start+len(trimmed):]
+		}
 		return node
 	}
 	start := strings.Index(node, trimmed)

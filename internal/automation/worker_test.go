@@ -1081,10 +1081,25 @@ func TestFormatTaskContextIncludesLifecycleAndComments(t *testing.T) {
 	start := time.Date(2026, 9, 14, 9, 0, 0, 0, time.UTC)
 	due := start.Add(48 * time.Hour)
 	context := formatTaskContext(domain.Task{ID: "task-1", Title: "Deployment anpassen", Description: "Cache entfernen", Priority: "high", ColumnName: "Blocked", StartDate: &start, DueDate: &due, CreatedAt: start, Labels: []domain.Label{{Name: "deployment"}}}, domain.Board{Name: "Inhouse"}, []domain.Project{{Name: "API", RepositoryURL: "https://example.test/api", DefaultBranch: "main"}}, []domain.ProjectGroup{{Name: "Inhouse"}}, []domain.History{{FromName: "In Arbeit", ToName: "Blocked", Source: "agent_failure", OccurredAt: due}}, []domain.Comment{{Author: "Taskboard", Body: "Run fehlgeschlagen", CreatedAt: due}}, nil, start)
-	for _, want := range []string{"Deployment anpassen", "Cache entfernen", "Labels: deployment", "Fällig: 2026-09-16", "API | https://example.test/api", "In Arbeit → Blocked", "Run fehlgeschlagen", "BEGINN AUFGABENKONTEXT"} {
+	for _, want := range []string{"Deployment anpassen", "Cache entfernen", "Labels: deployment", "Due: 2026-09-16", "API | https://example.test/api", "In Arbeit → Blocked", "Run fehlgeschlagen", "BEGIN TASK CONTEXT"} {
 		if !strings.Contains(context, want) {
 			t.Fatalf("context is missing %q: %s", want, context)
 		}
+	}
+}
+
+func TestNormalizeBuiltinAgentMigratesOnlyKnownLegacyTemplate(t *testing.T) {
+	legacy := domain.Agent{ID: "agent-1", Description: "Implementierungs-Agent", Prompt: "Implementiere die zugewiesene Aufgabe fokussiert. Erstelle keinen Push, Merge oder Release."}
+	got, changed := normalizeBuiltinAgent(legacy)
+	if !changed || got.Description != "Implementation agent" || got.Prompt != "Implement the assigned task with a focused scope. Do not create a push, merge, or release." {
+		t.Fatalf("legacy built-in was not normalized: %#v, changed=%v", got, changed)
+	}
+	custom := domain.Agent{Description: "Implementierungs-Agent", Prompt: "User-authored instruction"}
+	if _, changed := normalizeBuiltinAgent(custom); changed {
+		t.Fatal("user-authored prompt was normalized")
+	}
+	if got := normalizeBuiltinPromptSnapshot(legacy.Prompt); got == legacy.Prompt || !strings.Contains(got, "Implement the assigned task") {
+		t.Fatalf("legacy prompt snapshot was not normalized: %q", got)
 	}
 }
 
@@ -1521,7 +1536,7 @@ func TestInteractionFingerprintIsStableAndSeparatesDifferentQuestions(t *testing
 func TestFormatTaskContextMakesResolvedDecisionAuthoritative(t *testing.T) {
 	now := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
 	context := formatTaskContext(domain.Task{ID: "task-1", Title: "App", CreatedAt: now}, domain.Board{Name: "Personal"}, nil, nil, nil, nil, []domain.TaskDecision{{Key: "database", Title: "Datenbank", Response: []byte(`{"database":["postgres"]}`), FreeformAnswer: "Postgres ist verbindlich", ResolvedAt: now}}, now)
-	for _, want := range []string{"Verbindliche Nutzerentscheidungen", "database", "postgres", "nicht erneut abfragen"} {
+	for _, want := range []string{"Binding user decisions", "database", "postgres", "do not ask again"} {
 		if !strings.Contains(context, want) {
 			t.Fatalf("context is missing %q: %s", want, context)
 		}

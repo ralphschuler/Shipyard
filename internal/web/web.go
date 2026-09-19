@@ -1238,15 +1238,15 @@ func (a *App) agentTemplates(w http.ResponseWriter, r *http.Request) {
 }
 func (a *App) createTemplateAgent(w http.ResponseWriter, r *http.Request) {
 	kind := r.FormValue("kind")
-	prompt := "Implementiere die zugewiesene Aufgabe fokussiert. Erstelle keinen Push, Merge oder Release."
-	desc := "Implementierungs-Agent"
+	prompt := "Implement the assigned task with a focused scope. Do not create a push, merge, or release."
+	desc := "Implementation agent"
 	if kind == "review" {
-		prompt = "Prüfe die Änderung kritisch und dokumentiere konkrete Probleme. Erstelle keinen Push, Merge oder Release."
-		desc = "Code-Review-Agent"
+		prompt = "Review the change critically and document concrete issues. Do not create a push, merge, or release."
+		desc = "Code review agent"
 	}
 	if kind == "docs" {
-		prompt = "Aktualisiere die Dokumentation zur Aufgabe. Erstelle keinen Push, Merge oder Release."
-		desc = "Dokumentations-Agent"
+		prompt = "Update the task documentation. Do not create a push, merge, or release."
+		desc = "Documentation agent"
 	}
 	_, e := a.store.CreateAgent(r.Context(), r.FormValue("name"), desc, "", prompt, "", 1)
 	if e != nil {
