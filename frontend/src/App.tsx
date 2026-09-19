@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createContext, lazy, Suspense, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Activity,
   Bot,
@@ -55,6 +55,21 @@ type NavItem = {
   icon: typeof LayoutDashboard;
 };
 type BoardNavItem = { ID: string; Name: string };
+type LocaleContextValue = {
+  language: Language;
+  t: (key: string) => string;
+  text: (german: string, english: string) => string;
+};
+
+const LocaleContext = createContext<LocaleContextValue>({
+  language: "de",
+  t: (key) => key,
+  text: (german) => german,
+});
+
+function useLocale() {
+  return useContext(LocaleContext);
+}
 const nav: NavItem[] = [
   { name: "overview", path: "/", icon: LayoutDashboard },
   {
@@ -301,6 +316,7 @@ export default function App() {
   const navIndexFor = (index: number) =>
     index + (boardsOpen && index > boardsNavIndex ? boardSubmenuSize : 0);
   return (
+    <LocaleContext.Provider value={{ language, t, text: (german, english) => language === "en" ? english : german }}>
     <TooltipProvider>
       <div className="min-h-dvh bg-background">
         <Button
@@ -413,14 +429,14 @@ export default function App() {
           <DialogContent>
             <DialogHeader>
               <DialogTitle>{t("keyboardControl")}</DialogTitle>
-              <DialogDescription>Die gesamte Oberfläche bleibt mit Standard-Fokussteuerung bedienbar.</DialogDescription>
+              <DialogDescription>{language === "en" ? "The entire interface remains usable with standard focus controls." : "Die gesamte Oberfläche bleibt mit Standard-Fokussteuerung bedienbar."}</DialogDescription>
             </DialogHeader>
             <dl className="grid gap-3 text-sm">
-              <div><dt className="font-medium">Tab / Umschalt + Tab</dt><dd className="text-muted-foreground">Zum nächsten oder vorherigen Bedienelement wechseln.</dd></div>
-              <div><dt className="font-medium">Enter / Leertaste</dt><dd className="text-muted-foreground">Fokussierten Link, Button oder Auswahl auslösen.</dd></div>
-              <div><dt className="font-medium">↑ / ↓, Pos1 / Ende</dt><dd className="text-muted-foreground">Einträge in der Seitennavigation auswählen.</dd></div>
-              <div><dt className="font-medium">?</dt><dd className="text-muted-foreground">Diese Hilfe öffnen.</dd></div>
-              <div><dt className="font-medium">Escape</dt><dd className="text-muted-foreground">Dialog schließen.</dd></div>
+              <div><dt className="font-medium">Tab / {language === "en" ? "Shift" : "Umschalt"} + Tab</dt><dd className="text-muted-foreground">{language === "en" ? "Move to the next or previous control." : "Zum nächsten oder vorherigen Bedienelement wechseln."}</dd></div>
+              <div><dt className="font-medium">Enter / {language === "en" ? "Space" : "Leertaste"}</dt><dd className="text-muted-foreground">{language === "en" ? "Activate the focused link, button, or selection." : "Fokussierten Link, Button oder Auswahl auslösen."}</dd></div>
+              <div><dt className="font-medium">↑ / ↓, {language === "en" ? "Home / End" : "Pos1 / Ende"}</dt><dd className="text-muted-foreground">{language === "en" ? "Select entries in the page navigation." : "Einträge in der Seitennavigation auswählen."}</dd></div>
+              <div><dt className="font-medium">?</dt><dd className="text-muted-foreground">{language === "en" ? "Open this help." : "Diese Hilfe öffnen."}</dd></div>
+              <div><dt className="font-medium">Escape</dt><dd className="text-muted-foreground">{language === "en" ? "Close the dialog." : "Dialog schließen."}</dd></div>
             </dl>
           </DialogContent>
         </Dialog>
@@ -472,6 +488,7 @@ export default function App() {
         </main>
       </div>
     </TooltipProvider>
+    </LocaleContext.Provider>
   );
 }
 
@@ -498,6 +515,7 @@ function GenericResourceList({
   endpoint: string;
   title: string;
 }) {
+  const { text } = useLocale();
   const { data, error } = useAPI<Record<string, unknown>[]>(endpoint);
   if (error) return <Failure />;
   if (!data) return <Loading />;
@@ -505,7 +523,7 @@ function GenericResourceList({
     <Card>
       <CardHeader>
         <CardTitle>{title}</CardTitle>
-        <CardDescription>{data.length} Einträge</CardDescription>
+        <CardDescription>{data.length} {text("Einträge", "entries")}</CardDescription>
       </CardHeader>
       <CardContent>
         {data.length ? (
@@ -522,7 +540,7 @@ function GenericResourceList({
                         item.TaskTitle ??
                         item.Title ??
                         item.ID ??
-                        "Eintrag",
+                        text("Eintrag", "entry"),
                     )}
                   </strong>
                   {typeof item.Status === "string" && (
@@ -543,7 +561,7 @@ function GenericResourceList({
           </div>
         ) : (
           <p className="py-12 text-center text-sm text-muted-foreground">
-            Noch keine Einträge vorhanden.
+            {text("Noch keine Einträge vorhanden.", "No entries yet.")}
           </p>
         )}
       </CardContent>
@@ -551,6 +569,7 @@ function GenericResourceList({
   );
 }
 function Boards() {
+  const { language, text } = useLocale();
   const { data: items, error: loadFailed } = useAPI<Record<string, unknown>[]>("/api/v1/boards");
   const { data: templates } = useAPI<any[]>("/api/v1/board-templates");
   const [error, setError] = useState("");
@@ -575,7 +594,7 @@ function Boards() {
   const remove = async (id: string) => {
     if (
       !confirm(
-        "Board wirklich löschen? Alle darin enthaltenen Aufgaben werden entfernt.",
+        text("Board wirklich löschen? Alle darin enthaltenen Aufgaben werden entfernt.", "Delete this board? All tasks it contains will be removed."),
       )
     )
       return;
@@ -593,35 +612,34 @@ function Boards() {
     <Card>
       <CardHeader className="flex flex-row items-start justify-between gap-4">
         <div>
-          <CardTitle>Boards</CardTitle>
-          <CardDescription>{items.length} Boards</CardDescription>
+          <CardTitle>{text("Boards", "Boards")}</CardTitle>
+          <CardDescription>{items.length} {text("Boards", "boards")}</CardDescription>
         </div>
         <Dialog open={open} onOpenChange={setOpen}>
           <DialogTrigger asChild>
-            <Button>Board anlegen</Button>
+            <Button>{text("Board anlegen", "Create board")}</Button>
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Neues Board</DialogTitle>
+              <DialogTitle>{text("Neues Board", "New board")}</DialogTitle>
               <DialogDescription>
-                Wähle eine Vorlage; der Workflow bleibt danach vollständig
-                anpassbar.
+                {text("Wähle eine Vorlage; der Workflow bleibt danach vollständig anpassbar.", "Choose a template; the workflow remains fully customizable afterwards.")}
               </DialogDescription>
             </DialogHeader>
             <form onSubmit={create} className="grid gap-4">
               <label className="grid gap-2 text-sm font-medium">
-                Name
+                {text("Name", "Name")}
                 <Input
                   autoFocus
                   required
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="z. B. Plattform"
+                  placeholder={text("z. B. Plattform", "e.g. Platform")}
                 />
               </label>
               <fieldset className="grid gap-2">
                 <legend className="text-sm font-medium">
-                  Workflow-Vorlage
+                  {text("Workflow-Vorlage", "Workflow template")}
                 </legend>
                 <div className="max-h-56 space-y-2 overflow-auto pr-1">
                   {templates.map((value) => (
@@ -653,7 +671,7 @@ function Boards() {
                 )}
               </fieldset>
               <DialogFooter>
-                <Button type="submit">Board erstellen</Button>
+                <Button type="submit">{text("Board erstellen", "Create board")}</Button>
               </DialogFooter>
             </form>
           </DialogContent>
@@ -672,8 +690,8 @@ function Boards() {
                   {String(item.Name)}
                 </strong>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Erstellt{" "}
-                  {new Date(String(item.CreatedAt)).toLocaleDateString("de-DE")}
+                  {text("Erstellt", "Created")}{" "}
+                  {new Date(String(item.CreatedAt)).toLocaleDateString(language === "en" ? "en-US" : "de-DE")}
                 </p>
               </a>
               <Button
@@ -681,11 +699,11 @@ function Boards() {
                 size="sm"
                 onClick={() => remove(String(item.ID))}
               >
-                Löschen
+                {text("Löschen", "Delete")}
               </Button>
             </article>
           ))}
-        </div> : <EmptyState title="Noch kein Board" description="Lege ein Board aus einer Workflow-Vorlage an, um Aufgaben und Automationen zu organisieren." />}
+        </div> : <EmptyState title={text("Noch kein Board", "No boards yet")} description={text("Lege ein Board aus einer Workflow-Vorlage an, um Aufgaben und Automationen zu organisieren.", "Create a board from a workflow template to organize tasks and automations.")} />}
       </CardContent>
     </Card>
   );
@@ -2002,39 +2020,42 @@ function Account() {
   );
 }
 function Loading() {
+  const { text } = useLocale();
   return (
     <Card>
       <CardContent className="flex min-h-56 items-center justify-center gap-3 text-sm text-muted-foreground">
         <LoaderCircle className="size-5 animate-spin" />
-        Lade Betriebsdaten …
+        {text("Lade Betriebsdaten …", "Loading operational data …")}
       </CardContent>
     </Card>
   );
 }
 function Failure() {
+  const { text } = useLocale();
   return (
     <Card>
       <CardContent className="flex min-h-56 flex-col items-center justify-center gap-4 py-12 text-center">
         <p className="text-sm text-destructive">
-          Daten konnten nicht geladen werden. Bitte erneut versuchen.
+          {text("Daten konnten nicht geladen werden. Bitte erneut versuchen.", "Data could not be loaded. Please try again.")}
         </p>
         <Button type="button" size="sm" variant="outline" onClick={() => refreshData()}>
-          Daten erneut laden
+          {text("Daten erneut laden", "Reload data")}
         </Button>
       </CardContent>
     </Card>
   );
 }
 function NotFound() {
+  const { text } = useLocale();
   return (
     <Card>
       <CardContent className="flex min-h-56 flex-col items-center justify-center gap-4 py-12 text-center">
-        <p className="text-sm font-medium">Diese Ansicht gibt es nicht.</p>
+        <p className="text-sm font-medium">{text("Diese Ansicht gibt es nicht.", "This view does not exist.")}</p>
         <p className="max-w-md text-sm text-muted-foreground">
-          Öffne die Übersicht oder wähle einen Bereich aus der Navigation.
+          {text("Öffne die Übersicht oder wähle einen Bereich aus der Navigation.", "Open the overview or select a section from the navigation.")}
         </p>
         <Button asChild size="sm">
-          <a href="#/">Zur Übersicht</a>
+          <a href="#/">{text("Zur Übersicht", "Go to overview")}</a>
         </Button>
       </CardContent>
     </Card>
