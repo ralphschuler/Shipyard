@@ -1331,6 +1331,7 @@ function AgentForm() {
   );
 }
 function Settings({ route, language }: { route: string; language: Language }) {
+  const { text } = useLocale();
   const tab =
     route === "/account"
       ? "account"
@@ -1340,9 +1341,9 @@ function Settings({ route, language }: { route: string; language: Language }) {
   const tabs = [
     ["providers", "Provider"],
     ["updates", "Updates"],
-    ["agent-policy", "Agentenrichtlinien"],
-    ["appearance", "Darstellung"],
-    ["integrations", "Integrationen"],
+    ["agent-policy", text("Agentenrichtlinien", "Agent policies")],
+    ["appearance", text("Darstellung", "Appearance")],
+    ["integrations", text("Integrationen", "Integrations")],
     ["account", "MCP-Tokens"],
   ];
   return (
@@ -1407,6 +1408,7 @@ function isUpdateData(value: unknown): value is UpdateData {
 }
 
 function Updates({ language }: { language: Language }) {
+  const { text } = useLocale();
   const { data, error } = useAPI<any>("/api/v1/settings/updates");
   const t = (key: string) => translate(language, key);
   const [message, setMessage] = useState("");
@@ -1430,7 +1432,7 @@ function Updates({ language }: { language: Language }) {
   const checkedLabel = checkedAt && !Number.isNaN(checkedAt.getTime())
     ? new Intl.DateTimeFormat(language, { dateStyle: "medium", timeStyle: "short" }).format(checkedAt)
     : t("notAvailable");
-  const verifyLabel = release.verified && release.compatible ? "Verifiziert und kompatibel" : "Nicht zur Installation freigegeben";
+  const verifyLabel = release.verified && release.compatible ? text("Verifiziert und kompatibel", "Verified and compatible") : text("Nicht zur Installation freigegeben", "Not approved for installation");
   const checkNow = async () => {
     if (checking || checkingRef.current) return;
     checkingRef.current = true;
@@ -1456,13 +1458,13 @@ function Updates({ language }: { language: Language }) {
     }
   };
   const install = async () => {
-    if (!available || !confirm("Dieses verifizierte Release installieren? Aktive Runs müssen vorher beendet sein.")) return;
-    setInstalling(true); setMessage("Update wird geprüft und für die Wartung vorbereitet …");
+    if (!available || !confirm(text("Dieses verifizierte Release installieren? Aktive Runs müssen vorher beendet sein.", "Install this verified release? Active runs must be stopped first."))) return;
+    setInstalling(true); setMessage(text("Update wird geprüft und für die Wartung vorbereitet …", "The update is being checked and prepared for maintenance …"));
     try {
       const response = await mutation("/api/v1/settings/updates/install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }) });
       const result = await response.json();
       setProgress(result.progress || []);
-      setMessage(result.status === "succeeded" ? "Update erfolgreich abgeschlossen." : "Update abgeschlossen.");
+      setMessage(result.status === "succeeded" ? text("Update erfolgreich abgeschlossen.", "Update completed successfully.") : text("Update abgeschlossen.", "Update completed."));
     } catch (err) {
       setMessage(String(err));
     } finally { setInstalling(false); }
@@ -1492,23 +1494,23 @@ function Updates({ language }: { language: Language }) {
             {checkFailed ? (checkError?.message || reason || t("updatesCheckFailed")) : ""}
           </p>
           <div className="grid gap-4 sm:grid-cols-2">
-            <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesCurrentVersion")}</p><p className="mt-1 text-xl font-semibold">{String(result.current.version)}</p><p className="font-mono text-xs text-muted-foreground">{String(result.current.commit)}</p><p className="mt-3 text-sm">Build: {typeof result.current.builtAt === "string" ? result.current.builtAt : t("notAvailable")}</p></div>
-            <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesStatus")}</p><p className="mt-1 text-xl font-semibold">{displayStatus === "up_to_date" ? t("updatesUpToDate") : displayStatus === "update_available" ? t("updatesAvailable") : t("updatesFailed")}</p><p className="mt-3 text-sm text-muted-foreground">Quelle: {String(result.source.provider)} · {String(result.source.repository)}</p></div>
+            <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesCurrentVersion")}</p><p className="mt-1 text-xl font-semibold">{String(result.current.version)}</p><p className="font-mono text-xs text-muted-foreground">{String(result.current.commit)}</p><p className="mt-3 text-sm">{text("Build", "Build")}: {typeof result.current.builtAt === "string" ? result.current.builtAt : t("notAvailable")}</p></div>
+            <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesStatus")}</p><p className="mt-1 text-xl font-semibold">{displayStatus === "up_to_date" ? t("updatesUpToDate") : displayStatus === "update_available" ? t("updatesAvailable") : t("updatesFailed")}</p><p className="mt-3 text-sm text-muted-foreground">{text("Quelle", "Source")}: {String(result.source.provider)} · {String(result.source.repository)}</p></div>
           </div>
         </CardContent>
       </Card>
       <Card>
-        <CardHeader><CardTitle className="flex items-center gap-2"><ShieldAlert className="size-5" /> Nächstes Release</CardTitle><CardDescription>{verifyLabel}</CardDescription></CardHeader>
+        <CardHeader><CardTitle className="flex items-center gap-2"><ShieldAlert className="size-5" /> {text("Nächstes Release", "Next release")}</CardTitle><CardDescription>{verifyLabel}</CardDescription></CardHeader>
         <CardContent className="grid gap-3">
           {release.version || release.changelog ? <>
-            {release.version && <div className="grid gap-3 text-sm sm:grid-cols-2"><p><span className="text-muted-foreground">Version</span><br /><strong>{release.version}</strong></p><p><span className="text-muted-foreground">Commit</span><br /><code>{release.commit || "nicht angegeben"}</code></p><p><span className="text-muted-foreground">Veröffentlicht</span><br />{release.publishedAt || "nicht angegeben"}</p><p><span className="text-muted-foreground">Migration</span><br />{release.migrationRequired ? "Erforderlich" : "Nicht erforderlich"}</p></div>}
-            {release.changelogSource && <p className="text-sm text-muted-foreground">Quelle: {release.changelogSource}</p>}
-            <div className="flex items-center justify-between gap-3"><h3 className="text-base font-semibold">Changelog</h3><Button variant="ghost" size="sm" onClick={() => setShowSource((value) => !value)}>{showSource ? "Formatierte Ansicht" : "Quelltext anzeigen"}</Button></div>
-            {showSource ? <section aria-label="Changelog-Quelltext" className="max-h-[34rem] overflow-auto rounded-md bg-muted p-3 text-sm"><pre className="whitespace-pre-wrap break-words">{release.changelog || "Kein Changelog angegeben."}</pre></section> : <section aria-label="Changelog" className="max-h-[34rem] overflow-auto rounded-md bg-muted p-4 text-sm">{renderChangelog(release.changelog)}</section>}
-            <div className="flex flex-wrap items-center gap-2"><Button disabled={!available || installing} onClick={install}>{installing ? "Update wird vorbereitet …" : "Update installieren"}</Button>{releaseURL && <a className="text-sm underline" href={releaseURL} target="_blank" rel="noreferrer noopener">Auf GitHub ansehen</a>}</div>
-            {progress.length > 0 && <ol className="grid gap-2 rounded-md border p-3 text-sm" aria-label="Update-Fortschritt">{progress.map((step, index) => <li key={`${step.phase}-${index}`} className="flex items-center justify-between gap-3"><span>{step.phase}</span><span className="text-muted-foreground">{step.status === "succeeded" ? "Abgeschlossen" : step.status === "failed" ? "Fehlgeschlagen" : "Läuft"}</span></li>)}</ol>}
+            {release.version && <div className="grid gap-3 text-sm sm:grid-cols-2"><p><span className="text-muted-foreground">{text("Version", "Version")}</span><br /><strong>{release.version}</strong></p><p><span className="text-muted-foreground">Commit</span><br /><code>{release.commit || text("nicht angegeben", "not specified")}</code></p><p><span className="text-muted-foreground">{text("Veröffentlicht", "Published")}</span><br />{release.publishedAt || text("nicht angegeben", "not specified")}</p><p><span className="text-muted-foreground">{text("Migration", "Migration")}</span><br />{release.migrationRequired ? text("Erforderlich", "Required") : text("Nicht erforderlich", "Not required")}</p></div>}
+            {release.changelogSource && <p className="text-sm text-muted-foreground">{text("Quelle", "Source")}: {release.changelogSource}</p>}
+            <div className="flex items-center justify-between gap-3"><h3 className="text-base font-semibold">Changelog</h3><Button variant="ghost" size="sm" onClick={() => setShowSource((value) => !value)}>{showSource ? text("Formatierte Ansicht", "Formatted view") : text("Quelltext anzeigen", "Show source")}</Button></div>
+            {showSource ? <section aria-label={text("Changelog-Quelltext", "Changelog source")} className="max-h-[34rem] overflow-auto rounded-md bg-muted p-3 text-sm"><pre className="whitespace-pre-wrap break-words">{release.changelog || text("Kein Changelog angegeben.", "No changelog provided.")}</pre></section> : <section aria-label="Changelog" className="max-h-[34rem] overflow-auto rounded-md bg-muted p-4 text-sm">{renderChangelog(release.changelog)}</section>}
+            <div className="flex flex-wrap items-center gap-2"><Button disabled={!available || installing} onClick={install}>{installing ? text("Update wird vorbereitet …", "Preparing update …") : text("Update installieren", "Install update")}</Button>{releaseURL && <a className="text-sm underline" href={releaseURL} target="_blank" rel="noreferrer noopener">{text("Auf GitHub ansehen", "View on GitHub")}</a>}</div>
+            {progress.length > 0 && <ol className="grid gap-2 rounded-md border p-3 text-sm" aria-label={text("Update-Fortschritt", "Update progress")}>{progress.map((step, index) => <li key={`${step.phase}-${index}`} className="flex items-center justify-between gap-3"><span>{step.phase}</span><span className="text-muted-foreground">{step.status === "succeeded" ? text("Abgeschlossen", "Completed") : step.status === "failed" ? text("Fehlgeschlagen", "Failed") : text("Läuft", "Running")}</span></li>)}</ol>}
             {reason && <p className="text-sm text-muted-foreground">{reason}</p>}
-          </> : <p className="text-sm text-muted-foreground">Es wurde kein kompatibles Release gemeldet. Ein Installationsbutton ist deshalb nicht verfügbar.</p>}
+          </> : <p className="text-sm text-muted-foreground">{text("Es wurde kein kompatibles Release gemeldet. Ein Installationsbutton ist deshalb nicht verfügbar.", "No compatible release was reported, so an installation button is unavailable.")}</p>}
           {message && <p className="text-sm text-destructive" role="alert" aria-live="assertive">{message}</p>}
         </CardContent>
       </Card>
