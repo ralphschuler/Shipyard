@@ -1088,6 +1088,18 @@ func TestFormatTaskContextIncludesLifecycleAndComments(t *testing.T) {
 	}
 }
 
+func TestFormatTaskContextUsesEnglishSystemLabels(t *testing.T) {
+	context := formatTaskContext(domain.Task{}, domain.Board{}, []domain.Project{{Name: "API", RepositoryURL: "https://example.test/api", DefaultBranch: "main"}}, nil, nil, nil, []domain.TaskDecision{{FreeformAnswer: "custom answer"}}, time.Now())
+	if strings.Contains(context, "Projekt-ID") || strings.Contains(context, "Freitext") {
+		t.Fatalf("system labels must be English: %s", context)
+	}
+	for _, want := range []string{"Project ID:", "Free text:"} {
+		if !strings.Contains(context, want) {
+			t.Fatalf("context is missing English label %q: %s", want, context)
+		}
+	}
+}
+
 func TestRequestedInteractionsParsesButtons(t *testing.T) {
 	logs := []domain.RunLog{{Message: "```taskboard-interaction\n{\"key\":\"database\",\"title\":\"Datenbank\",\"fields\":[{\"id\":\"db\",\"label\":\"Wahl\",\"type\":\"buttons\",\"options\":[{\"value\":\"postgres\",\"label\":\"Postgres\"}]}]}\n```"}}
 	requests := requestedInteractions(logs)

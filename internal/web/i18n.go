@@ -213,5 +213,18 @@ func translate(lang, key, fallback string) string {
 	if value := translations[languageEnglish][key]; value != "" {
 		return value
 	}
+	if normalizeLanguage(lang) == languageEnglish && isGermanText(fallback) {
+		return "Translation unavailable"
+	}
 	return fallback
+}
+
+func isGermanText(value string) bool {
+	lower := strings.ToLower(value)
+	for _, marker := range []string{" bitte ", "deutscher", "rohtext", "einstellungen", "freitext", "projekt-id"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return strings.ContainsAny(value, "ÄÖÜäöüß")
 }
