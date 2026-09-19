@@ -181,9 +181,21 @@ if(dashboard){fetch('/dashboard/attention').then(response=>response.ok?response.
  section.innerHTML=`<header><div><p class="section-kicker">${trText('Jetzt handeln')}</p><h2>${trText('Braucht Aufmerksamkeit')}</h2></div><p>${trText('Nur offene Punkte, keine Historie.')}</p></header><div class="attention-grid">${items.map(([label,count,href])=>`<a href="${href}"><strong>${count}</strong><span>${trText(label)}</span></a>`).join('')}</div>`;
  const notifications=dashboard.querySelector('.notifications');(notifications||dashboard).before(section);
 }).catch(()=>{})}
+const providerAgentTemplate=document.querySelector('#provider-agent-context');
+const providerAgentPreference=(()=>{try{return localStorage.getItem('shipyard.provider-test-agent')||''}catch(_){return ''}})();
+document.querySelectorAll('.provider-card form[action^="/settings/providers/"]').forEach(form=>{
+ const template=providerAgentTemplate?.content?.cloneNode(true);
+ const label=template?.querySelector('label');
+ if(!label)return;
+ const select=label.querySelector('[data-provider-agent-select]');
+ if(!select)return;
+ select.value=providerAgentPreference;
+ select.addEventListener('change',()=>{try{localStorage.setItem('shipyard.provider-test-agent',select.value)}catch(_){}});
+ form.querySelector('.provider-form-grid')?.after(template);
+});
 // Provider tests are intentionally token-free checks. They verify the local
 // adapter or configured API secret before an agent can be assigned work.
-document.querySelectorAll('.provider-card form[action^="/settings/providers/"]').forEach(form=>{const path=form.action.replace(location.origin,'');if(!/^\/settings\/providers\/[^/]+$/.test(path))return;const button=document.createElement('button');button.type='button';button.className='secondary';button.textContent=trText('Verbindung testen');const result=document.createElement('small');result.className='provider-test-result';result.setAttribute('role','status');button.addEventListener('click',async()=>{button.disabled=true;result.className='provider-test-result';result.textContent=trText('Prüfe …');try{const response=await fetch(`${path}/test`,{method:'POST',headers:csrfHeaders()});const data=await response.json().catch(()=>null);if(!response.ok)throw new Error(data||'');result.classList.add('is-success');result.textContent=data?.result||trText('Provider ist erreichbar.')}catch(_){result.classList.add('is-error');result.textContent=trText('Provider-Test fehlgeschlagen. Prüfe Adapter, Secret und Server-Log.')}finally{button.disabled=false}});form.querySelector('footer')?.prepend(button);form.querySelector('footer')?.before(result)});
+document.querySelectorAll('.provider-card form[action^="/settings/providers/"]').forEach(form=>{const path=form.action.replace(location.origin,'');if(!/^\/settings\/providers\/[^/]+$/.test(path))return;const button=document.createElement('button');button.type='button';button.className='secondary';button.textContent=trText('Verbindung testen');const result=document.createElement('small');result.className='provider-test-result';result.setAttribute('role','status');button.addEventListener('click',async()=>{const agent=form.querySelector('[data-provider-agent-select]')?.value||'';if(!agent){result.className='provider-test-result is-error';result.textContent=trText('Bitte zuerst einen Agenten für den Verbindungstest auswählen.');return}button.disabled=true;result.className='provider-test-result';result.textContent=trText('Prüfe …');try{const query=new URLSearchParams({agent_id:agent});const response=await fetch(`${path}/test?${query}`,{method:'POST',headers:csrfHeaders()});const data=await response.json().catch(()=>null);if(!response.ok)throw new Error(data||'');result.classList.add('is-success');result.textContent=data?.result||trText('Provider ist erreichbar.')}catch(_){result.classList.add('is-error');result.textContent=trText('Provider-Test fehlgeschlagen. Prüfe Adapter, Secret und Server-Log.')}finally{button.disabled=false}});form.querySelector('footer')?.prepend(button);form.querySelector('footer')?.before(result)});
 // A run log is the terminal view; the compact trace above it explains why the
 // run exists and which delivery decision remains without duplicating logs.
 const traceLog=document.querySelector('[data-run-log-src]');

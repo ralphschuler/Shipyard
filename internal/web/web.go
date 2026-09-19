@@ -1258,7 +1258,12 @@ func (a *App) providerSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	a.render(r, w, "providers.html", map[string]any{"Providers": p})
+	agents, e := a.store.Agents(r.Context())
+	if e != nil {
+		http.Error(w, "agents unavailable", http.StatusInternalServerError)
+		return
+	}
+	a.render(r, w, "providers.html", map[string]any{"Providers": p, "Agents": agents})
 }
 
 func canManageSecrets(u domain.User) bool { return u.Role == "owner" || u.Role == "admin" }
