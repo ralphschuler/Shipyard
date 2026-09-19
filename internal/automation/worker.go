@@ -3011,7 +3011,37 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		_ = w.finish(ctx, run, "failed")
 		return
 	}
-	if strings.TrimSpace(agent.Model) == "" || strings.TrimSpace(agent.ReasoningEffort) == "" {
+	selectedModel, selectedEffort := strings.TrimSpace(agent.Model), strings.TrimSpace(agent.ReasoningEffort)
+	selectionStage, selectionPolicy, selectionFallback, selectionBudget := "0", "agent-selection", "none", "not-evaluated"
+	if taskErr == nil && task.ReworkCount > 0 {
+		policy, policyErr := ReworkPolicyFromJSON(agent.EscalationPolicy)
+		if policyErr != nil {
+			reason := "Agent pausiert: " + policyErr.Error()
+			w.persistIncompleteUsage(ctx, run, provider.Provider, "", "invalid_rework_policy")
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
+			_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		decision := policy.Select(task.ReworkCount, -1)
+		if decision.Status != "selected" {
+			reason := fmt.Sprintf("Agent pausiert: Rework-Stufe %d nicht ausführbar (%s)", task.ReworkCount, decision.Reason)
+			w.persistIncompleteUsage(ctx, run, provider.Provider, "", "rework_selection_failed")
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
+			_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		selectedModel, selectedEffort = decision.Model, decision.Effort
+		selectionStage = strconv.Itoa(decision.ReworkNumber)
+		selectionPolicy = decision.PolicyVersion
+		selectionFallback = decision.Fallback
+		if selectionFallback == "" {
+			selectionFallback = "none"
+		}
+		selectionBudget = decision.Status
+	}
+	if selectedModel == "" || selectedEffort == "" {
 		reason := "Agent pausiert: Modell und Reasoning-Effort müssen über Discovery ausgewählt werden"
 		w.persistIncompleteUsage(ctx, run, provider.Provider, "", "agent_selection_required")
 		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
@@ -3019,8 +3049,10 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		_ = w.finish(ctx, run, "failed")
 		return
 	}
-	provider.Model = agent.Model
-	_ = w.Store.AddRunLog(ctx, run.ID, "info", fmt.Sprintf("Agent-Auswahl: Modell=%s Effort=%s Eskalationsstufe=0 Policy=%s Discovery=agent-selection Fallback=none Budget=not-evaluated", agent.Model, agent.ReasoningEffort, policyVersion(agent)))
+	provider.Model = selectedModel
+	provider.Options = providerOptionsWithEffort(provider.Options, selectedEffort)
+	_ = w.Store.SetRunSelection(ctx, run.ID, selectedModel, selectedEffort, selectionStage, selectionPolicy, "agent-selection", selectionFallback, selectionBudget)
+	_ = w.Store.AddRunLog(ctx, run.ID, "info", fmt.Sprintf("Agent-Auswahl: Modell=%s Effort=%s Eskalationsstufe=%s Policy=%s Discovery=agent-selection Fallback=%s Budget=%s", selectedModel, selectedEffort, selectionStage, selectionPolicy, selectionFallback, selectionBudget))
 	runSandbox, sandboxErr := w.Store.RunSandboxPolicy(ctx, run.ID)
 	if sandboxErr != nil {
 		reason := "Sandbox-Profil des Runs ist ungültig oder nicht verfügbar"
@@ -3071,7 +3103,9 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			_ = w.finish(ctx, run, "failed")
 			return
 		}
-		command, args, stdin, commandErr := cliInvocationForAgent(provider, agent, prompt)
+		runAgent := agent
+		runAgent.Model, runAgent.ReasoningEffort = selectedModel, selectedEffort
+		command, args, stdin, commandErr := cliInvocationForAgent(provider, runAgent, prompt)
 		if commandErr != nil {
 			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "adapter_configuration_error")
 			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", commandErr.Error())
@@ -3431,6 +3465,19 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		}
 	}
 	_ = w.finish(ctx, run, "succeeded")
+}
+
+func providerOptionsWithEffort(raw, effort string) string {
+	values := map[string]any{}
+	if json.Unmarshal([]byte(raw), &values) != nil {
+		values = map[string]any{}
+	}
+	values["reasoning_effort"] = effort
+	encoded, err := json.Marshal(values)
+	if err != nil {
+		return raw
+	}
+	return string(encoded)
 }
 
 func policyVersion(agent domain.Agent) string {

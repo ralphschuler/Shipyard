@@ -1,6 +1,9 @@
 package automation
 
-import "fmt"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // ModelEffort is the provider-neutral choice passed to an agent run.
 type ModelEffort struct {
@@ -27,6 +30,65 @@ type ReworkDecision struct {
 	ReworkNumber                            int
 	PolicyVersion                           string
 	EstimatedCostMicrousd                   int64
+}
+
+// ReworkPolicyFromJSON validates the operator-editable policy format. Missing
+// capabilities are inferred from the stages, keeping the editor concise while
+// still making unsupported model/effort combinations explicit at run time.
+func ReworkPolicyFromJSON(raw string) (ReworkPolicy, error) {
+	policy := DefaultReworkPolicy()
+	if raw == "" || raw == "{}" {
+		return policy, nil
+	}
+	var input struct {
+		Version              string              `json:"version"`
+		Stages               []ReworkStage       `json:"stages"`
+		Capabilities         map[string][]string `json:"capabilities"`
+		HumanEscalationAfter int                 `json:"human_escalation_after"`
+	}
+	if err := json.Unmarshal([]byte(raw), &input); err != nil {
+		return ReworkPolicy{}, fmt.Errorf("Eskalationspolicy muss gültiges JSON sein: %w", err)
+	}
+	if len(input.Stages) == 0 {
+		return ReworkPolicy{}, fmt.Errorf("Eskalationspolicy benötigt mindestens eine Modell-/Effort-Stufe")
+	}
+	policy.Version = input.Version
+	if policy.Version == "" {
+		policy.Version = "custom-v1"
+	}
+	policy.Stages = input.Stages
+	policy.Capabilities = input.Capabilities
+	if policy.Capabilities == nil {
+		policy.Capabilities = map[string][]string{}
+	}
+	providedCapabilities := len(input.Capabilities) > 0
+	for _, stage := range policy.Stages {
+		if stage.Model == "" || !validEffort(stage.Effort) {
+			return ReworkPolicy{}, fmt.Errorf("ungültige Modell-/Effort-Stufe %q/%q", stage.Model, stage.Effort)
+		}
+		if !providedCapabilities {
+			if !contains(policy.Capabilities[stage.Model], stage.Effort) {
+				policy.Capabilities[stage.Model] = append(policy.Capabilities[stage.Model], stage.Effort)
+			}
+		} else if len(policy.Capabilities[stage.Model]) == 0 {
+			policy.Capabilities[stage.Model] = append(policy.Capabilities[stage.Model], stage.Effort)
+		} else if !contains(policy.Capabilities[stage.Model], stage.Effort) {
+			return ReworkPolicy{}, fmt.Errorf("Modell %q unterstützt Effort %q laut Policy nicht", stage.Model, stage.Effort)
+		}
+	}
+	if input.HumanEscalationAfter > 0 {
+		policy.HumanEscalationAfter = input.HumanEscalationAfter
+	}
+	return policy, nil
+}
+
+func validEffort(value string) bool {
+	switch value {
+	case "low", "medium", "high", "xhigh":
+		return true
+	default:
+		return false
+	}
 }
 
 func DefaultReworkPolicy() ReworkPolicy {
@@ -80,7 +142,9 @@ func (p ReworkPolicy) Select(reworkNumber int, budgetMicrousd int64) ReworkDecis
 	}
 	choice := d.Model + "/" + d.Effort
 	d.EstimatedCostMicrousd = p.EstimatedCostMicrousd[choice]
-	if budgetMicrousd <= 0 || (d.EstimatedCostMicrousd > 0 && d.EstimatedCostMicrousd > budgetMicrousd) {
+	// A negative budget is the worker's explicit "no limit configured" value;
+	// zero remains a real budget decision for callers that want a hard stop.
+	if budgetMicrousd == 0 || (budgetMicrousd > 0 && d.EstimatedCostMicrousd > 0 && d.EstimatedCostMicrousd > budgetMicrousd) {
 		d.Status, d.Reason = "budget", "budget limit would be exceeded"
 	}
 	return d
