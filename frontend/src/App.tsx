@@ -41,7 +41,7 @@ import { Input } from "@/components/ui/input";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ChatBubble } from "@/components/ui/chat-bubble";
 import { MarkdownContent } from "@/components/markdown-content";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { normalizeLanguage, translate, type Language } from "@/i18n";
 import { renderMarkdown, safeMarkdownURL } from "@/markdown";
 
@@ -82,7 +82,13 @@ const nav: NavItem[] = [
   { name: "settings", path: "/settings/providers", icon: Gauge },
 ];
 function routeFromHash() {
-  return location.hash.slice(1) || "/";
+  return location.hash.slice(1).split("?")[0] || "/";
+}
+
+function taskTabFromHash(): "conversation" | "changes" {
+  return new URLSearchParams(location.hash.split("?")[1] || "").get("tab") === "changes"
+    ? "changes"
+    : "conversation";
 }
 function titleFor(route: string, t: (key: string) => string) {
   const known = nav.find((item) => item.path === route)?.name;
@@ -3423,6 +3429,7 @@ function ChangesTab({ changes, onMessage }: { changes: any[]; onMessage: (messag
 
 function TaskDetail({ id }: { id: string }) {
   const { data, error } = useAPI<any>("/api/v1/tasks/" + id);
+  const [activeTab, setActiveTab] = useState<"conversation" | "changes">(taskTabFromHash);
   const [comment, setComment] = useState("");
   const [showOlderComments, setShowOlderComments] = useState(false);
   const commentScrollAnchor = useRef<{ index: number; top: number } | null>(null);
@@ -3442,6 +3449,15 @@ function TaskDetail({ id }: { id: string }) {
   const [handoff, setHandoff] = useState(false);
   const [decision, setDecision] = useState(false);
   const [message, setMessage] = useState("");
+  useEffect(() => {
+    const updateTab = () => setActiveTab(taskTabFromHash());
+    addEventListener("hashchange", updateTab);
+    addEventListener("popstate", updateTab);
+    return () => {
+      removeEventListener("hashchange", updateTab);
+      removeEventListener("popstate", updateTab);
+    };
+  }, []);
   const refresh = () => refreshData();
   if (error) return <Failure />;
   if (!data) return <Loading />;
@@ -3506,8 +3522,22 @@ function TaskDetail({ id }: { id: string }) {
   };
   return (
     <>
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
+      <div className={activeTab === "conversation" ? "grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]" : "grid gap-6"}>
         <section className="min-w-0">
+          <Tabs
+            value={activeTab}
+            onValueChange={(value) => {
+              const nextTab = value as "conversation" | "changes";
+              setActiveTab(nextTab);
+              history.pushState(null, "", `#${routeFromHash()}?tab=${nextTab}`);
+            }}
+            className="mb-6"
+          >
+            <TabsList variant="line" aria-label="Task-Ansichten">
+              <TabsTrigger value="conversation">Conversation</TabsTrigger>
+              <TabsTrigger value="changes">Changes</TabsTrigger>
+            </TabsList>
+          </Tabs>
           <div className="flex justify-between gap-3">
             <a
               className="text-sm text-muted-foreground hover:text-foreground"
@@ -3524,12 +3554,7 @@ function TaskDetail({ id }: { id: string }) {
           {message && (
             <p className="mt-3 text-sm text-destructive">{message}</p>
           )}
-          <Tabs defaultValue="conversation" className="mt-6">
-            <TabsList variant="line" aria-label="Task-Ansichten">
-              <TabsTrigger value="conversation">Conversation</TabsTrigger>
-              <TabsTrigger value="changes">Changes</TabsTrigger>
-            </TabsList>
-            <TabsContent value="conversation">
+          <div className={activeTab === "conversation" ? "block" : "hidden"}>
           <Card>
             <CardHeader>
               <CardTitle>Kommentare & Entscheidungen</CardTitle>
@@ -3692,11 +3717,11 @@ function TaskDetail({ id }: { id: string }) {
               </form>
             </CardContent>
           </Card>
-            </TabsContent>
-            <TabsContent value="changes">
+          </div>
+          <div className={activeTab === "changes" ? "block" : "hidden"}>
               <ChangesTab changes={data.Changes || []} onMessage={setMessage} />
-            </TabsContent>
-          </Tabs>
+          </div>
+          <div className={activeTab === "conversation" ? "block" : "hidden"}>
           <Card className="mt-4">
             <CardHeader>
               <CardTitle>Verlauf</CardTitle>
@@ -3711,8 +3736,9 @@ function TaskDetail({ id }: { id: string }) {
               )) : <p className="py-4 text-sm text-muted-foreground">Noch keine Workflow-Wechsel.</p>}
             </CardContent>
           </Card>
+          </div>
         </section>
-        <aside className="space-y-4">
+        {activeTab === "conversation" && <aside className="space-y-4">
           <Card>
             <CardHeader>
               <CardTitle>Nächster Schritt</CardTitle>
@@ -3810,7 +3836,7 @@ function TaskDetail({ id }: { id: string }) {
               ))}
             </CardContent>
           </Card>
-        </aside>
+        </aside>}
       </div>
       <Dialog open={edit} onOpenChange={setEdit}>
         <DialogContent>
