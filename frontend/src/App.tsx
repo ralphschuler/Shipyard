@@ -1073,17 +1073,23 @@ function AgentDetail({ id }: { id: string }) {
   const { text } = useLocale();
   const { data, error } = useAPI<any>("/api/v1/agents/" + id);
   const { data: skills } = useAPI<any[]>("/api/v1/skills");
+  const { data: capabilities } = useAPI<any[]>("/api/v1/settings/capabilities");
   const [form, setForm] = useState<any>();
   const [selected, setSelected] = useState<string[]>([]);
   const [message, setMessage] = useState("");
+  const [policy, setPolicy] = useState("{}");
   useEffect(() => {
     if (data?.agent) {
       setForm(data.agent);
+      setPolicy(data.agent.EscalationPolicy || "{}");
       setSelected((data.skills || []).map((skill: any) => skill.ID));
     }
   }, [data]);
   if (error) return <Failure />;
-  if (!form || !skills) return <Loading />;
+  if (!form || !skills || !capabilities) return <Loading />;
+  const capability = capabilities.find((item: any) => item.provider === (form.Adapter || "codex"));
+  const models = capability?.models || [];
+  const efforts = capability?.efforts || [];
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
     const body = new FormData();
@@ -1094,6 +1100,9 @@ function AgentDetail({ id }: { id: string }) {
     body.set("prompt_suffix", form.PromptSuffix || "");
     body.set("max_parallel_runs", String(form.MaxParallelRuns || 1));
     body.set("enabled", String(form.Enabled));
+    body.set("model", form.Model || "");
+    body.set("reasoning_effort", form.ReasoningEffort || "");
+    body.set("escalation_policy", policy);
     try {
       await mutation("/agents/" + id, { method: "POST", body });
       const assigned = new FormData();
@@ -1160,6 +1169,25 @@ function AgentDetail({ id }: { id: string }) {
               onChange={(e) => setForm({ ...form, PromptPrefix: e.target.value })}
               placeholder={text("Wird vor der Arbeitsanweisung und dem Task-Kontext gesetzt.", "Placed before the instructions and task context.")}
             />
+          </label>
+          <label className="grid gap-2 text-sm">{text("Modell", "Model")}
+            <select required className="h-9 rounded-md border bg-background px-2" value={form.Model || ""} onChange={(e) => setForm({ ...form, Model: e.target.value })}>
+              <option value="">{text("Modell aus Discovery wählen", "Choose a discovered model")}</option>
+              {form.Model && !models.includes(form.Model) && <option value={form.Model}>{form.Model} (gespeichert)</option>}
+              {models.map((model: string) => <option key={model} value={model}>{model}</option>)}
+            </select>
+            {capability?.error && <span className="text-xs text-destructive">{capability.error} — Provider prüfen oder Discovery erneut ausführen.</span>}
+            {!models.length && !capability?.error && <span className="text-xs text-destructive">Keine Modelle entdeckt. Provider konfigurieren, bevor der Agent gestartet wird.</span>}
+          </label>
+          <label className="grid gap-2 text-sm">{text("Reasoning-Effort", "Reasoning effort")}
+            <select required className="h-9 rounded-md border bg-background px-2" value={form.ReasoningEffort || ""} onChange={(e) => setForm({ ...form, ReasoningEffort: e.target.value })}>
+              <option value="">{text("Effort wählen", "Choose effort")}</option>
+              {efforts.map((effort: string) => <option key={effort} value={effort}>{effort}</option>)}
+            </select>
+          </label>
+          <label className="grid gap-2 text-sm">{text("Eskalationspolicy", "Escalation policy")}
+            <textarea required className="min-h-28 rounded-lg border bg-transparent p-2 font-mono text-xs" value={policy} onChange={(e) => setPolicy(e.target.value)} placeholder='{"stages":[{"model":"…","effort":"high"}]}' />
+            <span className="text-xs text-muted-foreground">Stufen in Reihenfolge: nach jedem Review-Rework wird die nächste Modell-/Effort-Stufe gewählt.</span>
           </label>
           <label className="grid gap-2 text-sm">
             {text("Prompt-Suffix", "Prompt suffix")}
@@ -1232,6 +1260,7 @@ function AgentDetail({ id }: { id: string }) {
 function AgentForm() {
   const { text } = useLocale();
   const { data: skills } = useAPI<any[]>("/api/v1/skills");
+  const { data: capabilities } = useAPI<any[]>("/api/v1/settings/capabilities");
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
   const [description, setDescription] = useState("");
@@ -1239,7 +1268,14 @@ function AgentForm() {
   const [suffix, setSuffix] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [message, setMessage] = useState("");
-  if (!skills) return <Loading />;
+  const [model, setModel] = useState("");
+  const [effort, setEffort] = useState("");
+  // An empty object deliberately selects Shipyard's tested default escalation
+  // sequence. A stages:[] value would look configured while being invalid as
+  // soon as the task is returned from review.
+  const [policy, setPolicy] = useState("{}");
+  if (!skills || !capabilities) return <Loading />;
+  const capability = capabilities.find((item: any) => item.provider === "codex");
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const form = new FormData();
@@ -1249,6 +1285,9 @@ function AgentForm() {
     form.set("prompt", prompt);
     form.set("prompt_suffix", suffix);
     form.set("max_parallel_runs", "1");
+    form.set("model", model);
+    form.set("reasoning_effort", effort);
+    form.set("escalation_policy", policy);
     selected.forEach((skill) => form.append("skill_ids", skill));
     try {
       await mutation("/agents", { method: "POST", body: form });
@@ -1300,6 +1339,24 @@ function AgentForm() {
               onChange={(e) => setPrefix(e.target.value)}
               placeholder={text("Fester Kontext vor der Arbeitsanweisung", "Fixed context before the instructions")}
             />
+          </label>
+          <label className="grid gap-2 text-sm">{text("Modell", "Model")}
+            <select required className="h-9 rounded-md border bg-background px-2" value={model} onChange={(e) => setModel(e.target.value)}>
+              <option value="">{text("Modell aus Discovery wählen", "Choose a discovered model")}</option>
+              {(capability?.models || []).map((value: string) => <option key={value} value={value}>{value}</option>)}
+            </select>
+            {capability?.error && <span className="text-xs text-destructive">{capability.error} — Provider prüfen oder Discovery erneut ausführen.</span>}
+            {!capability?.models?.length && !capability?.error && <span className="text-xs text-destructive">Keine Modelle entdeckt. Provider konfigurieren, bevor der Agent erstellt wird.</span>}
+          </label>
+          <label className="grid gap-2 text-sm">{text("Reasoning-Effort", "Reasoning effort")}
+            <select required className="h-9 rounded-md border bg-background px-2" value={effort} onChange={(e) => setEffort(e.target.value)}>
+              <option value="">{text("Effort wählen", "Choose effort")}</option>
+              {(capability?.efforts || []).map((value: string) => <option key={value} value={value}>{value}</option>)}
+            </select>
+          </label>
+          <label className="grid gap-2 text-sm">{text("Eskalationspolicy", "Escalation policy")}
+            <textarea required className="min-h-28 rounded-lg border bg-transparent p-2 font-mono text-xs" value={policy} onChange={(e) => setPolicy(e.target.value)} placeholder='{"stages":[{"model":"…","effort":"high"}]}' />
+            <span className="text-xs text-muted-foreground">Stufenreihenfolge für Review-Rework.</span>
           </label>
           <label className="grid gap-2 text-sm">
             {text("Prompt-Suffix", "Prompt suffix")}
@@ -1548,7 +1605,6 @@ function Providers() {
     (name) =>
       data.find((provider) => provider.Provider === name) || {
         Provider: name,
-        Model: "",
         Command: name === "codex" ? "codex" : "",
         SecretEnv: "",
         BaseURL: "",
@@ -1558,7 +1614,6 @@ function Providers() {
   );
   const save = async (provider: any) => {
     const form = new FormData();
-    form.set("model", provider.Model);
     form.set("command", provider.Command);
     form.set("secret_env", provider.SecretEnv);
     form.set("base_url", provider.BaseURL);
@@ -1607,19 +1662,9 @@ function Providers() {
           const provider = { ...source, ...drafts[source.Provider] };
           return <details key={provider.Provider} className="rounded-lg border p-4">
             <summary className="cursor-pointer font-medium capitalize">
-              {provider.Provider}{" "}
-              <span className="ml-2 text-xs text-muted-foreground">
-                {provider.Model || "nicht konfiguriert"}
-              </span>
+              {provider.Provider}
             </summary>
             <div className="mt-4 grid gap-3">
-              <label className="grid gap-1 text-sm">
-                Modell
-                <Input
-                  value={provider.Model || ""}
-                  onChange={(e) => update(provider, "Model", e.target.value)}
-                />
-              </label>
               <label className="grid gap-1 text-sm">
                 Kommando / Adapter
                 <Input

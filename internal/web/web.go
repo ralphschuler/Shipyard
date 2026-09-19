@@ -620,6 +620,7 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("DELETE /api/v1/memory", a.deleteMemoryAPI)
 	m.HandleFunc("POST /api/v1/memory/retention", a.retainMemoryAPI)
 	m.HandleFunc("GET /api/v1/settings/providers", a.providersAPI)
+	m.HandleFunc("GET /api/v1/settings/capabilities", a.capabilitiesAPI)
 	m.HandleFunc("GET /api/v1/settings/secrets", a.secretsAPI)
 	m.HandleFunc("POST /api/v1/settings/secrets", a.createSecretAPI)
 	m.HandleFunc("GET /api/v1/settings/agent-policy", a.agentPolicyAPI)
@@ -2129,8 +2130,33 @@ func (a *App) auditAPI(w http.ResponseWriter, r *http.Request) {
 	writeAPI(w, map[string]any{"items": value, "next": next}, nil)
 }
 func (a *App) providersAPI(w http.ResponseWriter, r *http.Request) {
-	value, err := a.store.Providers(r.Context())
+	providers, err := a.store.Providers(r.Context())
+	value := make([]map[string]any, 0, len(providers))
+	for _, provider := range providers {
+		value = append(value, map[string]any{
+			"ID": provider.ID, "Provider": provider.Provider, "Enabled": provider.Enabled,
+			"Command": provider.Command, "SecretEnv": provider.SecretEnv, "BaseURL": provider.BaseURL,
+			"Options": provider.Options, "DiscoverySource": provider.DiscoverySource,
+			"DiscoveryError": provider.DiscoveryError, "DiscoveryAt": provider.DiscoveryAt, "UpdatedAt": provider.UpdatedAt,
+		})
+	}
 	writeAPI(w, value, err)
+}
+func (a *App) capabilitiesAPI(w http.ResponseWriter, r *http.Request) {
+	providers, err := a.store.Providers(r.Context())
+	if err != nil {
+		writeAPI(w, nil, err)
+		return
+	}
+	result := make([]map[string]any, 0, len(providers))
+	for _, provider := range providers {
+		capabilities := automation.CapabilityDiscovery{Efforts: []string{"low", "medium", "high", "xhigh"}, Source: "standard effort catalog"}
+		if provider.Provider == "codex" {
+			capabilities = automation.DiscoverCodex(r.Context(), provider.Command)
+		}
+		result = append(result, map[string]any{"provider": provider.Provider, "models": capabilities.Models, "efforts": capabilities.Efforts, "source": capabilities.Source, "error": capabilities.Error})
+	}
+	writeAPI(w, result, nil)
 }
 func (a *App) agentPolicyAPI(w http.ResponseWriter, r *http.Request) {
 	prefix, suffix, err := a.store.AgentPromptPolicy(r.Context())

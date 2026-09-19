@@ -3895,6 +3895,11 @@ func (s *Store) AddRunLog(c context.Context, id, level, message string) error {
 	return e
 }
 
+func (s *Store) SetRunSelection(c context.Context, id, model, effort, stage, policyVersion, discoverySource, fallback, budgetDecision string) error {
+	_, err := s.DB.Exec(c, `UPDATE agent_runs SET effective_model=$2,effective_effort=$3,escalation_stage=$4,policy_version=$5,discovery_source=$6,fallback=$7,budget_decision=$8 WHERE id=$1`, id, model, effort, stage, policyVersion, discoverySource, fallback, budgetDecision)
+	return err
+}
+
 // AcquirePublication holds a PostgreSQL transaction-scoped advisory lock for
 // one deterministic release identity. It is intentionally exposed as a
 // structural adapter for internal/release, so separate worker processes share
