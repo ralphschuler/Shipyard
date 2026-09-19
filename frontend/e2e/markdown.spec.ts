@@ -81,7 +81,7 @@ const boardFixture = {
 
 async function mockTaskBackend(page: Page) {
   await page.route("**/events", (route) => route.abort());
-  await page.route("**/api/**", async (route) => {
+  await page.route("**/api/v1/**", async (route) => {
     const url = new URL(route.request().url());
     const fixture = url.pathname.endsWith("/settings/appearance")
       ? { Theme: "light", Language: "de" }
