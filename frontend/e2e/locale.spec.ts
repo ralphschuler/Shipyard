@@ -34,5 +34,7 @@ test.describe("locale persistence and first render", () => {
     await page.route("**/events", (route) => route.abort());
     await page.goto("/app/#/projects");
     await expect(page.getByRole("navigation", { name: /navigation/i })).toBeVisible({ timeout: 5000 });
+    await expect(page.locator("html")).toHaveAttribute("lang", "de");
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("shipyard-language"))).toBe("de");
   });
 });

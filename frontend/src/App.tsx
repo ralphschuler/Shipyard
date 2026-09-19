@@ -239,10 +239,7 @@ export default function App() {
   }, [appearance?.Theme]);
   useLayoutEffect(() => {
     applyLegacyReactLanguage(language);
-    const observer = new MutationObserver(() => applyLegacyReactLanguage(language));
-    observer.observe(document.body, { childList: true, subtree: true });
-    return () => observer.disconnect();
-  }, [language]);
+  }, [language, route]);
   useEffect(() => {
     const stream = new EventSource("/events");
     // Never remount the application for a database notification. Components

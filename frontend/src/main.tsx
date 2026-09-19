@@ -11,6 +11,7 @@ async function bootstrap() {
   if (storedLanguage === null) {
     const controller = new AbortController()
     const timeout = window.setTimeout(() => controller.abort(), appearanceBootstrapTimeoutMs)
+    let languageResolved = false
     try {
       const response = await fetch('/api/v1/settings/appearance', {
         credentials: 'same-origin',
@@ -21,12 +22,19 @@ async function bootstrap() {
         const language = normalizeLanguage(appearance.Language)
         localStorage.setItem('shipyard-language', language)
         document.documentElement.lang = language
+        languageResolved = true
       }
     } catch {
       // The appearance endpoint is optional during bootstrap. Mount promptly
       // when it is unavailable; App-level loading handles the eventual error.
     } finally {
       window.clearTimeout(timeout)
+    }
+    if (!languageResolved) {
+      // Persist the deterministic fallback so App can mount immediately even
+      // when no account preference was available during bootstrap.
+      localStorage.setItem('shipyard-language', 'de')
+      document.documentElement.lang = 'de'
     }
   }
 
