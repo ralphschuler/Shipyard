@@ -1141,6 +1141,23 @@ func TestRequestedSelfReviewAcceptsMachineResultWithDetails(t *testing.T) {
 	}
 }
 
+func TestRequestedSelfReviewAcceptsEnglishCategoriesAndNewestValidBlock(t *testing.T) {
+	invalid := `{"status":"failed","checklist":[],"tests":"x","open_risks":"x"}`
+	valid := `{"status":"passed","checklist":[{"check":"Scope/Acceptance","result":"passed"},{"check":"Diff/Secrets","result":"passed"},{"check":"Tests/Failures","result":"passed"},{"check":"Security/Operational risks","result":"passed"},{"check":"Backward compatibility","result":"passed"}],"tests":"go test ./...","open_risks":"none"}`
+	message := "```taskboard-self-review\n" + invalid + "\n```\n```taskboard-self-review\n" + valid + "\n```"
+	if review, err := requestedSelfReview([]domain.RunLog{{Message: message}}); err != nil || review.Status != "passed" {
+		t.Fatalf("newest valid English self-review rejected: %#v, %v", review, err)
+	}
+}
+
+func TestSelfReviewLogsFallsBackToAssistantResponseOnly(t *testing.T) {
+	valid := "```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"Scope/Acceptance\",\"result\":\"passed\"},{\"check\":\"Diff/Secrets\",\"result\":\"passed\"},{\"check\":\"Tests/Failures\",\"result\":\"passed\"},{\"check\":\"Security/Operational risks\",\"result\":\"passed\"},{\"check\":\"Backward compatibility\",\"result\":\"passed\"}],\"tests\":\"go test\",\"open_risks\":\"none\"}\n```"
+	logs := []domain.RunLog{{Message: "exec\n" + valid}, {Message: "codex\n" + valid}}
+	if _, err := requestedSelfReview(selfReviewLogs("Delivery Agent", logs, "```taskboard-comment\nDone\n```")); err != nil {
+		t.Fatalf("assistant response fallback rejected: %v", err)
+	}
+}
+
 func TestRequestedSelfReviewReportsInvalidResultInsteadOfMissingCategory(t *testing.T) {
 	raw := `{"status":"passed","checklist":[{"check":"Scope/Akzeptanz","result":"Release-Agent-Adapter mit Validierung umgesetzt."},{"check":"Diff/Secrets","result":"passed"},{"check":"Tests/Fehler","result":"passed"},{"check":"Sicherheits-/Betriebsrisiken","result":"passed"},{"check":"Rückwärtskompatibilität","result":"passed"}],"tests":"go test ./...","open_risks":"none"}`
 	_, err := requestedSelfReview([]domain.RunLog{{Message: "```taskboard-self-review\n" + raw + "\n```"}})

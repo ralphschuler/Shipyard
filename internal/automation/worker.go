@@ -166,15 +166,36 @@ var selfReviewResultValues = []string{"ok", "passed", "pass", "bestanden", "erf�
 
 func requestedSelfReview(logs []domain.RunLog) (taskboardSelfReview, error) {
 	matches := selfReviewFence.FindAllStringSubmatch(joinRunLogs(logs), -1)
-	if len(matches) != 1 {
-		return taskboardSelfReview{}, errors.New("genau ein taskboard-self-review-Block ist erforderlich")
+	if len(matches) == 0 {
+		return taskboardSelfReview{}, errors.New("kein taskboard-self-review-Block gefunden")
 	}
-	var review taskboardSelfReview
-	if err := json.Unmarshal([]byte(matches[0][1]), &review); err != nil {
-		return taskboardSelfReview{}, errors.New("taskboard-self-review ist kein gültiges JSON")
+	// Codex can emit a progress response followed by a separate final handoff.
+	// The final handoff is what --output-last-message retains, so tolerate
+	// multiple assistant-authored review blocks and use the newest complete,
+	// passing review. A malformed earlier draft must not discard a later valid
+	// review, while a run with no valid review remains gated.
+	var lastErr error
+	for index := len(matches) - 1; index >= 0; index-- {
+		var review taskboardSelfReview
+		if err := json.Unmarshal([]byte(matches[index][1]), &review); err != nil {
+			lastErr = errors.New("taskboard-self-review ist kein gültiges JSON")
+			continue
+		}
+		if err := validateRequestedSelfReview(review); err != nil {
+			lastErr = err
+			continue
+		}
+		return review, nil
 	}
+	if lastErr != nil {
+		return taskboardSelfReview{}, lastErr
+	}
+	return taskboardSelfReview{}, errors.New("kein gültiger taskboard-self-review-Block gefunden")
+}
+
+func validateRequestedSelfReview(review taskboardSelfReview) error {
 	if strings.ToLower(strings.TrimSpace(review.Status)) != "passed" {
-		return review, errors.New("taskboard-self-review muss status=passed enthalten")
+		return errors.New("taskboard-self-review muss status=passed enthalten")
 	}
 	requiredChecks := map[string]bool{
 		"scope/akzeptanz":              false,
@@ -184,34 +205,50 @@ func requestedSelfReview(logs []domain.RunLog) (taskboardSelfReview, error) {
 		"rückwärtskompatibilität":      false,
 	}
 	if len(review.Checklist) != len(requiredChecks) {
-		return review, errors.New("taskboard-self-review benötigt genau die fünf Pflicht-Checklistenpunkte")
+		return errors.New("taskboard-self-review benötigt genau die fünf Pflicht-Checklistenpunkte")
 	}
 	for _, item := range review.Checklist {
-		check := strings.ToLower(strings.TrimSpace(item.Check))
+		check := canonicalSelfReviewCheck(item.Check)
 		if strings.TrimSpace(item.Check) == "" || strings.TrimSpace(item.Result) == "" {
-			return review, errors.New("taskboard-self-review enthält einen unvollständigen Checklistenpunkt")
+			return errors.New("taskboard-self-review enthält einen unvollständigen Checklistenpunkt")
 		}
 		result := strings.ToLower(strings.TrimSpace(item.Result))
 		if !validSelfReviewResult(result) {
-			return review, fmt.Errorf("taskboard-self-review Checklistenpunkt %q enthält den ungültigen Status %s (Länge %d); erwartet wird einer von: %s", item.Check, safeSelfReviewResultForError(item.Result), len(strings.TrimSpace(item.Result)), strings.Join(selfReviewResultValues, ", "))
+			return fmt.Errorf("taskboard-self-review Checklistenpunkt %q enthält den ungültigen Status %s (Länge %d); erwartet wird einer von: %s", item.Check, safeSelfReviewResultForError(item.Result), len(strings.TrimSpace(item.Result)), strings.Join(selfReviewResultValues, ", "))
 		}
 		if _, required := requiredChecks[check]; !required {
-			return review, fmt.Errorf("taskboard-self-review enthält keine gültige Pflichtkategorie %q", item.Check)
+			return fmt.Errorf("taskboard-self-review enthält keine gültige Pflichtkategorie %q", item.Check)
 		}
 		if requiredChecks[check] {
-			return review, fmt.Errorf("taskboard-self-review enthält die Pflichtkategorie %q doppelt", item.Check)
+			return fmt.Errorf("taskboard-self-review enthält die Pflichtkategorie %q doppelt", item.Check)
 		}
 		requiredChecks[check] = true
 	}
 	for check, present := range requiredChecks {
 		if !present {
-			return review, fmt.Errorf("taskboard-self-review fehlt die Pflichtkategorie %q", check)
+			return fmt.Errorf("taskboard-self-review fehlt die Pflichtkategorie %q", check)
 		}
 	}
 	if len(review.Tests) == 0 || string(review.Tests) == "null" || len(review.OpenRisks) == 0 || string(review.OpenRisks) == "null" {
-		return review, errors.New("taskboard-self-review benötigt Testnachweise und offene Risiken")
+		return errors.New("taskboard-self-review benötigt Testnachweise und offene Risiken")
 	}
-	return review, nil
+	return nil
+}
+
+func canonicalSelfReviewCheck(raw string) string {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case "scope/acceptance":
+		return "scope/akzeptanz"
+	case "tests/failures":
+		return "tests/fehler"
+	case "security/operational risks":
+		return "sicherheits-/betriebsrisiken"
+	case "backward compatibility":
+		return "rückwärtskompatibilität"
+	default:
+		return value
+	}
 }
 
 func validSelfReviewResult(result string) bool {
@@ -258,6 +295,28 @@ func controlLogsForAgent(agentName string, logs []domain.RunLog, structuredOutpu
 		return structuredControlLogs("codex", logs, structuredOutput)
 	}
 	return logs
+}
+
+// selfReviewLogs keeps task mutations on Codex' isolated final-output channel,
+// but recovers a self-review from an earlier assistant response when the final
+// handoff contains only a taskboard-comment. Command output is deliberately
+// excluded: only entries written by the Codex response renderer are eligible.
+func selfReviewLogs(agentName string, logs []domain.RunLog, structuredOutput string) []domain.RunLog {
+	if !requiresSelfReview(agentName) || strings.TrimSpace(structuredOutput) != "" && selfReviewFence.MatchString(structuredOutput) {
+		return controlLogsForAgent(agentName, logs, structuredOutput)
+	}
+	assistantResponses := make([]domain.RunLog, 0, len(logs))
+	for _, log := range logs {
+		message := strings.TrimSpace(log.Message)
+		if !strings.HasPrefix(message, "codex\n") {
+			continue
+		}
+		assistantResponses = append(assistantResponses, domain.RunLog{Message: strings.TrimSpace(strings.TrimPrefix(message, "codex\n"))})
+	}
+	if len(assistantResponses) > 0 {
+		return assistantResponses
+	}
+	return controlLogsForAgent(agentName, logs, structuredOutput)
 }
 
 func validateSelfReview(agentName string, logs []domain.RunLog, logErr error) error {
@@ -3324,10 +3383,11 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			// provider's isolated completion channel. Terminal logs are untrusted
 			// because prompts, tool output, or a provider echo can contain fences.
 			controlLogs := controlLogsForAgent(agent.Name, logs, structuredOutput)
+			reviewLogs := selfReviewLogs(agent.Name, logs, structuredOutput)
 			if provider.Provider == "codex" && len(controlLogs) == 0 {
 				_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Codex lieferte keine Abschlussnachricht; strukturierte Task-Aktionen wurden aus Sicherheitsgründen nicht aus dem Terminal gelesen.")
 			}
-			if reviewErr := validateSelfReview(agent.Name, controlLogs, nil); reviewErr != nil {
+			if reviewErr := validateSelfReview(agent.Name, reviewLogs, nil); reviewErr != nil {
 				reason := "Self-Review abgelehnt: " + reviewErr.Error()
 				_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
 				_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Self-Review fehlgeschlagen", reason)
