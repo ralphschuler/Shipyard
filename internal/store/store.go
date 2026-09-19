@@ -1764,6 +1764,16 @@ func moveTaskTxWithPolicy(c context.Context, tx pgx.Tx, id, target, source strin
 			return err
 		}
 	}
+	// A new QA entry starts a new human release cycle. Keep the previous
+	// decision for auditability, but prevent it from satisfying the next
+	// cycle's release gate.
+	if strings.EqualFold(strings.TrimSpace(targetName), "qa") {
+		if _, err = tx.Exec(c, `UPDATE task_decisions
+			SET superseded_at=now(), reopen_reason='Neuer QA-Zyklus nach Nacharbeit'
+			WHERE task_id=$1 AND decision_key='qa_release' AND superseded_at IS NULL`, id); err != nil {
+			return err
+		}
+	}
 	var taskTransitionID string
 	err = tx.QueryRow(c, `INSERT INTO task_transitions(task_id,from_column_id,to_column_id,transition_id,source)
 		VALUES($1,$2,$3,$4,$5) RETURNING id`, id, current, target, transition, source).Scan(&taskTransitionID)
@@ -2028,12 +2038,43 @@ func (s *Store) ResolveInteractionAndMove(c context.Context, id, answerer, freef
 	if i.Status != "open" {
 		return i, nil, errors.New("interaction is not open")
 	}
+	if i.DecisionKey == "qa_release" {
+		var currentColumnID, boardID string
+		if err = tx.QueryRow(c, `SELECT t.column_id,t.board_id FROM tasks t WHERE t.id=$1 FOR UPDATE`, i.TaskID).Scan(&currentColumnID, &boardID); err != nil {
+			return i, nil, err
+		}
+		columns, columnsErr := workflowColumnsTx(c, tx, boardID)
+		transitions, transitionsErr := workflowTransitionsFromTx(c, tx, boardID, currentColumnID)
+		if columnsErr != nil || transitionsErr != nil {
+			if columnsErr != nil {
+				return i, nil, columnsErr
+			}
+			return i, nil, transitionsErr
+		}
+		qaTarget, qaErr := resolveQADecisionTarget(i.DecisionKey, response, currentColumnID, columns, transitions)
+		if qaErr != nil {
+			// QA answers own the route. Never fall back to an optional legacy
+			// target when the semantic answer is invalid or ambiguous.
+			return i, nil, qaErr
+		}
+		// The semantic QA decision owns the route. An optional legacy form
+		// target must not turn "Überarbeiten" into a release or vice versa.
+		targetColumnID = qaTarget
+	}
+	qaRework := i.DecisionKey == "qa_release" && qaDecisionIsRework(response)
 	// A selected workflow step hands the task back to the workflow itself. Its
 	// entered-column event will pick the appropriate specialist exactly once;
 	// creating an additional manual continuation here would race that rule.
 	if target := strings.TrimSpace(targetColumnID); target != "" {
 		if err = moveTaskTx(c, tx, i.TaskID, target, "web"); err != nil {
 			return i, nil, err
+		}
+		if qaRework {
+			if _, err = tx.Exec(c, `UPDATE automation_events SET payload=payload || '{"rework_requested":true}'::jsonb
+				WHERE id=(SELECT id FROM automation_events WHERE task_id=$1 AND processed_at IS NULL
+				ORDER BY occurred_at DESC,id DESC LIMIT 1)`, i.TaskID); err != nil {
+				return i, nil, err
+			}
 		}
 		key := i.DecisionKey
 		if key == "" {
@@ -2140,6 +2181,99 @@ func (s *Store) ResolveInteractionAndMove(c context.Context, id, answerer, freef
 		return i, nil, err
 	}
 	return i, runs, nil
+}
+
+func workflowColumnsTx(c context.Context, tx pgx.Tx, boardID string) ([]domain.Column, error) {
+	rows, err := tx.Query(c, "SELECT id,name,column_type FROM workflow_columns WHERE board_id=$1 ORDER BY position", boardID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	columns := []domain.Column{}
+	for rows.Next() {
+		var column domain.Column
+		if err := rows.Scan(&column.ID, &column.Name, &column.Type); err != nil {
+			return nil, err
+		}
+		columns = append(columns, column)
+	}
+	return columns, rows.Err()
+}
+
+func workflowTransitionsFromTx(c context.Context, tx pgx.Tx, boardID, fromColumnID string) ([]domain.Transition, error) {
+	rows, err := tx.Query(c, "SELECT id,board_id,from_column_id,to_column_id,action_name FROM transitions WHERE board_id=$1 AND from_column_id=$2", boardID, fromColumnID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	transitions := []domain.Transition{}
+	for rows.Next() {
+		var transition domain.Transition
+		if err := rows.Scan(&transition.ID, &transition.BoardID, &transition.FromColumnID, &transition.ToColumnID, &transition.ActionName); err != nil {
+			return nil, err
+		}
+		transitions = append(transitions, transition)
+	}
+	return transitions, rows.Err()
+}
+
+func qaDecisionTarget(key string, response []byte, currentColumnID string, columns []domain.Column, transitions []domain.Transition) string {
+	target, err := resolveQADecisionTarget(key, response, currentColumnID, columns, transitions)
+	if err != nil {
+		return ""
+	}
+	return target
+}
+
+func qaDecisionIsRework(response []byte) bool {
+	var answers map[string][]string
+	if json.Unmarshal(response, &answers) != nil || len(answers["release_decision"]) != 1 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(answers["release_decision"][0]), "rework")
+}
+
+func resolveQADecisionTarget(key string, response []byte, currentColumnID string, columns []domain.Column, transitions []domain.Transition) (string, error) {
+	if strings.TrimSpace(key) != "qa_release" || strings.TrimSpace(currentColumnID) == "" {
+		return "", nil
+	}
+	var answers map[string][]string
+	if json.Unmarshal(response, &answers) != nil || len(answers["release_decision"]) != 1 {
+		return "", errors.New("invalid or ambiguous QA decision")
+	}
+	value := strings.ToLower(strings.TrimSpace(answers["release_decision"][0]))
+	wantedType, wantedNames := "", map[string]bool{}
+	switch value {
+	case "approve":
+		wantedType = "done"
+	case "rework":
+		wantedNames = map[string]bool{"in progress": true, "entwicklung": true, "development": true}
+	default:
+		return "", errors.New("invalid QA decision")
+	}
+	columnTypes := make(map[string]string, len(columns))
+	columnNames := make(map[string]string, len(columns))
+	for _, column := range columns {
+		columnTypes[column.ID] = column.Type
+		columnNames[column.ID] = strings.ToLower(strings.TrimSpace(column.Name))
+	}
+	target := ""
+	for _, transition := range transitions {
+		if transition.FromColumnID != currentColumnID || transition.ToColumnID == currentColumnID {
+			continue
+		}
+		if (wantedType != "" && columnTypes[transition.ToColumnID] != wantedType) || (wantedType == "" && !wantedNames[columnNames[transition.ToColumnID]]) {
+			continue
+		}
+		if target != "" {
+			return "", errors.New("ambiguous QA transition")
+		}
+		target = transition.ToColumnID
+	}
+	if target == "" {
+		return "", errors.New("QA transition is not configured")
+	}
+	return target, nil
 }
 func (s *Store) CreateLabel(c context.Context, b, n, color string) (domain.Label, error) {
 	var l domain.Label

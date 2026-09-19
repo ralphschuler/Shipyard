@@ -1132,6 +1132,9 @@ func TestAutomationEventNoopOnlySuppressesUnchangedReviewReturns(t *testing.T) {
 	if !automationEventIsNoop(domain.AutomationEvent{Payload: []byte(`{"qa_return":true,"change_available":false}`)}) {
 		t.Fatal("unchanged QA/review return must be a terminal no-op")
 	}
+	if automationEventIsNoop(domain.AutomationEvent{Payload: []byte(`{"qa_return":true,"change_available":false,"rework_requested":true}`)}) {
+		t.Fatal("explicit QA/rework return must remain processable")
+	}
 	for _, event := range []domain.AutomationEvent{
 		{Payload: []byte(`{"qa_return":true,"change_available":true}`)},
 		{Payload: []byte(`{"qa_return":false,"change_available":false}`)},
@@ -1231,6 +1234,9 @@ func TestQAReleaseRequestIsAStableHumanDecision(t *testing.T) {
 	}
 	if got, want := len(request.Fields[0].Options), 4; got != want {
 		t.Fatalf("QA options = %d, want %d", got, want)
+	}
+	if got := request.Fields[0].Options[1].Label; got != "Überarbeiten" {
+		t.Fatalf("QA rework label = %q, want Überarbeiten", got)
 	}
 }
 

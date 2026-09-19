@@ -617,6 +617,98 @@ func TestWorkflowIntegrationAcceptedDeliveryCommitPersistence(t *testing.T) {
 	}
 }
 
+func TestWorkflowIntegrationQAReworkSupersedesPreviousReleaseDecision(t *testing.T) {
+	s := integrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "QA decision generation", "personal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlog := columnByName(t, columns, "Backlog")
+	development := columnByName(t, columns, "In Progress")
+	review := columnByName(t, columns, "Review")
+	qa := columnByName(t, columns, "QA")
+	task, err := s.CreateTask(ctx, board.ID, "QA decision generation", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "QA decision agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{backlog.ID, development.ID, review.ID, qa.ID} {
+		if moved, moveErr := s.MoveTaskToColumnID(ctx, task.ID, target, "mcp"); moveErr != nil || !moved {
+			t.Fatalf("move task to %s: moved=%t err=%v", target, moved, moveErr)
+		}
+	}
+	run, err := s.CreateManualRun(ctx, task.ID, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interaction, err := s.CreateInteraction(ctx, task.ID, agent.ID, run.ID, "qa_release", "qa-rework-integration", "Freigabe für QA", "QA entscheidet", []byte(`{"fields":[{"id":"release_decision","type":"buttons"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.ResolveInteractionAndMove(ctx, interaction.ID, "qa-test", "Ablehnungsgrund: Nacharbeit erforderlich", []byte(`{"release_decision":["rework"]}`), ""); err != nil {
+		t.Fatal(err)
+	}
+	if active, err := s.HasTaskDecision(ctx, task.ID, agent.ID, "qa_release"); err != nil || !active {
+		t.Fatalf("initial QA decision active=%t err=%v", active, err)
+	}
+	var payload []byte
+	if err = s.DB.QueryRow(ctx, `SELECT payload FROM automation_events WHERE task_id=$1 AND payload->>'qa_return'='true' ORDER BY occurred_at DESC LIMIT 1`, task.ID).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	var reworkEvent struct {
+		ReworkRequested bool `json:"rework_requested"`
+	}
+	if err = json.Unmarshal(payload, &reworkEvent); err != nil || !reworkEvent.ReworkRequested {
+		t.Fatalf("QA rework event = %s, err=%v", payload, err)
+	}
+	var comment string
+	if err = s.DB.QueryRow(ctx, `SELECT body FROM task_comments WHERE task_id=$1 ORDER BY created_at DESC LIMIT 1`, task.ID).Scan(&comment); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(comment, "Ablehnungsgrund: Nacharbeit erforderlich") {
+		t.Fatalf("rejection reason comment = %q", comment)
+	}
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, review.ID, "mcp"); err != nil || !moved {
+		t.Fatalf("development to review: moved=%t err=%v", moved, err)
+	}
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, qa.ID, "mcp"); err != nil || !moved {
+		t.Fatalf("review to QA: moved=%t err=%v", moved, err)
+	}
+	if active, err := s.HasTaskDecision(ctx, task.ID, agent.ID, "qa_release"); err != nil || active {
+		t.Fatalf("old QA decision must not satisfy the new cycle: active=%t err=%v", active, err)
+	}
+	var superseded int
+	if err = s.DB.QueryRow(ctx, `SELECT count(*) FROM task_decisions
+		WHERE task_id=$1 AND decision_key='qa_release' AND superseded_at IS NOT NULL`, task.ID).Scan(&superseded); err != nil {
+		t.Fatal(err)
+	}
+	if superseded != 1 {
+		t.Fatalf("superseded QA decisions=%d, want 1", superseded)
+	}
+	interaction, err = s.CreateInteraction(ctx, task.ID, agent.ID, run.ID, "qa_release", "qa-release-integration", "Freigabe für QA", "QA entscheidet", []byte(`{"fields":[{"id":"release_decision","type":"buttons"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.ResolveInteractionAndMove(ctx, interaction.ID, "qa-test-2", "", []byte(`{"release_decision":["approve"]}`), ""); err != nil {
+		t.Fatal(err)
+	}
+	if active, err := s.HasTaskDecision(ctx, task.ID, agent.ID, "qa_release"); err != nil || !active {
+		t.Fatalf("new QA decision active=%t err=%v", active, err)
+	}
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, columnByName(t, columns, "Done").ID, "mcp"); err != nil || !moved {
+		t.Fatalf("second QA approval to done: moved=%t err=%v", moved, err)
+	}
+}
+
 func deliverySource(t *testing.T, s *Store, ctx context.Context, runID string) string {
 	t.Helper()
 	source, err := s.RunSource(ctx, runID)

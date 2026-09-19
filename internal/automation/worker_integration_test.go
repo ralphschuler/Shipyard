@@ -79,6 +79,75 @@ func workerIntegrationStore(t *testing.T) *store.Store {
 	return s
 }
 
+func TestProcessRoutesExplicitQAReworkExactlyOnce(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "QA rework handoff", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlog := integrationColumnByName(t, columns, "Backlog")
+	development := integrationColumnByName(t, columns, "Entwicklung")
+	review := integrationColumnByName(t, columns, "Review")
+	qa := integrationColumnByName(t, columns, "QA")
+	task, err := s.CreateTask(ctx, board.ID, "Explicit QA rework", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "QA rework delivery "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{backlog.ID, development.ID, review.ID, qa.ID} {
+		if moved, moveErr := s.MoveTaskToColumnID(ctx, task.ID, target, "mcp"); moveErr != nil || !moved {
+			t.Fatalf("move task to %s: moved=%t err=%v", target, moved, moveErr)
+		}
+	}
+	rule, err := s.CreateRuleWithActions(ctx, "Process explicit QA rework", board.ID, "task.entered_column", development.ID, agent.ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.CreateRun(ctx, task.ID, agent.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	interaction, err := s.CreateInteraction(ctx, task.ID, agent.ID, run.ID, "qa_release", "worker-qa-rework", "Freigabe für QA", "QA entscheidet", []byte(`{"fields":[{"id":"release_decision","type":"buttons"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.ResolveInteractionAndMove(ctx, interaction.ID, "qa", "Ablehnungsgrund", []byte(`{"release_decision":["rework"]}`), ""); err != nil {
+		t.Fatal(err)
+	}
+	worker := &Worker{Store: s, executeRun: func(context.Context, domain.AgentRun) {}}
+	worker.Process(ctx)
+	worker.Process(ctx)
+	runs, err := s.RunsForTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, candidate := range runs {
+		if candidate.RuleID == rule.ID {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("explicit QA rework created %d delivery runs, want exactly one", count)
+	}
+	current, err := s.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.ColumnID != development.ID {
+		t.Fatalf("QA rework target = %s, want development %s", current.ColumnID, development.ID)
+	}
+}
+
 func TestCheckProviderForAgentRejectsUnassignedSecret(t *testing.T) {
 	s := workerIntegrationStore(t)
 	ctx := context.Background()
