@@ -31,6 +31,22 @@ jobs:
     name: Go correctness and race detection
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      # This is a disposable service-local database. Never fall back to
+      # DATABASE_URL, which may point at an operator or production database.
+      SHIPYARD_TEST_DATABASE_URL: postgres://taskboard:taskboard@127.0.0.1:5432/taskboard_ci?sslmode=disable
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: taskboard
+          POSTGRES_PASSWORD: taskboard
+          POSTGRES_DB: taskboard_ci
+        options: >-
+          --health-cmd "pg_isready -U taskboard -d taskboard_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -46,6 +62,10 @@ jobs:
         run: timeout 120s npm ci --prefix frontend && timeout 120s npm run build --prefix frontend
       - name: Vet
         run: timeout 120s go vet ./...
+      - name: Verify isolated PostgreSQL integration configuration
+        run: timeout 120s test -n "$SHIPYARD_TEST_DATABASE_URL"
+      - name: PostgreSQL integration tests
+        run: timeout 120s go test -v -shuffle=on -count=3 ./internal/store ./internal/automation
       - name: Unit and integration tests (shuffled)
         run: timeout 120s go test -shuffle=on -count=3 ./...
       - name: Race detector
