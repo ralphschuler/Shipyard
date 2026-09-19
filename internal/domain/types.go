@@ -61,6 +61,8 @@ type Column struct {
 type Transition struct{ ID, BoardID, FromColumnID, ToColumnID, ActionName string }
 type Task struct {
 	ID, BoardID, ColumnID, ColumnName, Title, Description, Priority string
+	TemplateID, TemplateSnapshot                                    string
+	TemplateVersion                                                 int
 	StartDate, DueDate                                              *time.Time
 	CompletedAt                                                     *time.Time
 	CreatedAt                                                       time.Time
@@ -68,6 +70,13 @@ type Task struct {
 	ReworkCount                                                     int
 	Labels                                                          []Label
 	TargetProjects                                                  []Project
+}
+type TaskTemplate struct {
+	ID, BoardID, Name, Kind, Description, DefaultPriority string
+	RequiredFields, DefaultLabelIDs                       []string
+	Version                                               int
+	Enabled                                               bool
+	CreatedAt, UpdatedAt                                  time.Time
 }
 type Label struct{ ID, Name, Color string }
 type History struct {

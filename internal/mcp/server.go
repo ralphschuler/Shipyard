@@ -107,7 +107,7 @@ func tools() []map[string]any {
 		{"name": "create_transition", "description": "Allow a directed workflow transition", "inputSchema": schemaWithOptional([]string{"board_id", "from_column_id", "to_column_id"}, "action_name")},
 		{"name": "delete_transition", "description": "Remove a workflow transition", "inputSchema": schema("transition_id")},
 		{"name": "update_transition", "description": "Edit a workflow transition", "inputSchema": schema("transition_id", "from_column_id", "to_column_id")},
-		{"name": "create_task", "description": "Create a task in the board initial column", "inputSchema": schemaWithOptional([]string{"board_id", "title"}, "description", "priority", "start_date", "due_date", "project_ids", "group_ids")},
+		{"name": "create_task", "description": "Create a task in the board initial column; template_id applies board validation and records the template snapshot", "inputSchema": schemaWithOptional([]string{"board_id", "title"}, "description", "priority", "start_date", "due_date", "project_ids", "group_ids", "template_id", "steps", "expected", "benefit", "acceptance")},
 		{"name": "list_tasks", "description": "List board tasks", "inputSchema": schema("board_id")},
 		{"name": "get_task", "description": "Get task plus allowed moves", "inputSchema": schema("task_id")},
 		{"name": "update_task", "description": "Edit task title, description, priority or dates", "inputSchema": schema("task_id", "title")},
@@ -226,7 +226,12 @@ func (s *Server) call(r *http.Request, raw json.RawMessage) (any, string) {
 		err = s.store.UpdateTransition(ctx, a["transition_id"], a["from_column_id"], a["to_column_id"], a["action_name"])
 		value = map[string]bool{"updated": err == nil}
 	case "create_task":
-		value, err = s.store.CreateTask(ctx, a["board_id"], a["title"], a["description"], a["priority"], a["start_date"], a["due_date"], "mcp")
+		input := map[string]string{"steps": a["steps"], "expected": a["expected"], "benefit": a["benefit"], "acceptance": a["acceptance"]}
+		if a["template_id"] != "" {
+			value, err = s.store.CreateTaskWithTemplate(ctx, a["board_id"], a["title"], a["description"], a["priority"], a["start_date"], a["due_date"], "mcp", a["template_id"], input)
+		} else {
+			value, err = s.store.CreateTask(ctx, a["board_id"], a["title"], a["description"], a["priority"], a["start_date"], a["due_date"], "mcp")
+		}
 		if err == nil {
 			err = s.store.SetTaskTargets(ctx, value.(domain.Task).ID, csv(a["project_ids"]), csv(a["group_ids"]))
 		}

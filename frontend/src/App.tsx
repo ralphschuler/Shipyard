@@ -2952,6 +2952,7 @@ function BoardDetail({ id }: { id: string }) {
   const { data, error } = useAPI<any>("/api/v1/boards/" + id);
   const [open, setOpen] = useState(false);
   const [labelsOpen, setLabelsOpen] = useState(false);
+  const [taskTemplate, setTaskTemplate] = useState("");
   const [settings, setSettings] = useState(false);
   const [title, setTitle] = useState("");
   const [message, setMessage] = useState("");
@@ -3100,6 +3101,16 @@ function BoardDetail({ id }: { id: string }) {
                 </DialogDescription>
               </DialogHeader>
               <form className="grid gap-4" onSubmit={create}>
+                {data.TaskTemplates?.length > 0 && (
+                  <label className="grid gap-2 text-sm font-medium">
+                    {text("Vorlage", "Template")}
+                    <select name="template_id" value={taskTemplate} onChange={(event) => setTaskTemplate(event.target.value)} className="h-9 rounded-md border bg-background px-2">
+                      <option value="">Freie Aufgabe</option>
+                      {data.TaskTemplates.filter((template: any) => template.Enabled).map((template: any) => <option key={template.ID} value={template.ID}>{template.Name} ({template.Kind})</option>)}
+                    </select>
+                    <span className="text-xs font-normal text-muted-foreground">{text("Vorlagen ergänzen Pflichtfelder. Bereits eingegebene Inhalte bleiben beim Wechsel erhalten.", "Templates add required fields. Existing inputs stay unchanged when switching.")}</span>
+                  </label>
+                )}
                 <label className="grid gap-2 text-sm font-medium">
                   Titel
                   <Input
@@ -3110,6 +3121,16 @@ function BoardDetail({ id }: { id: string }) {
                     onChange={(e) => setTitle(e.target.value)}
                   />
                 </label>
+                {taskTemplate && (() => {
+                  const template = data.TaskTemplates.find((item: any) => item.ID === taskTemplate);
+                  const required = template?.RequiredFields || [];
+                  return <div className="grid gap-3 rounded-lg border p-3">
+                    {required.includes("steps") && <label className="grid gap-1 text-sm">{text("Reproduktionsschritte", "Reproduction steps")} <textarea required name="steps" className="min-h-20 rounded-md border bg-transparent p-2" /></label>}
+                    {required.includes("expected") && <label className="grid gap-1 text-sm">{text("Erwartetes Ergebnis", "Expected result")} <textarea required name="expected" className="min-h-20 rounded-md border bg-transparent p-2" /></label>}
+                    {required.includes("benefit") && <label className="grid gap-1 text-sm">{text("Nutzen", "User benefit")} <textarea required name="benefit" className="min-h-20 rounded-md border bg-transparent p-2" /></label>}
+                    {required.includes("acceptance") && <label className="grid gap-1 text-sm">{text("Akzeptanzkriterien", "Acceptance criteria")} <textarea required name="acceptance" className="min-h-20 rounded-md border bg-transparent p-2" /></label>}
+                  </div>;
+                })()}
                 <div className="grid gap-3 sm:grid-cols-3">
                   <label className="grid gap-1 text-sm">
                     Priorität
@@ -3351,6 +3372,30 @@ function BoardDetail({ id }: { id: string }) {
               </Button>
             </DialogFooter>
           </form>
+          <div className="mt-4 grid gap-3 border-t pt-4">
+            <div>
+              <h3 className="font-medium">{text("Task-Vorlagen", "Task templates")}</h3>
+              <p className="text-sm text-muted-foreground">{text("Pflichtfelder und Standardwerte für dieses Board.", "Required fields and defaults for this board.")}</p>
+            </div>
+            {data.TaskTemplates?.map((template: any) => <form key={template.ID} className="grid gap-2 rounded-md border p-3" onSubmit={async (event) => {
+              event.preventDefault();
+              try { await mutation(`/boards/${id}/templates/${template.ID}`, { method: "POST", body: new FormData(event.currentTarget) }); refresh(); } catch (err) { setMessage(String(err)); }
+            }}>
+              <input type="hidden" name="kind" value={template.Kind} />
+              <input type="hidden" name="default_priority" value={template.DefaultPriority} />
+              <label className="grid gap-1 text-sm">{text("Name", "Name")}<Input name="name" defaultValue={template.Name} required /></label>
+              <fieldset className="flex flex-wrap gap-3 text-sm"><legend className="sr-only">{text("Pflichtfelder", "Required fields")}</legend>
+                {["steps", "expected", "benefit", "acceptance"].map((field) => <label key={field} className="flex items-center gap-1"><input type="checkbox" name="required_fields" value={field} defaultChecked={template.RequiredFields?.includes(field)} />{field}</label>)}
+              </fieldset>
+              <div className="flex gap-2"><Button size="sm" type="submit">{text("Vorlage speichern", "Save template")}</Button><Button size="sm" type="button" variant="outline" onClick={async () => { try { await mutation(`/boards/${id}/templates/${template.ID}/enabled`, { method: "POST", body: new URLSearchParams({ enabled: String(!template.Enabled) }) }); refresh(); } catch (err) { setMessage(String(err)); } }}>{template.Enabled ? text("Deaktivieren", "Disable") : text("Aktivieren", "Enable")}</Button></div>
+            </form>)}
+            <form className="grid gap-2 rounded-md border border-dashed p-3" onSubmit={async (event) => { event.preventDefault(); try { await mutation(`/boards/${id}/templates`, { method: "POST", body: new FormData(event.currentTarget) }); refresh(); } catch (err) { setMessage(String(err)); } }}>
+              <label className="grid gap-1 text-sm">{text("Neue Vorlage", "New template")}<Input name="name" required placeholder={text("z. B. Fehlerbericht", "e.g. Bug report")} /></label>
+              <select name="kind" defaultValue="bug" className="h-9 rounded-md border bg-background px-2"><option value="bug">Bug</option><option value="feature">Feature</option><option value="review">Review</option></select>
+              <fieldset className="flex flex-wrap gap-3 text-sm"><legend className="sr-only">{text("Pflichtfelder", "Required fields")}</legend>{["steps", "expected", "benefit", "acceptance"].map((field) => <label key={field} className="flex items-center gap-1"><input type="checkbox" name="required_fields" value={field} />{field}</label>)}</fieldset>
+              <Button size="sm" type="submit">{text("Vorlage anlegen", "Create template")}</Button>
+            </form>
+          </div>
         </DialogContent>
       </Dialog>
       <Dialog open={labelsOpen} onOpenChange={setLabelsOpen}>

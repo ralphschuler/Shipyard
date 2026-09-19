@@ -114,15 +114,16 @@ type liveHub struct {
 	clients map[chan string]struct{}
 }
 type boardPage struct {
-	Board       domain.Board
-	Columns     []domain.Column
-	Tasks       []domain.Task
-	Transitions []domain.Transition
-	Error       string
-	Lang        string
-	Labels      []domain.Label
-	Projects    []domain.Project
-	Groups      []domain.ProjectGroup
+	Board         domain.Board
+	Columns       []domain.Column
+	Tasks         []domain.Task
+	Transitions   []domain.Transition
+	Error         string
+	Lang          string
+	Labels        []domain.Label
+	Projects      []domain.Project
+	Groups        []domain.ProjectGroup
+	TaskTemplates []domain.TaskTemplate
 }
 type taskPage struct {
 	ID             string
@@ -719,6 +720,9 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("POST /boards/{id}", a.updateBoard)
 	m.HandleFunc("POST /boards/{id}/delete", a.deleteBoard)
 	m.HandleFunc("POST /boards/{id}/tasks", a.createTask)
+	m.HandleFunc("POST /boards/{id}/templates", a.saveTaskTemplate)
+	m.HandleFunc("POST /boards/{id}/templates/{templateID}", a.updateTaskTemplate)
+	m.HandleFunc("POST /boards/{id}/templates/{templateID}/enabled", a.setTaskTemplateEnabled)
 	m.HandleFunc("POST /boards/{id}/labels", a.createLabel)
 	m.HandleFunc("POST /boards/{id}/columns", a.addColumn)
 	m.HandleFunc("GET /boards/{id}/workflow", a.workflow)
@@ -2567,7 +2571,11 @@ func (a *App) page(c context.Context, id, errText string, lang string) (boardPag
 	if groupErr != nil {
 		return boardPage{}, groupErr
 	}
-	return boardPage{Board: b, Columns: cols, Tasks: tasks, Transitions: tr, Error: errText, Lang: lang, Labels: labels, Projects: projects, Groups: groups}, e
+	templates, templateErr := a.store.TaskTemplates(c, id)
+	if templateErr != nil {
+		return boardPage{}, templateErr
+	}
+	return boardPage{Board: b, Columns: cols, Tasks: tasks, Transitions: tr, Error: errText, Lang: lang, Labels: labels, Projects: projects, Groups: groups, TaskTemplates: templates}, e
 }
 func (a *App) board(w http.ResponseWriter, r *http.Request) {
 	p, e := a.page(r.Context(), r.PathValue("id"), "", a.accountLanguage(r))
@@ -2592,7 +2600,14 @@ func (a *App) deleteBoard(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 func (a *App) createTask(w http.ResponseWriter, r *http.Request) {
-	task, e := a.store.CreateTask(r.Context(), r.PathValue("id"), r.FormValue("title"), r.FormValue("description"), defaultString(r.FormValue("priority"), "normal"), r.FormValue("start_date"), r.FormValue("due_date"), "web")
+	input := map[string]string{"steps": r.FormValue("steps"), "expected": r.FormValue("expected"), "benefit": r.FormValue("benefit"), "acceptance": r.FormValue("acceptance")}
+	var task domain.Task
+	var e error
+	if templateID := r.FormValue("template_id"); templateID != "" {
+		task, e = a.store.CreateTaskWithTemplate(r.Context(), r.PathValue("id"), r.FormValue("title"), r.FormValue("description"), r.FormValue("priority"), r.FormValue("start_date"), r.FormValue("due_date"), "web", templateID, input)
+	} else {
+		task, e = a.store.CreateTask(r.Context(), r.PathValue("id"), r.FormValue("title"), r.FormValue("description"), defaultString(r.FormValue("priority"), "normal"), r.FormValue("start_date"), r.FormValue("due_date"), "web")
+	}
 	if e != nil {
 		if strings.Contains(r.Header.Get("Accept"), "application/json") {
 			http.Error(w, e.Error(), http.StatusBadRequest)
@@ -2608,6 +2623,64 @@ func (a *App) createTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if e = a.store.SetTaskTargets(r.Context(), task.ID, r.Form["target_project_ids"], r.Form["target_group_ids"]); e != nil {
 		http.Error(w, e.Error(), 400)
+		return
+	}
+	http.Redirect(w, r, "/boards/"+r.PathValue("id"), http.StatusSeeOther)
+}
+
+func (a *App) updateTaskTemplate(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok || (u.Role != "owner" && u.Role != "admin") {
+		http.Error(w, "Diese Aktion erfordert Administratorrechte.", http.StatusForbidden)
+		return
+	}
+	required := r.Form["required_fields"]
+	if required == nil {
+		required = []string{}
+	}
+	err := a.store.UpdateTaskTemplate(r.Context(), domain.TaskTemplate{ID: r.PathValue("templateID"), BoardID: r.PathValue("id"), Name: r.FormValue("name"), Kind: r.FormValue("kind"), Description: r.FormValue("description"), RequiredFields: required, DefaultPriority: defaultString(r.FormValue("default_priority"), "normal"), DefaultLabelIDs: r.Form["default_label_ids"]})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	http.Redirect(w, r, "/boards/"+r.PathValue("id"), http.StatusSeeOther)
+}
+
+func (a *App) saveTaskTemplate(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok || (u.Role != "owner" && u.Role != "admin") {
+		http.Error(w, "Diese Aktion erfordert Administratorrechte.", http.StatusForbidden)
+		return
+	}
+	required := r.Form["required_fields"]
+	if required == nil {
+		required = []string{}
+	}
+	labels := r.Form["default_label_ids"]
+	if labels == nil {
+		labels = []string{}
+	}
+	template, err := a.store.SaveTaskTemplate(r.Context(), domain.TaskTemplate{BoardID: r.PathValue("id"), Name: r.FormValue("name"), Kind: r.FormValue("kind"), Description: r.FormValue("description"), RequiredFields: required, DefaultPriority: defaultString(r.FormValue("default_priority"), "normal"), DefaultLabelIDs: labels})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if strings.Contains(r.Header.Get("Accept"), "application/json") {
+		writeAPI(w, template, nil)
+		return
+	}
+	http.Redirect(w, r, "/boards/"+r.PathValue("id"), http.StatusSeeOther)
+}
+
+func (a *App) setTaskTemplateEnabled(w http.ResponseWriter, r *http.Request) {
+	u, ok := currentUser(r.Context())
+	if !ok || (u.Role != "owner" && u.Role != "admin") {
+		http.Error(w, "Diese Aktion erfordert Administratorrechte.", http.StatusForbidden)
+		return
+	}
+	err := a.store.SetTaskTemplateEnabled(r.Context(), r.PathValue("id"), r.PathValue("templateID"), r.FormValue("enabled") == "true")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	http.Redirect(w, r, "/boards/"+r.PathValue("id"), http.StatusSeeOther)

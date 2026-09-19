@@ -1591,6 +1591,45 @@ func dates(start, due string) (any, any, error) {
 	return startVal, dueVal, nil
 }
 func (s *Store) CreateTask(c context.Context, b, title, desc, priority, start, due, source string) (domain.Task, error) {
+	return s.createTask(c, b, title, desc, priority, start, due, source, nil, nil)
+}
+
+func (s *Store) CreateTaskWithTemplate(c context.Context, b, title, desc, priority, start, due, source, templateID string, input map[string]string) (domain.Task, error) {
+	template, err := s.TaskTemplate(c, b, templateID)
+	if err != nil {
+		return domain.Task{}, errors.New("task template not found")
+	}
+	if !template.Enabled {
+		return domain.Task{}, errors.New("task template is disabled")
+	}
+	if err := validateTaskTemplateInput(template.Kind, input, template.RequiredFields); err != nil {
+		return domain.Task{}, err
+	}
+	if priority == "" {
+		priority = template.DefaultPriority
+	}
+	if desc == "" {
+		desc = template.Description
+	}
+	desc = appendTemplateInput(desc, input)
+	return s.createTask(c, b, title, desc, priority, start, due, source, &template, input)
+}
+
+func appendTemplateInput(description string, input map[string]string) string {
+	sections := []struct{ key, heading string }{{"steps", "Reproduktionsschritte"}, {"expected", "Erwartetes Ergebnis"}, {"benefit", "Nutzen"}, {"acceptance", "Akzeptanzkriterien"}}
+	var parts []string
+	if strings.TrimSpace(description) != "" {
+		parts = append(parts, strings.TrimSpace(description))
+	}
+	for _, section := range sections {
+		if value := strings.TrimSpace(input[section.key]); value != "" {
+			parts = append(parts, "## "+section.heading+"\n"+value)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func (s *Store) createTask(c context.Context, b, title, desc, priority, start, due, source string, template *domain.TaskTemplate, input map[string]string) (domain.Task, error) {
 	if strings.TrimSpace(title) == "" {
 		return domain.Task{}, errors.New("task title is required")
 	}
@@ -1615,7 +1654,25 @@ func (s *Store) CreateTask(c context.Context, b, title, desc, priority, start, d
 	}
 	defer tx.Rollback(c)
 	var t domain.Task
-	e = tx.QueryRow(c, "INSERT INTO tasks(board_id,column_id,title,description,priority,start_date,due_date) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id,board_id,column_id,title,description,priority,start_date,due_date,completed_at,created_at", b, col, strings.TrimSpace(title), desc, priority, startVal, dueVal).Scan(&t.ID, &t.BoardID, &t.ColumnID, &t.Title, &t.Description, &t.Priority, &t.StartDate, &t.DueDate, &t.CompletedAt, &t.CreatedAt)
+	var templateID any
+	var templateVersion any
+	var templateData any
+	if template != nil {
+		templateID = template.ID
+		templateVersion = template.Version
+		templateData = templateSnapshot(*template)
+	}
+	e = tx.QueryRow(c, "INSERT INTO tasks(board_id,column_id,title,description,priority,start_date,due_date,template_id,template_version,template_snapshot) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id,board_id,column_id,title,description,priority,start_date,due_date,completed_at,created_at", b, col, strings.TrimSpace(title), desc, priority, startVal, dueVal, templateID, templateVersion, templateData).Scan(&t.ID, &t.BoardID, &t.ColumnID, &t.Title, &t.Description, &t.Priority, &t.StartDate, &t.DueDate, &t.CompletedAt, &t.CreatedAt)
+	if e == nil {
+		if template != nil {
+			for _, labelID := range template.DefaultLabelIDs {
+				_, e = tx.Exec(c, "INSERT INTO task_labels(task_id,label_id) VALUES($1,$2)", t.ID, labelID)
+				if e != nil {
+					break
+				}
+			}
+		}
+	}
 	if e == nil {
 		_, e = tx.Exec(c, `INSERT INTO task_repository_targets(task_id,project_id,project_name,repository_url,default_branch,local_path,source_groups,target_source)
 			SELECT $1,p.id,p.name,p.repository_url,p.default_branch,p.local_path,'[]'::jsonb,'inherited'
@@ -1634,7 +1691,7 @@ func (s *Store) CreateTask(c context.Context, b, title, desc, priority, start, d
 	return t, tx.Commit(c)
 }
 func (s *Store) Tasks(c context.Context, b string) ([]domain.Task, error) {
-	r, e := s.DB.Query(c, `SELECT t.id,t.board_id,t.column_id,c.name,t.title,t.description,t.priority,t.start_date,t.due_date,t.completed_at,t.created_at,(c.column_type='done'),t.rework_count FROM tasks t JOIN workflow_columns c ON c.id=t.column_id WHERE t.board_id=$1 ORDER BY t.created_at DESC`, b)
+	r, e := s.DB.Query(c, `SELECT t.id,t.board_id,t.column_id,c.name,t.title,t.description,t.priority,t.start_date,t.due_date,t.completed_at,t.created_at,(c.column_type='done'),t.rework_count,COALESCE(t.template_id::text,''),COALESCE(t.template_version,0),COALESCE(t.template_snapshot,'{}'::jsonb)::text FROM tasks t JOIN workflow_columns c ON c.id=t.column_id WHERE t.board_id=$1 ORDER BY t.created_at DESC`, b)
 	if e != nil {
 		return nil, e
 	}
@@ -1642,7 +1699,7 @@ func (s *Store) Tasks(c context.Context, b string) ([]domain.Task, error) {
 	tasks := []domain.Task{}
 	for r.Next() {
 		var task domain.Task
-		if e := r.Scan(&task.ID, &task.BoardID, &task.ColumnID, &task.ColumnName, &task.Title, &task.Description, &task.Priority, &task.StartDate, &task.DueDate, &task.CompletedAt, &task.CreatedAt, &task.IsTerminal, &task.ReworkCount); e != nil {
+		if e := r.Scan(&task.ID, &task.BoardID, &task.ColumnID, &task.ColumnName, &task.Title, &task.Description, &task.Priority, &task.StartDate, &task.DueDate, &task.CompletedAt, &task.CreatedAt, &task.IsTerminal, &task.ReworkCount, &task.TemplateID, &task.TemplateVersion, &task.TemplateSnapshot); e != nil {
 			return nil, e
 		}
 		tasks = append(tasks, task)
@@ -1659,7 +1716,7 @@ func (s *Store) Tasks(c context.Context, b string) ([]domain.Task, error) {
 }
 func (s *Store) GetTask(c context.Context, id string) (domain.Task, error) {
 	var t domain.Task
-	e := s.DB.QueryRow(c, `SELECT t.id,t.board_id,t.column_id,c.name,t.title,t.description,t.priority,t.start_date,t.due_date,t.completed_at,t.created_at,(c.column_type='done'),t.rework_count FROM tasks t JOIN workflow_columns c ON c.id=t.column_id WHERE t.id=$1`, id).Scan(&t.ID, &t.BoardID, &t.ColumnID, &t.ColumnName, &t.Title, &t.Description, &t.Priority, &t.StartDate, &t.DueDate, &t.CompletedAt, &t.CreatedAt, &t.IsTerminal, &t.ReworkCount)
+	e := s.DB.QueryRow(c, `SELECT t.id,t.board_id,t.column_id,c.name,t.title,t.description,t.priority,t.start_date,t.due_date,t.completed_at,t.created_at,(c.column_type='done'),t.rework_count,COALESCE(t.template_id::text,''),COALESCE(t.template_version,0),COALESCE(t.template_snapshot,'{}'::jsonb)::text FROM tasks t JOIN workflow_columns c ON c.id=t.column_id WHERE t.id=$1`, id).Scan(&t.ID, &t.BoardID, &t.ColumnID, &t.ColumnName, &t.Title, &t.Description, &t.Priority, &t.StartDate, &t.DueDate, &t.CompletedAt, &t.CreatedAt, &t.IsTerminal, &t.ReworkCount, &t.TemplateID, &t.TemplateVersion, &t.TemplateSnapshot)
 	if e != nil {
 		return t, e
 	}
