@@ -2871,6 +2871,41 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	_ = w.Store.AddRunLog(ctx, run.ID, "info", "Task-Branch: "+taskBranch)
 	_ = w.Store.AddRunLog(ctx, run.ID, "info", "Isolierter Git-Worktree: "+worktree)
 	run.WorkspaceSnapshot = worktree
+	devDefinition, hasDevContainer, devErr := discoverDevContainer(worktree)
+	devRuntime := ""
+	if devErr != nil {
+		reason := "Dev-Container pausiert: " + devErr.Error()
+		_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Dev-Container-Definition ungültig", reason)
+		_ = w.finish(ctx, run, "failed")
+		return
+	}
+	if hasDevContainer {
+		devRuntime, devErr = devContainerRuntime(runCtx)
+		if devErr == nil {
+			_ = w.Store.AddRunLog(ctx, run.ID, "info", fmt.Sprintf("Dev-Container erkannt: Definition=%s Hash=%s Image=%s Dockerfile=%s Compose=%s Features=%t", devDefinition.Path, devDefinition.Hash, devDefinition.Image, devDefinition.Dockerfile, strings.Join(devDefinition.ComposeFiles, ","), devDefinition.HasFeatures))
+			devErr = startDevContainer(runCtx, devRuntime, devDefinition, run.ID)
+		}
+		if devErr != nil {
+			reason := "Dev-Container pausiert: " + devErr.Error()
+			_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Dev-Container konnte nicht gestartet werden", reason)
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Dev-Container gestartet; projektdefinierte Lifecycle-Kommandos wurden von der Runtime ausgeführt")
+		defer func() {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cleanupCancel()
+			if cleanupErr := stopDevContainer(cleanupCtx, run.ID); cleanupErr != nil {
+				_ = w.Store.AddRunLog(context.Background(), run.ID, "warning", cleanupErr.Error())
+			} else {
+				_ = w.Store.AddRunLog(context.Background(), run.ID, "info", "Dev-Container nach Run beendet und bereinigt")
+			}
+		}()
+	} else {
+		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Kein .devcontainer vorhanden; bestehende Host-Ausführungsumgebung wird verwendet")
+	}
 	_ = w.Store.AddRunLog(ctx, run.ID, "info", "Codex-Agent gestartet")
 	agent, agentErr := w.Store.GetAgent(ctx, run.AgentID)
 	if agentErr != nil {
@@ -2992,10 +3027,22 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			_ = w.finish(ctx, run, "failed")
 			return
 		}
-		if provider.Provider == "codex" {
+		finalPath := filepath.Join("/home/agent/.taskboard-run-logs", run.ID+".final")
+		if hasDevContainer {
+			finalPath = filepath.Join(run.WorkspaceSnapshot, ".shipyard-"+run.ID+".final")
+		}
+		if provider.Provider == "codex" && !hasDevContainer {
 			args = withWorkingDirectory(args, run.WorkspaceSnapshot)
-			finalPath := filepath.Join("/home/agent/.taskboard-run-logs", run.ID+".final")
-			args = withOutputLastMessage(args, finalPath)
+		}
+		if provider.Provider == "codex" {
+			if hasDevContainer {
+				args = withOutputLastMessage(args, filepath.Join(devContainerWorkspaceFolder(devDefinition, run.WorkspaceSnapshot), ".shipyard-"+run.ID+".final"))
+			} else {
+				args = withOutputLastMessage(args, finalPath)
+			}
+		}
+		if hasDevContainer {
+			command, args = devContainerExecArgs(devRuntime, devDefinition, command, args)
 		}
 		// Record the exact provider invocation without leaking the task prompt.
 		// This makes an adapter/configuration regression visible in the run
@@ -3015,7 +3062,6 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			}
 		}
 		env = append(env, secretEnv...)
-		finalPath := filepath.Join("/home/agent/.taskboard-run-logs", run.ID+".final")
 		_ = os.Remove(finalPath)
 		trustedOutputPath := ""
 		if provider.Provider != "codex" {
