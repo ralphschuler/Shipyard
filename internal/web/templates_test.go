@@ -70,6 +70,39 @@ func TestAgentsTemplatePreservesSandboxProfileActiveState(t *testing.T) {
 	}
 }
 
+func TestProviderTemplateRequiresAgentContextForConnectionTests(t *testing.T) {
+	page, err := files.ReadFile("templates/providers.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(page)
+	for _, required := range []string{
+		"/settings/secrets",
+		"Agent für Verbindungstest",
+		"data-provider-agent-select",
+		"required",
+	} {
+		if !strings.Contains(html, required) {
+			t.Fatalf("provider template must contain %q", required)
+		}
+	}
+
+	script, err := files.ReadFile("static/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(script)
+	for _, required := range []string{
+		"data-provider-agent-select",
+		"localStorage.setItem('shipyard.provider-test-agent'",
+		"new URLSearchParams({agent_id:agent})",
+	} {
+		if !strings.Contains(js, required) {
+			t.Fatalf("provider test script must contain %q", required)
+		}
+	}
+}
+
 func TestTaskTabsRemainAccessibleAndKeepChangesActionsInHeader(t *testing.T) {
 	page, err := files.ReadFile("templates/task.html")
 	if err != nil {

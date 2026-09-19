@@ -40,6 +40,7 @@ func TestSettingsTabsAreRegistered(t *testing.T) {
 	(&App{}).Register(mux)
 	for _, path := range []string{
 		"/settings/providers",
+		"/settings/secrets",
 		"/settings/agent-policy",
 		"/settings/appearance",
 		"/settings/integrations",
