@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"golang.org/x/crypto/argon2"
 	"log"
 	"net"
@@ -279,12 +280,20 @@ func (a *App) Protected(next http.Handler) http.Handler {
 					return
 				}
 			}
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				apiUnauthorized(w)
+				return
+			}
 			http.Redirect(w, r, "/login", 303)
 			return
 		}
 		u, sess, err := a.store.UserBySession(r.Context(), tokenHash(cookie.Value))
 		if err != nil {
 			http.SetCookie(w, &http.Cookie{Name: "taskboard_session", Value: "", Path: "/", MaxAge: -1})
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				apiUnauthorized(w)
+				return
+			}
 			http.Redirect(w, r, "/login", 303)
 			return
 		}
@@ -340,6 +349,16 @@ func (a *App) Protected(next http.Handler) http.Handler {
 		_ = a.store.RecordAudit(r.Context(), u.ID, "control_panel."+strings.ToLower(r.Method), "http", r.URL.Path, map[string]string{
 			"channel": "control_panel", "method": r.Method, "path": r.URL.Path, "status": strconv.Itoa(status),
 		})
+	})
+}
+
+func apiUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"status":      "unauthorized",
+		"reason":      "Anmeldung erforderlich.",
+		"next_action": "Melde dich an und starte die Prüfung erneut.",
 	})
 }
 func (a *App) setup(w http.ResponseWriter, r *http.Request) {

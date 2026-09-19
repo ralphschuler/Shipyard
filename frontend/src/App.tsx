@@ -1517,7 +1517,7 @@ function isUpdateData(value: unknown): value is UpdateData {
 
 function Updates({ language }: { language: Language }) {
   const { text } = useLocale();
-  const { data, error } = useAPI<any>("/api/v1/settings/updates");
+  const { data, error, errorMessage } = useAPI<any>("/api/v1/settings/updates");
   const t = (key: string) => translate(language, key);
   const [message, setMessage] = useState("");
   const [progress, setProgress] = useState<any[]>([]);
@@ -1528,7 +1528,7 @@ function Updates({ language }: { language: Language }) {
   const [manualData, setManualData] = useState<UpdateData | undefined>();
   const [checkError, setCheckError] = useState<{ message: string; checkedAt: string }>();
   const result = (manualData || data) as UpdateData | undefined;
-  if (error) return <Failure />;
+  if (error) return <Failure message={errorMessage} />;
   if (!result) return <Loading />;
   const displayStatus = checkError ? "unavailable" : result.status;
   const release = checkError ? {} : result.release || {};
@@ -2237,13 +2237,13 @@ function Loading() {
     </Card>
   );
 }
-function Failure() {
+function Failure({ message }: { message?: string } = {}) {
   const { text } = useLocale();
   return (
     <Card>
       <CardContent className="flex min-h-56 flex-col items-center justify-center gap-4 py-12 text-center">
         <p className="text-sm text-destructive">
-          {text("Daten konnten nicht geladen werden. Bitte erneut versuchen.", "Data could not be loaded. Please try again.")}
+          {message || text("Daten konnten nicht geladen werden. Bitte erneut versuchen.", "Data could not be loaded. Please try again.")}
         </p>
         <Button type="button" size="sm" variant="outline" onClick={() => refreshData()}>
           {text("Daten erneut laden", "Reload data")}

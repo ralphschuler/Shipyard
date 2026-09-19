@@ -44,6 +44,7 @@ export function endpointUsesChange(endpoint: string, change: LiveChange) {
 export function useAPI<T>(endpoint: string) {
   const [data, setData] = useState<T>();
   const [error, setError] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
   useEffect(() => {
     let stopped = false;
     let timer: number | undefined;
@@ -53,16 +54,26 @@ export function useAPI<T>(endpoint: string) {
       controller?.abort();
       controller = new AbortController();
       fetch(endpoint, { credentials: "same-origin", signal: controller.signal })
-        .then((r) => (r.ok ? r.json() : Promise.reject()))
+        .then(async (r) => {
+          if (r.ok) return r.json();
+          const payload = await r.json().catch(() => null) as { reason?: unknown; next_action?: unknown } | null;
+          const reason = typeof payload?.reason === "string" ? payload.reason : "Daten konnten nicht geladen werden.";
+          const nextAction = typeof payload?.next_action === "string" ? ` ${payload.next_action}` : "";
+          throw new Error(reason + nextAction);
+        })
         .then((value) => {
           if (!stopped) { hasData = true; setData(value); setError(false); }
         })
         .catch((reason) => {
-          if (!stopped && reason?.name !== "AbortError" && !hasData) setError(true);
+          if (!stopped && reason?.name !== "AbortError" && !hasData) {
+            setError(true);
+            setErrorMessage(reason instanceof Error ? reason.message : "Daten konnten nicht geladen werden.");
+          }
         });
     };
     setData(undefined);
     setError(false);
+    setErrorMessage("");
     timer = window.setTimeout(load, 0);
     const refresh = (event: Event) => {
       const change = (event as CustomEvent<LiveChange>).detail ?? {};
@@ -78,7 +89,7 @@ export function useAPI<T>(endpoint: string) {
       window.removeEventListener("taskboard:data-change", refresh);
     };
   }, [endpoint]);
-  return { data, error };
+  return { data, error, errorMessage };
 }
 
 function csrf() {

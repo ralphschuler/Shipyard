@@ -34,12 +34,13 @@ var ErrTargetSelectionRequired = errors.New("an explicit repository target selec
 var canonicalUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 
 func acquireWorkspaceRunGate() (*workspacecfg.RunGate, error) {
-	if _, err := workspacecfg.Validate(); err != nil {
-		return nil, fmt.Errorf("Workspace-Preflight blockiert neue Runs: %w", err)
-	}
 	gate, err := workspacecfg.AcquireRunGate()
 	if err != nil {
-		return nil, errors.New("Workspace-Migration blockiert neue Runs")
+		return nil, err
+	}
+	if _, err := workspacecfg.Validate(); err != nil {
+		_ = gate.Close()
+		return nil, fmt.Errorf("Workspace-Preflight blockiert neue Runs: %w", err)
 	}
 	return gate, nil
 }
