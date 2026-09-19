@@ -96,6 +96,40 @@ func TestRunTargetProjectIsRequiredBeforeExecution(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestEnsureIntegrationBranchRecreatesMissingBranchFromAcceptedHead(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "delivery.txt"), []byte("accepted\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "delivery.txt")
+	runGit(t, source, "commit", "-m", "accepted delivery")
+	head, err := gitOutput(ctx, source, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ensureIntegrationBranch(ctx, source, "task/task-1", head); err != nil {
+		t.Fatal(err)
+	}
+	got, err := gitOutput(ctx, source, "rev-parse", "task/task-1")
+	if err != nil || got != head {
+		t.Fatalf("integration branch = %q, want accepted head %q (err=%v)", got, head, err)
+	}
+}
+
+func TestIntegrationFailureIsRequeuedInsteadOfRemainingRunning(t *testing.T) {
+	job := domain.IntegrationJob{Status: "running", Step: "pr", Attempts: 1}
+	status, step := integrationFailureState(job)
+	if status != "queued" || step != "pr" {
+		t.Fatalf("failure state = status %q step %q, want queued/pr", status, step)
+	}
+}
+
 func runGit(t *testing.T, directory string, args ...string) {
 	t.Helper()
 	command := exec.Command("git", append([]string{"-C", directory}, args...)...)
