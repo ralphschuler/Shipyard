@@ -709,6 +709,7 @@ function Boards() {
   );
 }
 function Projects() {
+  const { language, text } = useLocale();
   const { data: items, error: loadFailed } = useAPI<any[]>("/api/v1/projects");
   const { data: boards } = useAPI<any[]>("/api/v1/boards");
   const { data: groups } = useAPI<any[]>("/api/v1/project-groups");
@@ -733,7 +734,7 @@ function Projects() {
     }
   };
   const remove = async (id: string) => {
-    if (!confirm("Projekt wirklich löschen?")) return;
+    if (!confirm(text("Projekt wirklich löschen?", "Delete this project?"))) return;
     try {
       await mutation("/projects/" + id + "/delete", { method: "POST" });
       refreshData();
@@ -764,7 +765,7 @@ function Projects() {
     }
   };
   const deleteGroup = async (id: string) => {
-    if (!confirm("Projektgruppe wirklich entfernen? Projekte und bereits gespeicherte Task-Ziele bleiben erhalten.")) return;
+    if (!confirm(text("Projektgruppe wirklich entfernen? Projekte und bereits gespeicherte Task-Ziele bleiben erhalten.", "Remove this project group? Projects and existing task targets will be retained."))) return;
     try {
       await mutation(`/project-groups/${id}/delete`, { method: "POST" });
       setEditingGroup(undefined);
@@ -783,14 +784,14 @@ function Projects() {
     <Card>
       <CardHeader className="flex flex-row items-start justify-between gap-4">
         <div>
-          <CardTitle>Projekte</CardTitle>
+          <CardTitle>{text("Projekte", "Projects")}</CardTitle>
           <CardDescription>
-            Repositories, Gruppen und Board-Zuordnung.
+            {text("Repositories, Gruppen und Board-Zuordnung.", "Repositories, groups, and board assignments.")}
           </CardDescription>
         </div>
         <div className="flex flex-wrap justify-end gap-2">
           <Button variant="outline" onClick={() => setGroupsOpen(true)}>
-            Gruppen verwalten
+            {text("Gruppen verwalten", "Manage groups")}
           </Button>
           <Button
             onClick={() => {
@@ -798,7 +799,7 @@ function Projects() {
               setOpen(true);
             }}
           >
-            Projekt anlegen
+            {text("Projekt anlegen", "Create project")}
           </Button>
         </div>
       </CardHeader>
@@ -811,20 +812,20 @@ function Projects() {
                 <div>
                   <strong className="text-sm">{project.Name}</strong>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {project.RepositoryURL || "Kein Repository verbunden"} ·{" "}
+                    {project.RepositoryURL || text("Kein Repository verbunden", "No repository connected")} ·{" "}
                     {project.DefaultBranch}
                   </p>
                   <p className={"mt-1 text-xs " + (project.LastSyncError ? "text-destructive" : "text-muted-foreground")}>
                     {project.LastSyncError
-                      ? `Sync-Fehler: ${project.LastSyncError}`
+                      ? `${text("Sync-Fehler", "Sync error")}: ${project.LastSyncError}`
                       : project.LastSyncedAt
-                        ? `Zuletzt synchronisiert: ${new Date(project.LastSyncedAt).toLocaleString("de-DE")}`
-                        : "Noch nicht synchronisiert"}
+                        ? `${text("Zuletzt synchronisiert", "Last synchronized")}: ${new Date(project.LastSyncedAt).toLocaleString(language === "en" ? "en-US" : "de-DE")}`
+                        : text("Noch nicht synchronisiert", "Not synchronized yet")}
                   </p>
                   <div className="mt-2 flex flex-wrap gap-1">
                     {project.Boards?.map((board: any) => (
                       <Badge key={board.ID} variant="outline">
-                        Board: {board.Name}
+                        {text("Board", "Board")}: {board.Name}
                       </Badge>
                     ))}
                     {groups.filter((group) => grouped(project, group)).map((group) => (
@@ -858,60 +859,59 @@ function Projects() {
                       setOpen(true);
                     }}
                   >
-                    Bearbeiten
+                    {text("Bearbeiten", "Edit")}
                   </Button>
                   <Button
                     variant="destructive"
                     size="sm"
                     onClick={() => remove(project.ID)}
                   >
-                    Löschen
+                    {text("Löschen", "Delete")}
                   </Button>
                 </div>
               </div>
             </article>
           ))}
-        </div> : <EmptyState title="Noch kein Projekt" description="Lege ein Repository an und ordne es bei Bedarf Boards und Projektgruppen zu." />}
+        </div> : <EmptyState title={text("Noch kein Projekt", "No projects yet")} description={text("Lege ein Repository an und ordne es bei Bedarf Boards und Projektgruppen zu.", "Create a repository and assign it to boards and project groups as needed.")} />}
       </CardContent>
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {editing ? "Projekt bearbeiten" : "Neues Projekt"}
+              {editing ? text("Projekt bearbeiten", "Edit project") : text("Neues Projekt", "New project")}
             </DialogTitle>
             <DialogDescription>
-              Gruppen werden beim Speichern zugewiesen; nicht verwendete Gruppen
-              verschwinden automatisch.
+              {text("Gruppen werden beim Speichern zugewiesen; nicht verwendete Gruppen verschwinden automatisch.", "Groups are assigned when saved; unused groups are removed automatically.")}
             </DialogDescription>
           </DialogHeader>
           <form className="grid gap-3" onSubmit={save}>
             <label className="grid gap-1 text-sm">
-              Name
+              {text("Name", "Name")}
               <Input name="name" required defaultValue={editing?.Name || ""} />
             </label>
             <label className="grid gap-1 text-sm">
-              Repository-URL
+              {text("Repository-URL", "Repository URL")}
               <Input
                 name="repository_url"
                 defaultValue={editing?.RepositoryURL || ""}
               />
             </label>
             <label className="grid gap-1 text-sm">
-              Standard-Branch
+              {text("Standard-Branch", "Default branch")}
               <Input
                 name="default_branch"
                 defaultValue={editing?.DefaultBranch || "main"}
               />
             </label>
             <label className="grid gap-1 text-sm">
-              Lokaler Clone-Pfad
+              {text("Lokaler Clone-Pfad", "Local clone path")}
               <Input
                 name="local_path"
                 defaultValue={editing?.LocalPath || ""}
               />
             </label>
             <fieldset className="grid gap-2">
-              <legend className="text-sm font-medium">Boards</legend>
+              <legend className="text-sm font-medium">{text("Boards", "Boards")}</legend>
               {boards.map((board) => (
                 <label key={board.ID} className="flex gap-2 text-sm">
                   <input
@@ -925,7 +925,7 @@ function Projects() {
               ))}
             </fieldset>
             <fieldset className="grid gap-2">
-              <legend className="text-sm font-medium">Gruppen</legend>
+              <legend className="text-sm font-medium">{text("Gruppen", "Groups")}</legend>
               {groups.map((group) => (
                 <label key={group.ID} className="flex gap-2 text-sm">
                   <input
@@ -939,11 +939,11 @@ function Projects() {
               ))}
               <Input
                 name="new_group"
-                placeholder="Neue Gruppe, z. B. Inhouse APIs"
+                placeholder={text("Neue Gruppe, z. B. Inhouse APIs", "New group, e.g. Inhouse APIs")}
               />
             </fieldset>
             <DialogFooter>
-              <Button type="submit">Speichern</Button>
+              <Button type="submit">{text("Speichern", "Save")}</Button>
             </DialogFooter>
           </form>
         </DialogContent>
@@ -954,27 +954,27 @@ function Projects() {
       }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Projektgruppen</DialogTitle>
+            <DialogTitle>{text("Projektgruppen", "Project groups")}</DialogTitle>
             <DialogDescription>
-              Gruppen bündeln Projekte für die Auswahl. Eine Gruppe ohne Projekt wird automatisch entfernt.
+              {text("Gruppen bündeln Projekte für die Auswahl. Eine Gruppe ohne Projekt wird automatisch entfernt.", "Groups bundle projects for selection. A group without a project is removed automatically.")}
             </DialogDescription>
           </DialogHeader>
           {editingGroup ? (
             <form className="grid gap-3" onSubmit={saveGroup}>
               <label className="grid gap-1 text-sm">
-                Name
+                {text("Name", "Name")}
                 <Input name="name" required defaultValue={editingGroup.Name} />
               </label>
               <label className="grid gap-1 text-sm">
-                Beschreibung
+                {text("Beschreibung", "Description")}
                 <textarea name="description" className="min-h-20 rounded-md border bg-transparent p-2" defaultValue={editingGroup.Description} />
               </label>
               <label className="grid gap-1 text-sm">
-                Farbe
+                {text("Farbe", "Color")}
                 <Input name="color" type="color" defaultValue={editingGroup.Color || "#3158d4"} />
               </label>
               <fieldset className="grid gap-2">
-                <legend className="text-sm font-medium">Zugehörige Projekte</legend>
+                <legend className="text-sm font-medium">{text("Zugehörige Projekte", "Associated projects")}</legend>
                 {items.map((project) => (
                   <label key={project.ID} className="flex items-center gap-2 text-sm">
                     <input
@@ -988,9 +988,9 @@ function Projects() {
                 ))}
               </fieldset>
               <DialogFooter>
-                <Button type="button" variant="outline" onClick={() => setEditingGroup(undefined)}>Zurück</Button>
-                <Button type="button" variant="destructive" onClick={() => deleteGroup(editingGroup.ID)}>Gruppe löschen</Button>
-                <Button type="submit">Gruppe speichern</Button>
+                <Button type="button" variant="outline" onClick={() => setEditingGroup(undefined)}>{text("Zurück", "Back")}</Button>
+                <Button type="button" variant="destructive" onClick={() => deleteGroup(editingGroup.ID)}>{text("Gruppe löschen", "Delete group")}</Button>
+                <Button type="submit">{text("Gruppe speichern", "Save group")}</Button>
               </DialogFooter>
             </form>
           ) : groups.length ? (
@@ -1002,16 +1002,16 @@ function Projects() {
                       {group.Name}
                     </Badge>
                     <p className="mt-2 text-xs text-muted-foreground">
-                      {group.Projects?.length || 0} Projekt{group.Projects?.length === 1 ? "" : "e"}
+                      {group.Projects?.length || 0} {language === "en" ? ((group.Projects?.length || 0) === 1 ? "project" : "projects") : `Projekt${group.Projects?.length === 1 ? "" : "e"}`}
                       {group.Description ? ` · ${group.Description}` : ""}
                     </p>
                   </div>
-                  <Button size="sm" variant="outline" onClick={() => setEditingGroup(group)}>Bearbeiten</Button>
+                  <Button size="sm" variant="outline" onClick={() => setEditingGroup(group)}>{text("Bearbeiten", "Edit")}</Button>
                 </article>
               ))}
             </div>
           ) : (
-            <EmptyState title="Noch keine Gruppen" description="Lege beim Speichern eines Projekts eine neue Gruppe an." />
+            <EmptyState title={text("Noch keine Gruppen", "No groups yet")} description={text("Lege beim Speichern eines Projekts eine neue Gruppe an.", "Create a new group while saving a project.")} />
           )}
         </DialogContent>
       </Dialog>
