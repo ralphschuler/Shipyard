@@ -1019,6 +1019,7 @@ function Projects() {
   );
 }
 function Agents() {
+  const { text } = useLocale();
   const { data, error } = useAPI<any[]>("/api/v1/agents");
   if (error) return <Failure />;
   if (!data) return <Loading />;
@@ -1027,11 +1028,11 @@ function Agents() {
       <CardHeader className="flex flex-row items-start justify-between gap-4">
         <div>
           <CardTitle>Agents</CardTitle>
-          <CardDescription>Agenten öffnen und bearbeiten.</CardDescription>
+          <CardDescription>{text("Agenten öffnen und bearbeiten.", "Open and edit agents.")}</CardDescription>
         </div>
         <div className="flex gap-2">
-          <Button asChild variant="outline"><a href="#/agents/templates">Vorlagen</a></Button>
-          <Button asChild><a href="#/agents/new">Agent anlegen</a></Button>
+          <Button asChild variant="outline"><a href="#/agents/templates">{text("Vorlagen", "Templates")}</a></Button>
+          <Button asChild><a href="#/agents/new">{text("Agent anlegen", "Create agent")}</a></Button>
         </div>
       </CardHeader>
       <CardContent className="divide-y">
@@ -1044,19 +1045,20 @@ function Agents() {
             <div className="flex justify-between gap-3">
               <strong className="text-sm">{agent.Name}</strong>
               <Badge variant={agent.Enabled ? "secondary" : "outline"}>
-                {agent.Enabled ? "Aktiv" : "Inaktiv"}
+                {agent.Enabled ? text("Aktiv", "Active") : text("Inaktiv", "Inactive")}
               </Badge>
             </div>
             <p className="mt-1 text-sm text-muted-foreground">
-              {agent.Description || "Profil ohne festen Workspace"}
+              {agent.Description || text("Profil ohne festen Workspace", "Profile without a fixed workspace")}
             </p>
           </a>
-        )) : <EmptyState title="Noch kein Agent" description="Lege einen Agenten mit Arbeitsanweisung und erlaubten Skills an." actionHref="#/agents/new" actionLabel="Agent anlegen" />}
+        )) : <EmptyState title={text("Noch kein Agent", "No agents yet")} description={text("Lege einen Agenten mit Arbeitsanweisung und erlaubten Skills an.", "Create an agent with instructions and permitted skills.")} actionHref="#/agents/new" actionLabel={text("Agent anlegen", "Create agent")} />}
       </CardContent>
     </Card>
   );
 }
 function AgentDetail({ id }: { id: string }) {
+  const { text } = useLocale();
   const { data, error } = useAPI<any>("/api/v1/agents/" + id);
   const { data: skills } = useAPI<any[]>("/api/v1/skills");
   const [form, setForm] = useState<any>();
@@ -1088,13 +1090,13 @@ function AgentDetail({ id }: { id: string }) {
         method: "POST",
         body: assigned,
       });
-      setMessage("Gespeichert.");
+      setMessage(text("Gespeichert.", "Saved."));
     } catch (err) {
       setMessage(String(err));
     }
   };
   const remove = async () => {
-    if (!confirm("Agent wirklich löschen?")) return;
+    if (!confirm(text("Agent wirklich löschen?", "Delete this agent?"))) return;
     try {
       await mutation("/agents/" + id + "/delete", { method: "POST" });
       location.hash = "/agents";
@@ -1106,22 +1108,22 @@ function AgentDetail({ id }: { id: string }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Agent bearbeiten</CardTitle>
+        <CardTitle>{text("Agent bearbeiten", "Edit agent")}</CardTitle>
         <CardDescription>
-          Profil, Arbeitsanweisung und erlaubte Skills.
+          {text("Profil, Arbeitsanweisung und erlaubte Skills.", "Profile, instructions, and permitted skills.")}
         </CardDescription>
       </CardHeader>
       <CardContent>
         <form className="grid gap-4" onSubmit={save}>
           <label className="grid gap-2 text-sm">
-            Name
+            {text("Name", "Name")}
             <Input
               value={form.Name}
               onChange={(e) => setForm({ ...form, Name: e.target.value })}
             />
           </label>
           <label className="grid gap-2 text-sm">
-            Beschreibung
+            {text("Beschreibung", "Description")}
             <textarea
               className="min-h-20 rounded-lg border bg-transparent p-2"
               value={form.Description || ""}
@@ -1131,7 +1133,7 @@ function AgentDetail({ id }: { id: string }) {
             />
           </label>
           <label className="grid gap-2 text-sm">
-            Arbeitsanweisung
+            {text("Arbeitsanweisung", "Instructions")}
             <textarea
               className="min-h-32 rounded-lg border bg-transparent p-2"
               value={form.Prompt || ""}
@@ -1139,25 +1141,25 @@ function AgentDetail({ id }: { id: string }) {
             />
           </label>
           <label className="grid gap-2 text-sm">
-            Prompt-Prefix
+            {text("Prompt-Prefix", "Prompt prefix")}
             <textarea
               className="min-h-20 rounded-lg border bg-transparent p-2"
               value={form.PromptPrefix || ""}
               onChange={(e) => setForm({ ...form, PromptPrefix: e.target.value })}
-              placeholder="Wird vor der Arbeitsanweisung und dem Task-Kontext gesetzt."
+              placeholder={text("Wird vor der Arbeitsanweisung und dem Task-Kontext gesetzt.", "Placed before the instructions and task context.")}
             />
           </label>
           <label className="grid gap-2 text-sm">
-            Prompt-Suffix
+            {text("Prompt-Suffix", "Prompt suffix")}
             <textarea
               className="min-h-20 rounded-lg border bg-transparent p-2"
               value={form.PromptSuffix || ""}
               onChange={(e) => setForm({ ...form, PromptSuffix: e.target.value })}
-              placeholder="Definiert Abschluss, Übergabe und Rückmeldungen des Agents."
+              placeholder={text("Definiert Abschluss, Übergabe und Rückmeldungen des Agents.", "Defines completion, handoff, and agent feedback.")}
             />
           </label>
           <label className="grid gap-2 text-sm">
-            Maximal parallele Runs
+            {text("Maximal parallele Runs", "Maximum parallel runs")}
             <Input
               type="number"
               min="1"
@@ -1173,10 +1175,10 @@ function AgentDetail({ id }: { id: string }) {
               checked={!!form.Enabled}
               onChange={(e) => setForm({ ...form, Enabled: e.target.checked })}
             />{" "}
-            Agent aktiv
+            {text("Agent aktiv", "Agent active")}
           </label>
           <fieldset className="grid gap-2">
-            <legend className="text-sm font-medium">Erlaubte Skills</legend>
+            <legend className="text-sm font-medium">{text("Erlaubte Skills", "Permitted skills")}</legend>
             <div className="flex flex-wrap gap-2">
               {skills.map((skill) => (
                 <button
@@ -1204,11 +1206,11 @@ function AgentDetail({ id }: { id: string }) {
             <p className="text-sm text-muted-foreground">{message}</p>
           )}
           <div className="flex flex-wrap gap-2">
-            <Button type="submit">Änderungen speichern</Button>
+            <Button type="submit">{text("Änderungen speichern", "Save changes")}</Button>
             <Button type="button" variant="destructive" onClick={remove}>
-              Löschen
+              {text("Löschen", "Delete")}
             </Button>
-            <Button asChild type="button" variant="outline"><a href="#/agents">Zurück</a></Button>
+            <Button asChild type="button" variant="outline"><a href="#/agents">{text("Zurück", "Back")}</a></Button>
           </div>
         </form>
       </CardContent>
@@ -1216,6 +1218,7 @@ function AgentDetail({ id }: { id: string }) {
   );
 }
 function AgentForm() {
+  const { text } = useLocale();
   const { data: skills } = useAPI<any[]>("/api/v1/skills");
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -1246,15 +1249,15 @@ function AgentForm() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Neuer Agent</CardTitle>
+        <CardTitle>{text("Neuer Agent", "New agent")}</CardTitle>
         <CardDescription>
-          Der Run-Workspace wird beim Start aus dem Task-Projektziel erzeugt.
+          {text("Der Run-Workspace wird beim Start aus dem Task-Projektziel erzeugt.", "The run workspace is created at start from the task project target.")}
         </CardDescription>
       </CardHeader>
       <CardContent>
         <form className="grid gap-4" onSubmit={submit}>
           <label className="grid gap-2 text-sm">
-            Name
+            {text("Name", "Name")}
             <Input
               required
               value={name}
@@ -1262,7 +1265,7 @@ function AgentForm() {
             />
           </label>
           <label className="grid gap-2 text-sm">
-            Beschreibung
+            {text("Beschreibung", "Description")}
             <textarea
               className="min-h-20 rounded-lg border bg-transparent p-2"
               value={description}
@@ -1270,7 +1273,7 @@ function AgentForm() {
             />
           </label>
           <label className="grid gap-2 text-sm">
-            Arbeitsanweisung
+            {text("Arbeitsanweisung", "Instructions")}
             <textarea
               className="min-h-32 rounded-lg border bg-transparent p-2"
               value={prompt}
@@ -1278,25 +1281,25 @@ function AgentForm() {
             />
           </label>
           <label className="grid gap-2 text-sm">
-            Prompt-Prefix
+            {text("Prompt-Prefix", "Prompt prefix")}
             <textarea
               className="min-h-20 rounded-lg border bg-transparent p-2"
               value={prefix}
               onChange={(e) => setPrefix(e.target.value)}
-              placeholder="Fester Kontext vor der Arbeitsanweisung"
+              placeholder={text("Fester Kontext vor der Arbeitsanweisung", "Fixed context before the instructions")}
             />
           </label>
           <label className="grid gap-2 text-sm">
-            Prompt-Suffix
+            {text("Prompt-Suffix", "Prompt suffix")}
             <textarea
               className="min-h-20 rounded-lg border bg-transparent p-2"
               value={suffix}
               onChange={(e) => setSuffix(e.target.value)}
-              placeholder="Übergabe- und Abschlussregeln"
+              placeholder={text("Übergabe- und Abschlussregeln", "Handoff and completion rules")}
             />
           </label>
           <fieldset className="grid gap-2">
-            <legend className="text-sm font-medium">Erlaubte Skills</legend>
+            <legend className="text-sm font-medium">{text("Erlaubte Skills", "Permitted skills")}</legend>
             <div className="flex flex-wrap gap-2">
               {skills.map((skill) => (
                 <button
@@ -1321,7 +1324,7 @@ function AgentForm() {
             </div>
           </fieldset>
           {message && <p className="text-sm text-destructive">{message}</p>}
-          <Button type="submit">Agent erstellen</Button>
+          <Button type="submit">{text("Agent erstellen", "Create agent")}</Button>
         </form>
       </CardContent>
     </Card>
