@@ -1072,6 +1072,22 @@ function Agents() {
     </Card>
   );
 }
+function EscalationPolicyHelp() {
+  const { text } = useLocale();
+  return (
+    <details className="rounded-md border border-border/70 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+      <summary className="cursor-pointer font-medium text-foreground">
+        {text("So funktioniert die Eskalation", "How escalation works")}
+      </summary>
+      <div className="mt-2 grid gap-1 leading-relaxed">
+        <p>{text("Normale Runs verwenden das oben gewählte Modell und den Reasoning-Effort. Wird ein Task aus dem Review zur Überarbeitung zurückgegeben, wählt Shipyard pro Rücklauf die nächste Stufe aus stages.", "Normal runs use the selected model and reasoning effort above. When a task returns from review for rework, Shipyard selects the next stages entry for each return.")}</p>
+        <p>{text("Die Stufen werden von oben nach unten durchlaufen. human_escalation_after beendet automatische Versuche ab dieser Rücklaufzahl und fordert eine menschliche Entscheidung an. capabilities dokumentiert die erlaubten Efforts je Modell.", "Stages are used from top to bottom. human_escalation_after stops automatic attempts at that rework count and requests a human decision. capabilities documents the allowed efforts for each model.")}</p>
+        <code className="block whitespace-pre-wrap rounded bg-background/70 p-2">{'{"version":"delivery-v1","stages":[{"model":"gpt-5.6-luna","effort":"medium"},{"model":"gpt-5.6-luna","effort":"high"}],"human_escalation_after":2}'}</code>
+      </div>
+    </details>
+  );
+}
+
 function AgentDetail({ id }: { id: string }) {
   const { text } = useLocale();
   const { data, error } = useAPI<any>("/api/v1/agents/" + id);
@@ -1190,7 +1206,7 @@ function AgentDetail({ id }: { id: string }) {
           </label>
           <label className="grid gap-2 text-sm">{text("Eskalationspolicy", "Escalation policy")}
             <textarea required className="min-h-28 rounded-lg border bg-transparent p-2 font-mono text-xs" value={policy} onChange={(e) => setPolicy(e.target.value)} placeholder='{"stages":[{"model":"…","effort":"high"}]}' />
-            <span className="text-xs text-muted-foreground">Stufen in Reihenfolge: nach jedem Review-Rework wird die nächste Modell-/Effort-Stufe gewählt.</span>
+            <EscalationPolicyHelp />
           </label>
           <label className="grid gap-2 text-sm">
             {text("Prompt-Suffix", "Prompt suffix")}
@@ -1359,7 +1375,7 @@ function AgentForm() {
           </label>
           <label className="grid gap-2 text-sm">{text("Eskalationspolicy", "Escalation policy")}
             <textarea required className="min-h-28 rounded-lg border bg-transparent p-2 font-mono text-xs" value={policy} onChange={(e) => setPolicy(e.target.value)} placeholder='{"stages":[{"model":"…","effort":"high"}]}' />
-            <span className="text-xs text-muted-foreground">Stufenreihenfolge für Review-Rework.</span>
+            <EscalationPolicyHelp />
           </label>
           <label className="grid gap-2 text-sm">
             {text("Prompt-Suffix", "Prompt suffix")}
