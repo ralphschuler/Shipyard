@@ -268,12 +268,14 @@ type ruleView struct {
 }
 type columnOption struct{ ID, Label, BoardID string }
 type runPage struct {
-	Run      domain.AgentRun
-	Queue    domain.RunQueueStatus
-	Logs     runLogView
-	Task     domain.Task
-	Delivery domain.RunDelivery
-	Usage    domain.UsageReport
+	Run              domain.AgentRun
+	Queue            domain.RunQueueStatus
+	Logs             runLogView
+	Task             domain.Task
+	Delivery         domain.RunDelivery
+	Usage            domain.UsageReport
+	SandboxProfile   string
+	SandboxEffective string
 }
 type integrationsPage struct {
 	Connections []domain.IntegrationConnection
@@ -605,6 +607,7 @@ func (a *App) Register(m *http.ServeMux) {
 	m.HandleFunc("GET /api/v1/project-groups", a.projectGroupsAPI)
 	m.HandleFunc("GET /api/v1/agents", a.agentsAPI)
 	m.HandleFunc("GET /api/v1/agents/{id}", a.agentAPI)
+	m.HandleFunc("GET /api/v1/settings/sandbox-profiles", a.sandboxProfilesAPI)
 	m.HandleFunc("GET /api/v1/automations", a.automationsAPI)
 	m.HandleFunc("GET /api/v1/schedules", a.schedulesAPI)
 	m.HandleFunc("GET /api/v1/webhooks", a.webhooksAPI)
@@ -2050,6 +2053,10 @@ func (a *App) agentsAPI(w http.ResponseWriter, r *http.Request) {
 	value, err := a.store.Agents(r.Context())
 	writeAPI(w, value, err)
 }
+func (a *App) sandboxProfilesAPI(w http.ResponseWriter, r *http.Request) {
+	value, err := a.store.SandboxProfiles(r.Context())
+	writeAPI(w, value, err)
+}
 func (a *App) agentAPI(w http.ResponseWriter, r *http.Request) {
 	agent, err := a.store.GetAgent(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -3001,7 +3008,18 @@ func (a *App) run(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
-	a.render(r, w, "run.html", runPage{Run: run, Queue: queue, Logs: newRunLogView(logs, truncated, run.ID), Task: task, Delivery: delivery, Usage: usage})
+	// Sandbox policy data is persisted with each run. Older runs may not have
+	// a policy row yet, so keep the detail page renderable and show a safe
+	// fallback instead of failing template execution altogether.
+	sandboxName := "unbekannt"
+	sandboxEffective := "{}"
+	if policy, policyErr := a.store.RunSandboxPolicy(r.Context(), run.ID); policyErr == nil {
+		sandboxName = policy.Name
+		if encoded, marshalErr := json.MarshalIndent(policy, "", "  "); marshalErr == nil {
+			sandboxEffective = string(encoded)
+		}
+	}
+	a.render(r, w, "run.html", runPage{Run: run, Queue: queue, Logs: newRunLogView(logs, truncated, run.ID), Task: task, Delivery: delivery, Usage: usage, SandboxProfile: sandboxName, SandboxEffective: sandboxEffective})
 }
 func (a *App) runLogs(w http.ResponseWriter, r *http.Request) {
 	run, err := a.store.Run(r.Context(), r.PathValue("id"))

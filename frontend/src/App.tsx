@@ -1092,6 +1092,7 @@ function AgentDetail({ id }: { id: string }) {
   const { text } = useLocale();
   const { data, error } = useAPI<any>("/api/v1/agents/" + id);
   const { data: skills } = useAPI<any[]>("/api/v1/skills");
+  const { data: sandboxProfiles } = useAPI<any[]>("/api/v1/settings/sandbox-profiles");
   const { data: capabilities } = useAPI<any[]>("/api/v1/settings/capabilities");
   const [form, setForm] = useState<any>();
   const [selected, setSelected] = useState<string[]>([]);
@@ -1105,7 +1106,7 @@ function AgentDetail({ id }: { id: string }) {
     }
   }, [data]);
   if (error) return <Failure />;
-  if (!form || !skills || !capabilities) return <Loading />;
+  if (!form || !skills || !sandboxProfiles || !capabilities) return <Loading />;
   const capability = capabilities.find((item: any) => item.provider === (form.Adapter || "codex"));
   const models = capability?.models || [];
   const efforts = capability?.efforts || [];
@@ -1122,6 +1123,7 @@ function AgentDetail({ id }: { id: string }) {
     body.set("model", form.Model || "");
     body.set("reasoning_effort", form.ReasoningEffort || "");
     body.set("escalation_policy", policy);
+    body.set("sandbox_profile", form.SandboxProfile || "strict");
     try {
       await mutation("/agents/" + id, { method: "POST", body });
       const assigned = new FormData();
@@ -1204,6 +1206,12 @@ function AgentDetail({ id }: { id: string }) {
               {efforts.map((effort: string) => <option key={effort} value={effort}>{effort}</option>)}
             </select>
           </label>
+          <label className="grid gap-2 text-sm">{text("Sandbox-Profil", "Sandbox profile")}
+            <select required className="h-9 rounded-md border bg-background px-2" value={form.SandboxProfile || "strict"} onChange={(e) => setForm({ ...form, SandboxProfile: e.target.value })}>
+              {sandboxProfiles.map((profile: any) => <option key={profile.Name} value={profile.Name}>{profile.Name} — {profile.Description}</option>)}
+            </select>
+            <span className="text-xs text-muted-foreground">{text("Legt die erlaubten Mounts, Netzwerk- und Schreibrechte für neue Runs fest.", "Controls mounts, network, and write permissions for new runs.")}</span>
+          </label>
           <label className="grid gap-2 text-sm">{text("Eskalationspolicy", "Escalation policy")}
             <textarea required className="min-h-28 rounded-lg border bg-transparent p-2 font-mono text-xs" value={policy} onChange={(e) => setPolicy(e.target.value)} placeholder='{"stages":[{"model":"…","effort":"high"}]}' />
             <EscalationPolicyHelp />
@@ -1279,6 +1287,7 @@ function AgentDetail({ id }: { id: string }) {
 function AgentForm() {
   const { text } = useLocale();
   const { data: skills } = useAPI<any[]>("/api/v1/skills");
+  const { data: sandboxProfiles } = useAPI<any[]>("/api/v1/settings/sandbox-profiles");
   const { data: capabilities } = useAPI<any[]>("/api/v1/settings/capabilities");
   const [name, setName] = useState("");
   const [prompt, setPrompt] = useState("");
@@ -1289,11 +1298,12 @@ function AgentForm() {
   const [message, setMessage] = useState("");
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
+  const [sandboxProfile, setSandboxProfile] = useState("strict");
   // An empty object deliberately selects Shipyard's tested default escalation
   // sequence. A stages:[] value would look configured while being invalid as
   // soon as the task is returned from review.
   const [policy, setPolicy] = useState("{}");
-  if (!skills || !capabilities) return <Loading />;
+  if (!skills || !sandboxProfiles || !capabilities) return <Loading />;
   const capability = capabilities.find((item: any) => item.provider === "codex");
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1307,6 +1317,7 @@ function AgentForm() {
     form.set("model", model);
     form.set("reasoning_effort", effort);
     form.set("escalation_policy", policy);
+    form.set("sandbox_profile", sandboxProfile);
     selected.forEach((skill) => form.append("skill_ids", skill));
     try {
       await mutation("/agents", { method: "POST", body: form });
@@ -1372,6 +1383,12 @@ function AgentForm() {
               <option value="">{text("Effort wählen", "Choose effort")}</option>
               {(capability?.efforts || []).map((value: string) => <option key={value} value={value}>{value}</option>)}
             </select>
+          </label>
+          <label className="grid gap-2 text-sm">{text("Sandbox-Profil", "Sandbox profile")}
+            <select required className="h-9 rounded-md border bg-background px-2" value={sandboxProfile} onChange={(e) => setSandboxProfile(e.target.value)}>
+              {sandboxProfiles.map((profile: any) => <option key={profile.Name} value={profile.Name}>{profile.Name} — {profile.Description}</option>)}
+            </select>
+            <span className="text-xs text-muted-foreground">{text("Sicherheitsprofil für die vom Agent gestarteten Runs.", "Security profile for runs started by this agent.")}</span>
           </label>
           <label className="grid gap-2 text-sm">{text("Eskalationspolicy", "Escalation policy")}
             <textarea required className="min-h-28 rounded-lg border bg-transparent p-2 font-mono text-xs" value={policy} onChange={(e) => setPolicy(e.target.value)} placeholder='{"stages":[{"model":"…","effort":"high"}]}' />
