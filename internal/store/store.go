@@ -2061,12 +2061,20 @@ func (s *Store) ResolveInteractionAndMove(c context.Context, id, answerer, freef
 		// target must not turn "Überarbeiten" into a release or vice versa.
 		targetColumnID = qaTarget
 	}
+	qaRework := i.DecisionKey == "qa_release" && qaDecisionIsRework(response)
 	// A selected workflow step hands the task back to the workflow itself. Its
 	// entered-column event will pick the appropriate specialist exactly once;
 	// creating an additional manual continuation here would race that rule.
 	if target := strings.TrimSpace(targetColumnID); target != "" {
 		if err = moveTaskTx(c, tx, i.TaskID, target, "web"); err != nil {
 			return i, nil, err
+		}
+		if qaRework {
+			if _, err = tx.Exec(c, `UPDATE automation_events SET payload=payload || '{"rework_requested":true}'::jsonb
+				WHERE id=(SELECT id FROM automation_events WHERE task_id=$1 AND processed_at IS NULL
+				ORDER BY occurred_at DESC,id DESC LIMIT 1)`, i.TaskID); err != nil {
+				return i, nil, err
+			}
 		}
 		key := i.DecisionKey
 		if key == "" {
@@ -2215,6 +2223,14 @@ func qaDecisionTarget(key string, response []byte, currentColumnID string, colum
 		return ""
 	}
 	return target
+}
+
+func qaDecisionIsRework(response []byte) bool {
+	var answers map[string][]string
+	if json.Unmarshal(response, &answers) != nil || len(answers["release_decision"]) != 1 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(answers["release_decision"][0]), "rework")
 }
 
 func resolveQADecisionTarget(key string, response []byte, currentColumnID string, columns []domain.Column, transitions []domain.Transition) (string, error) {

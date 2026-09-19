@@ -76,3 +76,18 @@ func TestQADecisionTargetRejectsFallbackForInvalidAnswer(t *testing.T) {
 		t.Fatal("invalid QA answer must reject the fallback workflow target")
 	}
 }
+
+func TestQADecisionIsRework(t *testing.T) {
+	if !qaDecisionIsRework([]byte(`{"release_decision":["rework"]}`)) {
+		t.Fatal("rework decision must be marked as a rework request")
+	}
+	for _, response := range [][]byte{
+		[]byte(`{"release_decision":["approve"]}`),
+		[]byte(`{"release_decision":["rework","approve"]}`),
+		[]byte(`not-json`),
+	} {
+		if qaDecisionIsRework(response) {
+			t.Fatalf("response must not be marked as rework: %s", response)
+		}
+	}
+}

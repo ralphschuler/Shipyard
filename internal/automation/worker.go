@@ -2293,11 +2293,12 @@ func automationEventIsNoop(event domain.AutomationEvent) bool {
 	var payload struct {
 		QAReturn        bool `json:"qa_return"`
 		ChangeAvailable bool `json:"change_available"`
+		ReworkRequested bool `json:"rework_requested"`
 	}
 	if json.Unmarshal(event.Payload, &payload) != nil {
 		return false
 	}
-	return payload.QAReturn && !payload.ChangeAvailable
+	return payload.QAReturn && !payload.ChangeAvailable && !payload.ReworkRequested
 }
 
 func (w *Worker) startRun(ctx context.Context, run domain.AgentRun) {

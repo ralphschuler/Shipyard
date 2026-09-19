@@ -637,24 +637,45 @@ func TestWorkflowIntegrationQAReworkSupersedesPreviousReleaseDecision(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent, err := s.CreateAgent(ctx, "QA decision agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", t.TempDir(), 1)
+	agent, err := s.CreateAgent(ctx, "QA decision agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, target := range []string{backlog.ID, development.ID, review.ID} {
+	for _, target := range []string{backlog.ID, development.ID, review.ID, qa.ID} {
 		if moved, moveErr := s.MoveTaskToColumnID(ctx, task.ID, target, "mcp"); moveErr != nil || !moved {
 			t.Fatalf("move task to %s: moved=%t err=%v", target, moved, moveErr)
 		}
 	}
-	if _, err = s.DB.Exec(ctx, `INSERT INTO task_decisions(task_id,agent_id,decision_key,title,response,resolved_by)
-		VALUES($1,$2,'qa_release','Freigabe für QA','{"release_decision":["rework"]}'::jsonb,'qa-test')`, task.ID, agent.ID); err != nil {
+	run, err := s.CreateManualRun(ctx, task.ID, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interaction, err := s.CreateInteraction(ctx, task.ID, agent.ID, run.ID, "qa_release", "qa-rework-integration", "Freigabe für QA", "QA entscheidet", []byte(`{"fields":[{"id":"release_decision","type":"buttons"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.ResolveInteractionAndMove(ctx, interaction.ID, "qa-test", "Ablehnungsgrund: Nacharbeit erforderlich", []byte(`{"release_decision":["rework"]}`), ""); err != nil {
 		t.Fatal(err)
 	}
 	if active, err := s.HasTaskDecision(ctx, task.ID, agent.ID, "qa_release"); err != nil || !active {
 		t.Fatalf("initial QA decision active=%t err=%v", active, err)
 	}
-	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, development.ID, "mcp"); err != nil || !moved {
-		t.Fatalf("QA rework to development: moved=%t err=%v", moved, err)
+	var payload []byte
+	if err = s.DB.QueryRow(ctx, `SELECT payload FROM automation_events WHERE task_id=$1 AND payload->>'qa_return'='true' ORDER BY occurred_at DESC LIMIT 1`, task.ID).Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	var reworkEvent struct {
+		ReworkRequested bool `json:"rework_requested"`
+	}
+	if err = json.Unmarshal(payload, &reworkEvent); err != nil || !reworkEvent.ReworkRequested {
+		t.Fatalf("QA rework event = %s, err=%v", payload, err)
+	}
+	var comment string
+	if err = s.DB.QueryRow(ctx, `SELECT body FROM task_comments WHERE task_id=$1 ORDER BY created_at DESC LIMIT 1`, task.ID).Scan(&comment); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(comment, "Ablehnungsgrund: Nacharbeit erforderlich") {
+		t.Fatalf("rejection reason comment = %q", comment)
 	}
 	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, review.ID, "mcp"); err != nil || !moved {
 		t.Fatalf("development to review: moved=%t err=%v", moved, err)
@@ -673,8 +694,11 @@ func TestWorkflowIntegrationQAReworkSupersedesPreviousReleaseDecision(t *testing
 	if superseded != 1 {
 		t.Fatalf("superseded QA decisions=%d, want 1", superseded)
 	}
-	if _, err = s.DB.Exec(ctx, `INSERT INTO task_decisions(task_id,agent_id,decision_key,title,response,resolved_by)
-		VALUES($1,$2,'qa_release','Freigabe für QA','{"release_decision":["approve"]}'::jsonb,'qa-test-2')`, task.ID, agent.ID); err != nil {
+	interaction, err = s.CreateInteraction(ctx, task.ID, agent.ID, run.ID, "qa_release", "qa-release-integration", "Freigabe für QA", "QA entscheidet", []byte(`{"fields":[{"id":"release_decision","type":"buttons"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.ResolveInteractionAndMove(ctx, interaction.ID, "qa-test-2", "", []byte(`{"release_decision":["approve"]}`), ""); err != nil {
 		t.Fatal(err)
 	}
 	if active, err := s.HasTaskDecision(ctx, task.ID, agent.ID, "qa_release"); err != nil || !active {
