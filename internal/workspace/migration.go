@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // RunGate is a shared lease for run creation/start. Migration takes the same
@@ -73,8 +74,8 @@ func Migrate(sourceRoot, targetRoot string, activeRunPaths map[string]bool) (Mig
 	if _, err := os.Stat(sourceRoot); err != nil {
 		return MigrationState{}, errors.New("Quell-Workspace ist nicht verfügbar")
 	}
-	if err := os.MkdirAll(targetRoot, 0o750); err != nil {
-		return MigrationState{}, errors.New("Ziel-Workspace konnte nicht vorbereitet werden")
+	if err := validateMigrationTarget(targetRoot); err != nil {
+		return MigrationState{}, err
 	}
 	sourceGate, err := acquireGate(sourceRoot, true)
 	if err != nil {
@@ -86,10 +87,6 @@ func Migrate(sourceRoot, targetRoot string, activeRunPaths map[string]bool) (Mig
 		return MigrationState{}, err
 	}
 	defer gate.Close()
-	if err := os.WriteFile(filepath.Join(targetRoot, markerName), []byte("shipyard workspace\n"), 0o640); err != nil {
-		return MigrationState{}, errors.New("Ziel-Workspace konnte nicht markiert werden")
-	}
-
 	state := MigrationState{Source: sourceRoot, Target: targetRoot}
 	statePath := filepath.Join(targetRoot, ".shipyard-migration.json")
 	for _, kind := range []string{"projects", "runs", "integrations"} {
@@ -156,14 +153,49 @@ func copyPublished(src, dst string) error {
 		return err
 	}
 	if _, err := os.Lstat(dst); err == nil {
-		if err := os.RemoveAll(dst); err != nil {
+		rollback := fmt.Sprintf("%s.shipyard-rollback-%d", dst, time.Now().UnixNano())
+		if err := os.Rename(dst, rollback); err != nil {
 			_ = os.RemoveAll(tmp)
-			return err
+			return errors.New("bestehender Workspace konnte nicht für Rollback gesichert werden")
 		}
+		if err := os.Rename(tmp, dst); err != nil {
+			_ = os.Rename(rollback, dst)
+			_ = os.RemoveAll(tmp)
+			return errors.New("migrierter Workspace konnte nicht atomar veröffentlicht werden")
+		}
+		return nil
 	}
 	if err := os.Rename(tmp, dst); err != nil {
 		_ = os.RemoveAll(tmp)
 		return err
+	}
+	return nil
+}
+
+// validateMigrationTarget requires an operator-created marker before any
+// directory is created. This is the migration equivalent of Validate's
+// fail-closed behavior and prevents a missing NFS mount becoming local data.
+func validateMigrationTarget(root string) error {
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		return errors.New("Ziel-Workspace ist nicht eingehängt oder nicht verfügbar")
+	}
+	marker, err := os.Lstat(filepath.Join(root, markerName))
+	if err != nil || !marker.Mode().IsRegular() {
+		return errors.New("Ziel-Workspace ist nicht als Shipyard-Speicher markiert")
+	}
+	tmp, err := os.CreateTemp(root, ".shipyard-migration-preflight-*")
+	if err != nil {
+		return errors.New("Ziel-Workspace ist nicht beschreibbar")
+	}
+	name := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(name)
+		return errors.New("Ziel-Workspace ist nicht beschreibbar")
+	}
+	_ = os.Remove(name)
+	if _, err := exec.LookPath("git"); err != nil {
+		return errors.New("Git ist auf dem Server nicht verfügbar")
 	}
 	return nil
 }

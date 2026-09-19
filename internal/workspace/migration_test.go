@@ -4,11 +4,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func TestMigrateIsIdempotentAndLeavesActiveRunInPlace(t *testing.T) {
 	source, target := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(target, markerName), []byte("shipyard workspace\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 	project := filepath.Join(source, "projects", "project-1")
 	run := filepath.Join(source, "runs", "run-1")
 	if err := os.MkdirAll(project, 0o750); err != nil {
@@ -58,5 +62,54 @@ func TestMigrationGateBlocksRunValidation(t *testing.T) {
 	status, err := Validate()
 	if err == nil || !status.Migration || status.Ready() {
 		t.Fatalf("Validate() = %#v, %v; want migration block", status, err)
+	}
+}
+
+func TestMigrateRejectsUnmarkedTargetWithoutCreatingLocalFallback(t *testing.T) {
+	source, target := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(source, "projects"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Migrate(source, target, nil)
+	if err == nil || !strings.Contains(err.Error(), "markiert") {
+		t.Fatalf("Migrate() error = %v, want actionable marker error", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(target, markerName)); !os.IsNotExist(statErr) {
+		t.Fatalf("migration created an operator marker: %v", statErr)
+	}
+}
+
+func TestCopyPublishedPreservesExistingDestinationForRollback(t *testing.T) {
+	parent := t.TempDir()
+	source := filepath.Join(parent, "source")
+	destination := filepath.Join(parent, "destination")
+	if err := os.MkdirAll(source, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "value"), []byte("new\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(destination, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(destination, "value"), []byte("old\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := copyPublished(source, destination); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(destination, "value"))
+	if err != nil || string(got) != "new\n" {
+		t.Fatalf("published content = %q, %v; want new content", got, err)
+	}
+	rollback, err := filepath.Glob(destination + ".shipyard-rollback-*")
+	if err != nil || len(rollback) != 1 {
+		t.Fatalf("rollback copy count = %d, %v; want one preserved rollback", len(rollback), err)
+	}
+	old, err := os.ReadFile(filepath.Join(rollback[0], "value"))
+	if err != nil || string(old) != "old\n" {
+		t.Fatalf("rollback content = %q, %v; want old content", old, err)
 	}
 }
