@@ -51,6 +51,13 @@ var (
 )
 
 func main() {
+	if len(os.Args) == 4 && os.Args[1] == "--migrate-workspace" {
+		if err := migrateWorkspace(os.Args[2], os.Args[3]); err != nil {
+			log.Print(err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) == 2 && os.Args[1] == "--embedded-app-http" {
 		address := envOrDefault("TASKBOARD_ADDR", defaultAddress)
 		log.Fatal(http.ListenAndServe(address, web.EmbeddedAppHandler()))
@@ -139,6 +146,25 @@ func main() {
 			log.Printf("HTTP-Server konnte nicht sauber beendet werden: %v", err)
 		}
 	}
+}
+
+func migrateWorkspace(source, target string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	s, err := store.Open(ctx, envOrDefault("DATABASE_URL", defaultDatabaseURL))
+	if err != nil {
+		return errors.New("Datenbank für Workspace-Migration konnte nicht geöffnet werden")
+	}
+	defer s.DB.Close()
+	active, err := s.ActiveRunWorktreePaths(ctx)
+	if err != nil {
+		return errors.New("Laufende Runs für Workspace-Migration konnten nicht ermittelt werden")
+	}
+	if _, err := workspace.Migrate(source, target, active); err != nil {
+		return err
+	}
+	log.Printf("Workspace-Migration abgeschlossen; %d laufende Worktree(s) wurden zurückgestellt", len(active))
+	return nil
 }
 
 func setBuildMetadata() {

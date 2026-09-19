@@ -31,25 +31,64 @@ type Status struct {
 	Runs         string
 	Integrations string
 	Storage      string
+	Marker       bool
+	Migration    bool
 	Writable     bool
 	Git          bool
 	Error        string
 }
 
-// Validate performs the same fail-closed check at startup and immediately
-// before runs. It creates only the managed directories; caches stay separate.
-func Validate() (Status, error) {
-	root := Root()
-	if root == "" {
-		root = filepath.Dir(legacyProjectsRoot)
+const markerName = ".shipyard-workspace"
+
+func MarkerPath() string { return filepath.Join(configuredRoot(), markerName) }
+
+func configuredRoot() string {
+	if root := Root(); root != "" {
+		return filepath.Clean(root)
 	}
+	return filepath.Dir(legacyProjectsRoot)
+}
+
+// Validate performs the same fail-closed check at startup and immediately
+// before runs. The root must already exist and carry the operator-created
+// marker; this prevents an absent NFS mount from being silently replaced by a
+// local directory. Managed subdirectories may be created after that check.
+func Validate() (Status, error) {
+	root := configuredRoot()
 	if !filepath.IsAbs(root) || filepath.Clean(root) == "/" {
-		return Status{Root: root}, errors.New("TASKBOARD_WORKSPACE_ROOT muss ein absoluter Nicht-Root-Pfad sein")
+		return invalidStatus(root, "TASKBOARD_WORKSPACE_ROOT muss ein absoluter Nicht-Root-Pfad sein")
 	}
 	root = filepath.Clean(root)
-	status := Status{Root: root, Projects: ProjectsRoot(), Runs: RunsRoot(), Integrations: IntegrationsRoot()}
+	status := Status{Root: root, Projects: ProjectsRoot(), Runs: RunsRoot(), Integrations: IntegrationsRoot(), Migration: migrationInProgress(root)}
 	if status.Integrations == "" {
 		status.Integrations = filepath.Join(root, "integrations")
+	}
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() {
+		status.Error = "Workspace-Root ist nicht eingehängt oder nicht verfügbar"
+		return status, errors.New(status.Error)
+	}
+	if fs := new(syscall.Statfs_t); syscall.Statfs(root, fs) == nil {
+		const nfsSuperMagic = 0x6969
+		if uint64(fs.Type) == nfsSuperMagic {
+			status.Storage = "NFS"
+		} else {
+			status.Storage = "lokal"
+		}
+	} else {
+		status.Storage = "unbekannt"
+	}
+	if Root() != "" {
+		markerInfo, err := os.Lstat(filepath.Join(root, markerName))
+		if err != nil || !markerInfo.Mode().IsRegular() {
+			status.Error = "Workspace-Root ist nicht als Shipyard-Speicher markiert"
+			return status, errors.New(status.Error)
+		}
+		status.Marker = true
+	}
+	if status.Migration {
+		status.Error = "Workspace-Migration läuft; neue Runs sind pausiert"
+		return status, errors.New(status.Error)
 	}
 	if err := os.MkdirAll(status.Projects, 0o750); err != nil {
 		status.Error = "Workspace-Root ist nicht verfügbar: " + err.Error()
@@ -78,17 +117,24 @@ func Validate() (Status, error) {
 		status.Error = "Git ist auf dem Server nicht verfügbar"
 		return status, errors.New(status.Error)
 	}
-	if fs := new(syscall.Statfs_t); syscall.Statfs(root, fs) == nil {
-		const nfsSuperMagic = 0x6969
-		if uint64(fs.Type) == nfsSuperMagic {
-			status.Storage = "NFS"
-		} else {
-			status.Storage = "lokal"
-		}
-	} else {
-		status.Storage = "unbekannt"
-	}
 	return status, nil
+}
+
+func invalidStatus(root, message string) (Status, error) {
+	return Status{Root: root, Error: message}, errors.New(message)
+}
+
+func migrationInProgress(root string) bool {
+	f, err := os.OpenFile(filepath.Join(root, ".shipyard-migration.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return true
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		return true
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return false
 }
 
 func (s Status) Ready() bool { return s.Writable && s.Git && s.Error == "" }

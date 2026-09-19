@@ -1199,9 +1199,6 @@ func (w *Worker) processIntegrationJob(ctx context.Context, job domain.Integrati
 }
 
 func taskIntegrationDirectory(source string) string {
-	if configured := strings.TrimSpace(os.Getenv("TASKBOARD_INTEGRATION_ROOT")); configured != "" {
-		return filepath.Clean(configured)
-	}
 	if configured := workspace.IntegrationsRoot(); configured != "" {
 		return configured
 	}
@@ -2789,6 +2786,16 @@ func (w *Worker) syncManagedProject(ctx context.Context, project domain.Project)
 
 func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	started := time.Now()
+	if _, err := workspace.Validate(); err != nil {
+		_ = w.Store.AddRunLog(ctx, run.ID, "error", "Workspace-Preflight fehlgeschlagen; Run pausiert: "+err.Error())
+		return
+	}
+	gate, gateErr := workspace.AcquireRunGate()
+	if gateErr != nil {
+		_ = w.Store.AddRunLog(ctx, run.ID, "error", "Workspace-Sperre konnte nicht übernommen werden; Run pausiert")
+		return
+	}
+	defer gate.Close()
 	claimed, err := w.Store.ClaimRun(ctx, run.ID)
 	if err != nil || !claimed {
 		return
@@ -2799,13 +2806,6 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	if err := validateRunTargetProject(run); err != nil {
 		_ = w.Store.AddRunLog(ctx, run.ID, "error", err.Error())
 		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", err.Error())
-		_ = w.finish(ctx, run, "failed")
-		return
-	}
-	if _, preflightErr := workspace.Validate(); preflightErr != nil {
-		reason := "Workspace-Preflight fehlgeschlagen; Run blockiert: " + preflightErr.Error()
-		_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
-		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
 		_ = w.finish(ctx, run, "failed")
 		return
 	}

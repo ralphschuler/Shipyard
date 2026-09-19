@@ -32,7 +32,11 @@ func TestRootsUseConfiguredWorkspaceRoot(t *testing.T) {
 }
 
 func TestValidateConfiguredWorkspace(t *testing.T) {
-	t.Setenv("TASKBOARD_WORKSPACE_ROOT", t.TempDir())
+	root := t.TempDir()
+	t.Setenv("TASKBOARD_WORKSPACE_ROOT", root)
+	if err := os.WriteFile(MarkerPath(), []byte("shipyard workspace\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
 	status, err := Validate()
 	if err != nil || !status.Ready() {
 		t.Fatalf("Validate() = %#v, %v; want ready workspace", status, err)
@@ -48,5 +52,13 @@ func TestValidateRejectsRootPath(t *testing.T) {
 	t.Setenv("TASKBOARD_WORKSPACE_ROOT", "/")
 	if _, err := Validate(); err == nil {
 		t.Fatal("Validate() accepted filesystem root")
+	}
+}
+
+func TestValidateRejectsUnmarkedConfiguredRoot(t *testing.T) {
+	t.Setenv("TASKBOARD_WORKSPACE_ROOT", t.TempDir())
+	status, err := Validate()
+	if err == nil || status.Error == "" || status.Ready() {
+		t.Fatalf("Validate() = %#v, %v; want actionable marker error", status, err)
 	}
 }
