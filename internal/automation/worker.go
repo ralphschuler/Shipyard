@@ -23,6 +23,7 @@ import (
 	"taskboard/internal/sandbox"
 	"taskboard/internal/store"
 	"taskboard/internal/usage"
+	"taskboard/internal/workspace"
 	"time"
 	"unicode"
 )
@@ -1200,6 +1201,9 @@ func (w *Worker) processIntegrationJob(ctx context.Context, job domain.Integrati
 func taskIntegrationDirectory(source string) string {
 	if configured := strings.TrimSpace(os.Getenv("TASKBOARD_INTEGRATION_ROOT")); configured != "" {
 		return filepath.Clean(configured)
+	}
+	if configured := workspace.IntegrationsRoot(); configured != "" {
+		return configured
 	}
 	// Keep integration worktrees next to the managed clone by default. This is
 	// writable in production and also keeps tests independent from a specific
@@ -2723,7 +2727,7 @@ func removeRunWorktree(ctx context.Context, runID, source, worktree string) erro
 // before a task starts. Worktrees are then created from that exact revision,
 // so no task can reuse another task's working directory.
 func (w *Worker) syncManagedProject(ctx context.Context, project domain.Project) error {
-	root := "/home/agent/.taskboard-projects"
+	root := workspace.ProjectsRoot()
 	path := filepath.Clean(project.LocalPath)
 	relative, err := filepath.Rel(root, path)
 	if err != nil || relative == "." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || relative == ".." {
@@ -2834,7 +2838,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		_ = w.finish(ctx, run, "failed")
 		return
 	}
-	worktree := filepath.Join("/home/agent/.taskboard-runs", run.ID)
+	worktree := filepath.Join(workspace.RunsRoot(), run.ID)
 	if err := os.MkdirAll(filepath.Dir(worktree), 0700); err != nil {
 		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", err.Error())
 		_ = w.finish(ctx, run, "failed")
