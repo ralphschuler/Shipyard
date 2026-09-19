@@ -161,6 +161,16 @@ func DedupeKey(subject, predicate string, object json.RawMessage) string {
 }
 func Tokens(s string) int { return len(strings.Fields(s)) }
 
+func IsGraphPredicate(predicate string) bool {
+	p := strings.ToLower(strings.TrimSpace(predicate))
+	for _, part := range []string{"related", "depends", "owns", "belongs", "parent", "child", "uses", "blocks", "references", "connects"} {
+		if strings.Contains(p, part) {
+			return true
+		}
+	}
+	return false
+}
+
 // FactVersionVisibleAt uses a half-open validity interval. A missing end
 // means the version remains valid indefinitely.
 func FactVersionVisibleAt(from time.Time, until *time.Time, at time.Time) bool {

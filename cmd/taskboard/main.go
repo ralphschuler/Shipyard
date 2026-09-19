@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"taskboard/internal/automation"
 	"taskboard/internal/mcp"
+	"taskboard/internal/memory"
 	"taskboard/internal/release"
 	"taskboard/internal/store"
 	"taskboard/internal/updates"
@@ -101,7 +102,8 @@ func main() {
 	}
 
 	worker := &automation.Worker{
-		Store: s,
+		Store:  s,
+		Memory: memory.New(s),
 		ReleasePublisher: automation.ReleasePublisherFunc(func(ctx context.Context, request release.Request) (release.Result, error) {
 			if len(request.SecretValues) != 1 || request.SecretValues[0] == "" {
 				return release.Result{}, errors.New("GitHub-Secret fehlt")

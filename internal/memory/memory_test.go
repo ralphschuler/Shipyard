@@ -60,6 +60,15 @@ func TestFitNeverExceedsTokenBudget(t *testing.T) {
 	}
 }
 
+func TestGraphPredicatesAreClassifiedWithoutBroadeningScope(t *testing.T) {
+	if !IsGraphPredicate("depends_on") || !IsGraphPredicate("related_to") {
+		t.Fatal("relationship predicates must be graph context")
+	}
+	if IsGraphPredicate("display_name") {
+		t.Fatal("ordinary facts must remain facts")
+	}
+}
+
 func TestFactVersionVisibleAtHonorsValidityWindow(t *testing.T) {
 	point := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 	from := point.Add(-time.Hour)

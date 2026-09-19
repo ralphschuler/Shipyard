@@ -342,7 +342,7 @@ func (s *Store) RetentionMetrics() RetentionMetrics {
 func (s *Store) RecordRetentionFailure() { s.retentionFailures.Add(1) }
 
 // RetrieveContextPack applies scope predicates in SQL and enforces the hard
-// budget after deterministic ordering. Pending high-impact facts never enter.
+// budget after deterministic ordering. Only confirmed facts enter.
 func (s *Store) RetrieveContextPack(ctx context.Context, scope Scope, query string, budget int) (ContextPack, error) {
 	if _, err := scopeArgs(scope); err != nil {
 		return ContextPack{}, err
@@ -365,7 +365,7 @@ func (s *Store) RetrieveContextPack(ctx context.Context, scope Scope, query stri
 	if err = rows.Err(); err != nil {
 		return ContextPack{}, err
 	}
-	rows, err = s.db.DB.Query(ctx, `SELECT f.id,f.subject,f.predicate,f.object_json,f.confidence,v.message_id,v.run_id,v.valid_from,v.valid_until FROM memory_facts f JOIN memory_fact_versions v ON v.id=f.current_version_id WHERE f.tenant_id=$1 AND f.user_id=$2 AND f.project_id=$3 AND f.task_id=$4 AND f.agent_id=$5 AND f.status IN ('confirmed','pending') AND (NOT f.high_impact OR f.status='confirmed') AND (f.expires_at IS NULL OR f.expires_at>now()) AND v.valid_from<=now() AND (v.valid_until IS NULL OR v.valid_until>now()) ORDER BY f.confidence DESC,f.updated_at DESC,f.id LIMIT 100`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID)
+	rows, err = s.db.DB.Query(ctx, `SELECT f.id,f.subject,f.predicate,f.object_json,f.confidence,v.message_id,v.run_id,v.valid_from,v.valid_until FROM memory_facts f JOIN memory_fact_versions v ON v.id=f.current_version_id WHERE f.tenant_id=$1 AND f.user_id=$2 AND f.project_id=$3 AND f.task_id=$4 AND f.agent_id=$5 AND f.status='confirmed' AND (f.expires_at IS NULL OR f.expires_at>now()) AND v.valid_from<=now() AND (v.valid_until IS NULL OR v.valid_until>now()) ORDER BY f.confidence DESC,f.updated_at DESC,f.id LIMIT 100`, scope.TenantID, scope.UserID, scope.ProjectID, scope.TaskID, scope.AgentID)
 	if err != nil {
 		return ContextPack{}, err
 	}
@@ -382,7 +382,11 @@ func (s *Store) RetrieveContextPack(ctx context.Context, scope Scope, query stri
 		if !FactVersionVisibleAt(at, until, time.Now()) {
 			continue
 		}
-		items = append(items, RetrievalItem{Kind: "fact", ID: id, Text: subject + " " + predicate + " " + string(object), Confidence: confidence, Source: Provenance{MessageID: message, TaskID: scope.TaskID, RunID: run, AgentID: scope.AgentID, OccurredAt: at}})
+		kind := "fact"
+		if IsGraphPredicate(predicate) {
+			kind = "graph"
+		}
+		items = append(items, RetrievalItem{Kind: kind, ID: id, Text: subject + " " + predicate + " " + string(object), Confidence: confidence, Source: Provenance{MessageID: message, TaskID: scope.TaskID, RunID: run, AgentID: scope.AgentID, OccurredAt: at}})
 	}
 	rows.Close()
 	if err = rows.Err(); err != nil {
