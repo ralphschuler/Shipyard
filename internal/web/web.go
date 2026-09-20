@@ -260,7 +260,9 @@ func normalizeInteractionResponse(schemaRaw []byte, legacyKey string, response m
 
 type agentView struct {
 	domain.Agent
-	Skills []domain.InstalledSkill
+	Skills  []domain.InstalledSkill
+	Models  []string
+	Efforts []string
 }
 type ruleView struct {
 	domain.AutomationRule
@@ -916,16 +918,46 @@ func (a *App) agents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 500)
 		return
 	}
+	providers, e := a.store.Providers(r.Context())
+	if e != nil {
+		http.Error(w, e.Error(), 500)
+		return
+	}
 	views := make([]agentView, 0, len(agents))
+	providerByName := make(map[string]domain.ProviderSetting, len(providers))
+	for _, provider := range providers {
+		providerByName[provider.Provider] = provider
+	}
 	for _, agent := range agents {
 		assigned, err := a.store.AgentSkills(r.Context(), agent.ID)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		views = append(views, agentView{Agent: agent, Skills: assigned})
+		models := []string{"gpt-5", "gpt-5-mini"}
+		efforts := []string{"low", "medium", "high", "xhigh"}
+		if provider, ok := providerByName[agent.Adapter]; ok && provider.Provider == "grokbot" {
+			capabilities := automation.GrokbotCapabilities(provider.Options)
+			models, efforts = capabilities.Models, capabilities.Efforts
+			if len(models) == 0 && provider.Model != "" {
+				models = []string{provider.Model}
+			}
+		}
+		if agent.Model != "" && !containsString(models, agent.Model) {
+			models = append([]string{agent.Model}, models...)
+		}
+		views = append(views, agentView{Agent: agent, Skills: assigned, Models: models, Efforts: efforts})
 	}
-	a.render(r, w, "agents.html", map[string]any{"Agents": views, "Skills": skills, "SandboxProfiles": profiles})
+	a.render(r, w, "agents.html", map[string]any{"Agents": views, "Skills": skills, "SandboxProfiles": profiles, "Providers": providers})
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 func (a *App) createAgent(w http.ResponseWriter, r *http.Request) {
 	if e := r.ParseForm(); e != nil {
@@ -939,6 +971,10 @@ func (a *App) createAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e := a.store.UpdateAgentSelection(r.Context(), agent.ID, r.FormValue("model"), r.FormValue("reasoning_effort"), r.FormValue("escalation_policy")); e != nil {
+		http.Error(w, e.Error(), 400)
+		return
+	}
+	if e := a.store.UpdateAgentAdapter(r.Context(), agent.ID, r.FormValue("adapter")); e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
@@ -974,6 +1010,10 @@ func (a *App) updateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if e := a.store.UpdateAgentSelection(r.Context(), r.PathValue("id"), r.FormValue("model"), r.FormValue("reasoning_effort"), r.FormValue("escalation_policy")); e != nil {
+		http.Error(w, e.Error(), 400)
+		return
+	}
+	if e := a.store.UpdateAgentAdapter(r.Context(), r.PathValue("id"), r.FormValue("adapter")); e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
@@ -1470,6 +1510,10 @@ func (a *App) saveAppearance(w http.ResponseWriter, r *http.Request) {
 func (a *App) saveProvider(w http.ResponseWriter, r *http.Request) {
 	provider := r.PathValue("provider")
 	options := r.FormValue("options")
+	if provider == "grokbot" && strings.TrimSpace(r.FormValue("secret_env")) == "" {
+		http.Error(w, "Grokbot benötigt eine Secret-Umgebungsvariable.", http.StatusBadRequest)
+		return
+	}
 	if err := automation.ValidateProviderConfiguration(provider, r.FormValue("command"), options); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -2160,6 +2204,8 @@ func (a *App) capabilitiesAPI(w http.ResponseWriter, r *http.Request) {
 		capabilities := automation.CapabilityDiscovery{Efforts: []string{"low", "medium", "high", "xhigh"}, Source: "standard effort catalog"}
 		if provider.Provider == "codex" {
 			capabilities = automation.DiscoverCodex(r.Context(), provider.Command)
+		} else if provider.Provider == "grokbot" {
+			capabilities = automation.GrokbotCapabilities(provider.Options)
 		}
 		result = append(result, map[string]any{"provider": provider.Provider, "models": capabilities.Models, "efforts": capabilities.Efforts, "source": capabilities.Source, "error": capabilities.Error})
 	}

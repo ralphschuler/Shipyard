@@ -2019,6 +2019,9 @@ func codexAgentOptionArgs(raw, effort string) ([]string, error) {
 // later run fail before it is persisted. Providers without a local CLI adapter
 // deliberately keep their JSON options extensible.
 func ValidateProviderOptions(provider, raw string) error {
+	if provider == "grokbot" {
+		return validateGrokbotOptions(raw)
+	}
 	if provider != "codex" {
 		return nil
 	}
@@ -2178,7 +2181,12 @@ func (w *Worker) checkProviderForAgent(ctx context.Context, name, agentID string
 	if !provider.Enabled {
 		return "", errors.New("Provider ist pausiert")
 	}
-	if provider.Provider == "openai" {
+	if provider.Provider == "openai" || provider.Provider == "grokbot" {
+		if provider.Provider == "grokbot" {
+			if err := validateGrokbotConfiguration(provider); err != nil {
+				return "", err
+			}
+		}
 		if provider.SecretEnv == "" {
 			return "", errors.New("keine Secret-Umgebungsvariable konfiguriert")
 		}
@@ -2195,7 +2203,7 @@ func (w *Worker) checkProviderForAgent(ctx context.Context, name, agentID string
 		if _, err := exec.LookPath("bwrap"); err != nil {
 			return "", errors.New("OpenAI-Agenten benötigen bubblewrap für den isolierten Worktree")
 		}
-		return "OpenAI-Adapter ist konfiguriert; der API-Key und die Worktree-Sandbox sind auf dem Server verfügbar.", nil
+		return provider.Provider + "-Adapter ist konfiguriert; das Secret und die Worktree-Sandbox sind auf dem Server verfügbar.", nil
 	}
 	command, _, err := commandForProvider(provider)
 	if err != nil {
@@ -3280,11 +3288,11 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	var nativeCostMicrousd *int64
 	var serviceTier string
 	var cliReport *cliUsageReport
-	if provider.Provider == "openai" {
+	if provider.Provider == "openai" || provider.Provider == "grokbot" {
 		secret, ok := secretValueForEnv(secretValues, provider.SecretEnv)
 		if !ok {
 			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "secret_not_assigned")
-			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", "OpenAI-Secret ist diesem Agent nicht zugeordnet")
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", provider.Provider+"-Secret ist diesem Agent nicht zugeordnet")
 			_ = w.finish(ctx, run, "failed")
 			return
 		}
@@ -3292,7 +3300,14 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			w.failSecretAudit(ctx, run, provider.Provider, provider.Model)
 			return
 		}
-		text, usage, responseErr := runOpenAIResponsesWithPolicy(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot, runSandbox)
+		var text string
+		var usage openAIUsage
+		var responseErr error
+		if provider.Provider == "grokbot" {
+			text, usage, responseErr = runGrokbotResponsesWithPolicy(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot, runSandbox)
+		} else {
+			text, usage, responseErr = runOpenAIResponsesWithPolicy(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot, runSandbox)
+		}
 		out, tokenUsage, inputTokens, outputTokens, estimatedCostMicrousd, err = []byte(text), usage.TotalTokens, usage.InputTokens, usage.OutputTokens, usage.EstimatedCostMicrousd, responseErr
 		cachedInputTokens, cacheWriteTokens, reasoningTokens = usage.CachedInputTokens, usage.CacheWriteTokens, usage.ReasoningTokens
 		apiCalls, nativeCostMicrousd = usage.APICalls, usage.NativeCostMicrousd
@@ -3446,7 +3461,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	}
 	// CLI output has already been copied into append-only run-log records by
 	// tmux. API providers return one response and are recorded here instead.
-	if provider.Provider == "openai" {
+	if provider.Provider == "openai" || provider.Provider == "grokbot" {
 		text := strings.TrimSpace(string(out))
 		if text != "" {
 			_ = w.Store.AddRunLog(ctx, run.ID, "info", text)
