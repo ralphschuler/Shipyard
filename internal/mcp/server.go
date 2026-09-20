@@ -37,6 +37,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	hash := sha256.Sum256([]byte(strings.TrimPrefix(auth, "Bearer ")))
+	// Role is loaded from the live user row on every request so a demotion
+	// takes effect even if the token was issued while the caller was an admin.
 	user, token, err := s.store.UserAndAPITokenForHash(r.Context(), base64.RawURLEncoding.EncodeToString(hash[:]))
 	if err != nil {
 		w.Header().Set("WWW-Authenticate", `Bearer realm="taskboard-mcp"`)
@@ -60,35 +62,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	var result any
 	var errText string
+	principal := actor{User: user}
 	switch q.Method {
 	case "initialize":
 		result = map[string]any{"protocolVersion": "2025-03-26", "capabilities": map[string]any{"tools": map[string]any{}}, "serverInfo": map[string]string{"name": "taskboard", "version": "0.1.0"}}
 	case "tools/list":
-		result = map[string]any{"tools": tools()}
+		result = map[string]any{"tools": toolsFor(principal)}
 	case "tools/call":
-		result, errText = s.call(r, q.Params)
+		result, errText = s.call(r, principal, q.Params)
 		var tool struct {
 			Name string `json:"name"`
 		}
 		_ = json.Unmarshal(q.Params, &tool)
-		status := "ok"
-		if errText != "" {
-			status = "error"
-		}
-		_ = s.store.RecordAudit(r.Context(), user.ID, "mcp."+tool.Name, "mcp_tool", tool.Name, map[string]string{
-			"channel": "mcp", "token_name": token.Name, "token_prefix": token.Prefix, "status": status,
-		})
+		_ = s.store.RecordAudit(r.Context(), user.ID, "mcp."+tool.Name, "mcp_tool", tool.Name, callAuditMetadata(user, token, errText))
 	default:
 		errText = "method not found"
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if errText != "" {
-		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": q.ID, "error": map[string]any{"code": func() int {
-			if errText == "method not found" {
-				return -32601
-			}
-			return -32602
-		}(), "message": errText}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": q.ID, "error": map[string]any{"code": jsonRPCErrorCode(errText), "message": errText}})
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": q.ID, "result": result})
@@ -170,13 +162,16 @@ func schemaWithOptional(required []string, optional ...string) map[string]any {
 	return map[string]any{"type": "object", "properties": p, "required": required}
 }
 
-func (s *Server) call(r *http.Request, raw json.RawMessage) (any, string) {
+func (s *Server) call(r *http.Request, principal actor, raw json.RawMessage) (any, string) {
 	var call struct {
 		Name      string            `json:"name"`
 		Arguments map[string]string `json:"arguments"`
 	}
 	if err := json.Unmarshal(raw, &call); err != nil {
 		return nil, "invalid tool parameters"
+	}
+	if err := principal.authorize(call.Name); err != nil {
+		return nil, err.Error()
 	}
 	a := call.Arguments
 	ctx := r.Context()

@@ -3,7 +3,9 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
+	"taskboard/internal/domain"
 	"testing"
 )
 
@@ -74,8 +76,17 @@ func TestCreateWebhookRejectsInvalidURLBeforeStoreAccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, message := (&Server{}).call(request.WithContext(context.Background()), params)
+	_, message := (&Server{}).call(request.WithContext(context.Background()), actor{User: domain.User{Role: "admin"}}, params)
 	if message == "" {
 		t.Fatal("expected invalid webhook URL to be rejected")
+	}
+}
+
+func TestServeHTTPRejectsMissingTokenWithoutDispatch(t *testing.T) {
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", nil)
+	(&Server{}).ServeHTTP(res, req)
+	if res.Code != 401 {
+		t.Fatalf("status = %d, want 401", res.Code)
 	}
 }
