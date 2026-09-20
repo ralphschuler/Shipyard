@@ -57,7 +57,9 @@ func acquireGate(root string, exclusive bool) (*RunGate, error) {
 
 // AcquireRunGate is used around queue insertion and run claiming. A
 // non-blocking shared lock lets callers report a migration immediately while
-// allowing multiple normal runs to share the gate.
+// allowing multiple normal runs to share the gate. Preflight must probe this
+// same inode with a shared lock so the service's own lease is not mistaken
+// for an exclusive migration.
 func AcquireRunGate() (*RunGate, error) {
 	root := configuredRoot()
 	info, err := os.Stat(root)

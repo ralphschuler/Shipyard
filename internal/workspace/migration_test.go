@@ -48,39 +48,106 @@ func TestMigrateIsIdempotentAndLeavesActiveRunInPlace(t *testing.T) {
 	}
 }
 
-func TestMigrationGateBlocksRunAcquisitionWithoutMisclassifyingSharedRuns(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, markerName), []byte("shipyard workspace\n"), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TASKBOARD_WORKSPACE_ROOT", root)
-	gate, err := acquireGate(root, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer gate.Close()
-	if _, err := AcquireRunGate(); err == nil {
-		t.Fatal("AcquireRunGate() succeeded during migration")
-	}
-	if status, err := Validate(); err != nil || !status.Ready() {
-		t.Fatalf("Validate() = %#v, %v; shared run gate must not be mistaken for migration", status, err)
-	}
-}
-
-func TestSharedRunGateCanValidateWhileHeld(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, markerName), []byte("shipyard workspace\n"), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("TASKBOARD_WORKSPACE_ROOT", root)
+func TestSharedServiceLockDoesNotLookLikeMigration(t *testing.T) {
+	markedWorkspace(t)
 	gate, err := AcquireRunGate()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer gate.Close()
-	if status, err := Validate(); err != nil || !status.Ready() {
-		t.Fatalf("Validate() = %#v, %v; want ready while shared gate is held", status, err)
+	status, err := Validate()
+	if err != nil || !status.Ready() || status.Migration {
+		t.Fatalf("Validate() = %#v, %v; shared run/service lock must not look like a migration", status, err)
 	}
+	second, err := AcquireRunGate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = second.Close()
+}
+
+func TestExclusiveMigrationLockBlocksPreflightAndNewRuns(t *testing.T) {
+	root := markedWorkspace(t)
+	gate, err := acquireGate(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Close()
+	if _, err := AcquireRunGate(); err == nil || !strings.Contains(err.Error(), "Workspace-Migration") {
+		t.Fatalf("AcquireRunGate() error = %v, want migration block", err)
+	}
+	status, err := Validate()
+	if err == nil || !status.Migration || status.Ready() || !strings.Contains(status.Error, "Workspace-Migration läuft") {
+		t.Fatalf("Validate() = %#v, %v; want migration preflight block", status, err)
+	}
+}
+
+func TestPreflightClearsAfterMigrationLockReleased(t *testing.T) {
+	root := markedWorkspace(t)
+	gate, err := acquireGate(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, err := Validate(); err == nil || !status.Migration {
+		t.Fatalf("Validate() = %#v, %v; want block while exclusive lock is held", status, err)
+	}
+	if err := gate.Close(); err != nil {
+		t.Fatal(err)
+	}
+	status, err := Validate()
+	if err != nil || !status.Ready() || status.Migration {
+		t.Fatalf("Validate() = %#v, %v; want ready after migration lock is released", status, err)
+	}
+	runGate, err := AcquireRunGate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = runGate.Close()
+}
+
+func TestIndependentRunGatesCanBeHeldInParallel(t *testing.T) {
+	markedWorkspace(t)
+	start := make(chan struct{})
+	type result struct {
+		gate *RunGate
+		err  error
+	}
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			gate, err := AcquireRunGate()
+			results <- result{gate, err}
+		}()
+	}
+	close(start)
+	var held []*RunGate
+	for i := 0; i < 2; i++ {
+		got := <-results
+		if got.err != nil {
+			t.Fatalf("AcquireRunGate() parallel error = %v", got.err)
+		}
+		held = append(held, got.gate)
+	}
+	defer func() {
+		for _, gate := range held {
+			_ = gate.Close()
+		}
+	}()
+	status, err := Validate()
+	if err != nil || !status.Ready() || status.Migration {
+		t.Fatalf("Validate() = %#v, %v; parallel shared run gates must leave preflight ready", status, err)
+	}
+}
+
+func markedWorkspace(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, markerName), []byte("shipyard workspace\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TASKBOARD_WORKSPACE_ROOT", root)
+	return root
 }
 
 func TestMigrateRejectsUnmarkedTargetWithoutCreatingLocalFallback(t *testing.T) {

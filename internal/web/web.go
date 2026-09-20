@@ -1316,7 +1316,7 @@ func (a *App) providerSettings(w http.ResponseWriter, r *http.Request) {
 func (a *App) workspaceAPI(w http.ResponseWriter, r *http.Request) {
 	status, _ := workspace.Validate()
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"root": status.Root, "projects": status.Projects, "runs": status.Runs, "integrations": status.Integrations, "storage": status.Storage, "writable": status.Writable, "git": status.Git, "ready": status.Ready(), "error": status.Error})
+	_ = json.NewEncoder(w).Encode(map[string]any{"root": status.Root, "projects": status.Projects, "runs": status.Runs, "integrations": status.Integrations, "storage": status.Storage, "writable": status.Writable, "git": status.Git, "migration": status.Migration, "ready": status.Ready(), "error": status.Error})
 }
 
 func (a *App) workspaceSettings(w http.ResponseWriter, r *http.Request) {

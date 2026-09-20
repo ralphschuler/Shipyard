@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -38,8 +39,11 @@ func TestValidateConfiguredWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, err := Validate()
-	if err != nil || !status.Ready() {
+	if err != nil || !status.Ready() || status.Migration {
 		t.Fatalf("Validate() = %#v, %v; want ready workspace", status, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".shipyard-migration.lock")); !os.IsNotExist(err) {
+		t.Fatalf("preflight created a migration lock file: %v", err)
 	}
 	for _, path := range []string{status.Projects, status.Runs, status.Integrations} {
 		if _, err := os.Stat(path); err != nil {
