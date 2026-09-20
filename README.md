@@ -158,6 +158,7 @@ Please do not include secrets, private infrastructure details, generated build o
 ## Further documentation
 
 - [Git integration and worktree model](docs/git-integration.md)
+- [Grokbot / xAI provider](docs/grokbot.md)
 - [Secret handling](docs/secrets.md)
 - [Frontend design system](docs/design-system.md)
 - [Deployment examples](deploy/)

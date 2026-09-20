@@ -141,6 +141,22 @@ func responsesURL(base string) (string, error) {
 	return u.String(), nil
 }
 
+func grokbotResponsesURL(base string) (string, error) {
+	if strings.TrimSpace(base) == "" {
+		return "https://api.x.ai/v1/responses", nil
+	}
+	u, err := url.Parse(strings.TrimSpace(base))
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return "", errors.New("Grokbot Base URL muss eine HTTPS-Adresse sein")
+	}
+	u.Path = strings.TrimRight(u.Path, "/")
+	if !strings.HasSuffix(u.Path, "/v1") {
+		u.Path += "/v1"
+	}
+	u.Path += "/responses"
+	return u.String(), nil
+}
+
 func outputText(result responseResult) string {
 	if strings.TrimSpace(result.OutputText) != "" {
 		return result.OutputText
@@ -301,18 +317,44 @@ func runOpenAIResponsesForProfile(ctx context.Context, provider domain.ProviderS
 	if err != nil {
 		return "", openAIUsage{}, err
 	}
-	return runOpenAIResponsesWithPolicy(ctx, provider, apiKey, prompt, worktree, policy)
+	return runProviderResponsesWithPolicy(ctx, provider, apiKey, prompt, worktree, policy, responsesURL, "OpenAI")
 }
 
 func runOpenAIResponsesWithPolicy(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree string, policy sandbox.Profile) (string, openAIUsage, error) {
+	return runProviderResponsesWithPolicy(ctx, provider, apiKey, prompt, worktree, policy, responsesURL, "OpenAI")
+}
+
+func runGrokbotResponses(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt string) (string, openAIUsage, error) {
+	if err := validateGrokbotConfiguration(provider); err != nil {
+		return "", openAIUsage{}, err
+	}
+	endpoint, err := grokbotResponsesURL(provider.BaseURL)
+	if err != nil {
+		return "", openAIUsage{}, err
+	}
+	request := responseRequest{Model: provider.Model, Input: prompt, Store: false}
+	result, err := callResponses(ctx, &http.Client{Timeout: 19 * time.Minute}, endpoint, apiKey, request)
+	if err != nil {
+		return "", openAIUsage{}, fmt.Errorf("Grokbot-Anfrage fehlgeschlagen: %w", redactProviderSecret(err, apiKey))
+	}
+	usage := openAIUsage{}
+	accumulateOpenAIUsage(&usage, result.Usage)
+	return outputText(result), usage, nil
+}
+
+func runGrokbotResponsesWithPolicy(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree string, policy sandbox.Profile) (string, openAIUsage, error) {
+	return runProviderResponsesWithPolicy(ctx, provider, apiKey, prompt, worktree, policy, grokbotResponsesURL, "Grokbot")
+}
+
+func runProviderResponsesWithPolicy(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree string, policy sandbox.Profile, endpointURL func(string) (string, error), providerLabel string) (string, openAIUsage, error) {
 	if policy.NetworkMode == "bridge-only" {
 		return "", openAIUsage{}, errors.New("sandbox profile bridge-only erlaubt keine direkten Provider-Aufrufe; verwende den geprüften hostseitigen Release-Bridge-Dienst")
 	}
 	if strings.TrimSpace(provider.Model) == "" {
-		return "", openAIUsage{}, errors.New("OpenAI-Modell fehlt in den Provider-Einstellungen")
+		return "", openAIUsage{}, fmt.Errorf("%s-Modell fehlt in den Provider-Einstellungen", providerLabel)
 	}
 	if strings.TrimSpace(provider.SecretEnv) == "" {
-		return "", openAIUsage{}, errors.New("OpenAI Secret-Umgebungsvariable fehlt")
+		return "", openAIUsage{}, fmt.Errorf("%s Secret-Umgebungsvariable fehlt", providerLabel)
 	}
 	if os.Getenv("TASKBOARD_BWRAP_PREFLIGHT") != "0" {
 		if err := bubblewrapPreflight(ctx); err != nil {
@@ -322,9 +364,9 @@ func runOpenAIResponsesWithPolicy(ctx context.Context, provider domain.ProviderS
 		return "", openAIUsage{}, errors.New("OpenAI-Agenten benötigen bubblewrap (bwrap); installiere das Paket bubblewrap auf dem Server und starte taskboard.service neu")
 	}
 	if strings.TrimSpace(apiKey) == "" {
-		return "", openAIUsage{}, errors.New("OpenAI Secret-Umgebungsvariable ist nicht gesetzt")
+		return "", openAIUsage{}, fmt.Errorf("%s Secret-Umgebungsvariable ist nicht gesetzt", providerLabel)
 	}
-	endpoint, err := responsesURL(provider.BaseURL)
+	endpoint, err := endpointURL(provider.BaseURL)
 	if err != nil {
 		return "", openAIUsage{}, err
 	}
@@ -339,11 +381,11 @@ func runOpenAIResponsesWithPolicy(ctx context.Context, provider domain.ProviderS
 	}
 	if provider.Options != "" && provider.Options != "{}" {
 		if err := json.Unmarshal([]byte(provider.Options), &options); err != nil {
-			return "", openAIUsage{}, errors.New("OpenAI-Optionen sind ungültig")
+			return "", openAIUsage{}, fmt.Errorf("%s-Optionen sind ungültig", providerLabel)
 		}
 	}
 	if options.MaxOutputTokens < 0 || options.InputCostPerMillion < 0 || options.OutputCostPerMillion < 0 || (options.Temperature != nil && (*options.Temperature < 0 || *options.Temperature > 2)) {
-		return "", openAIUsage{}, errors.New("OpenAI-Optionen enthalten ungültige Werte")
+		return "", openAIUsage{}, fmt.Errorf("%s-Optionen enthalten ungültige Werte", providerLabel)
 	}
 	client := &http.Client{Timeout: 19 * time.Minute}
 	usageServiceTier := options.ServiceTier
@@ -369,7 +411,7 @@ func runOpenAIResponsesWithPolicy(ctx context.Context, provider domain.ProviderS
 	for round := 0; round < maxOpenAIToolRounds; round++ {
 		result, err := callResponses(ctx, client, endpoint, apiKey, request)
 		if err != nil {
-			return strings.Join(transcript, "\n"), usage, err
+			return strings.Join(transcript, "\n"), usage, redactProviderSecret(err, apiKey)
 		}
 		accumulateOpenAIUsage(&usage, result.Usage)
 		var outputs []map[string]string
@@ -399,4 +441,11 @@ func runOpenAIResponsesWithPolicy(ctx context.Context, provider domain.ProviderS
 		request = responseRequest{Model: provider.Model, Input: outputs, PreviousResponseID: result.ID, Tools: toolDefinitions(), Reasoning: request.Reasoning, Text: request.Text, MaxOutputTokens: request.MaxOutputTokens, Temperature: request.Temperature, ServiceTier: request.ServiceTier, Store: false}
 	}
 	return strings.Join(transcript, "\n\n"), usage, errors.New("OpenAI-Agent hat das Werkzeuglimit erreicht")
+}
+
+func redactProviderSecret(err error, secret string) error {
+	if err == nil || strings.TrimSpace(secret) == "" {
+		return err
+	}
+	return errors.New(strings.ReplaceAll(err.Error(), secret, "[redacted]"))
 }

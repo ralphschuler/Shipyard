@@ -2470,6 +2470,15 @@ func (s *Store) UpdateAgent(c context.Context, id, name, desc, prefix, prompt, s
 	return err
 }
 
+func (s *Store) UpdateAgentAdapter(c context.Context, id, adapter string) error {
+	adapter = strings.TrimSpace(adapter)
+	if adapter == "" {
+		adapter = "codex"
+	}
+	_, err := s.DB.Exec(c, "UPDATE agents SET adapter=$2 WHERE id=$1 AND retired_at IS NULL", id, adapter)
+	return err
+}
+
 func (s *Store) SandboxProfiles(c context.Context) ([]sandbox.Profile, error) {
 	rows, err := s.DB.Query(c, `SELECT name,description,mounts,network_mode,write_mode,active FROM sandbox_profiles ORDER BY name`)
 	if err != nil {
