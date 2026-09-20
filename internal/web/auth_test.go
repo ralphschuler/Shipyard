@@ -65,6 +65,147 @@ func TestAdminArea(t *testing.T) {
 	}
 }
 
+func TestReviewAdminAPIRouteClassification(t *testing.T) {
+	admin := []string{
+		"/settings/providers",
+		"/settings/updates",
+		"/agents",
+		"/agents/templates",
+		"/audit",
+		"/skills",
+		"/skills/skills-sh/install",
+		"/automations",
+		"/schedules",
+		"/webhooks",
+		"/sandbox-profiles",
+		"/sandbox-profiles/strict",
+		"/api/v1/settings/updates/install",
+		"/api/v1/skills/install",
+		"/api/v1/audit",
+		"/api/v1/settings/providers",
+		"/api/v1/agents",
+		"/api/v1/agents/agent-1",
+		"/api/v1/settings/sandbox-profiles",
+		"/api/v1/skills",
+		"/api/v1/skills/search",
+		"/api/v1/automations",
+		"/api/v1/schedules",
+		"/api/v1/webhooks",
+		"/api/v1/settings/updates",
+		"/api/v1/settings/capabilities",
+		"/api/v1/settings/workspace",
+		"/api/v1/settings/agent-policy",
+		"/api/v1/settings/appearance",
+		"/api/v1/settings/integrations",
+	}
+	for _, path := range admin {
+		if !isAdminArea(path) {
+			t.Errorf("%s: isAdminArea = false, want true", path)
+		}
+	}
+	nonAdmin := []string{
+		"/boards",
+		"/account",
+		"/projects",
+		"/runs",
+		"/app/settings/updates",
+		"/api/v1/boards",
+		"/api/v1/account",
+		"/api/v1/projects",
+		"/api/v1/runs",
+		"/api/v1/dashboard",
+		"/api/v1/memory",
+		"/api/v10/settings/providers",
+	}
+	for _, path := range nonAdmin {
+		if isAdminArea(path) {
+			t.Errorf("%s: isAdminArea = true, want false", path)
+		}
+	}
+}
+
+func TestRoleMatrixForLegacyJSONAndSandboxRoutes(t *testing.T) {
+	type endpoint struct {
+		method, path string
+		adminOnly    bool
+	}
+	endpoints := []endpoint{
+		{http.MethodGet, "/settings/providers", true},
+		{http.MethodPost, "/settings/providers/codex", true},
+		{http.MethodGet, "/api/v1/settings/providers", true},
+		{http.MethodGet, "/settings/updates", true},
+		{http.MethodPost, "/api/v1/settings/updates/install", true},
+		{http.MethodGet, "/skills", true},
+		{http.MethodPost, "/skills/skills-sh/install", true},
+		{http.MethodGet, "/api/v1/skills", true},
+		{http.MethodPost, "/api/v1/skills/install", true},
+		{http.MethodGet, "/audit", true},
+		{http.MethodGet, "/api/v1/audit", true},
+		{http.MethodGet, "/agents", true},
+		{http.MethodPost, "/agents", true},
+		{http.MethodGet, "/api/v1/agents", true},
+		{http.MethodPost, "/sandbox-profiles", true},
+		{http.MethodPost, "/sandbox-profiles/strict", true},
+		{http.MethodGet, "/api/v1/settings/sandbox-profiles", true},
+		{http.MethodGet, "/automations", true},
+		{http.MethodGet, "/api/v1/automations", true},
+		{http.MethodGet, "/boards", false},
+		{http.MethodPost, "/boards", false},
+		{http.MethodGet, "/api/v1/boards", false},
+		{http.MethodPost, "/api/v1/boards", false},
+		{http.MethodGet, "/account", false},
+		{http.MethodGet, "/api/v1/account", false},
+		{http.MethodPost, "/api/v1/account/tokens", false},
+	}
+	roles := []struct {
+		name  string
+		admin bool
+	}{
+		{"owner", true},
+		{"admin", true},
+		{"member", false},
+		{"viewer", false},
+	}
+	for _, ep := range endpoints {
+		for _, role := range roles {
+			status, message := roleRestriction(ep.method, ep.path, role.name)
+			wantDeny := (!role.admin && ep.adminOnly) || (role.name == "viewer" && unsafeMethod(ep.method))
+			gotDeny := status == http.StatusForbidden
+			if gotDeny != wantDeny {
+				t.Errorf("%s %s as %s: status=%d deny=%v, want deny=%v (%s)", ep.method, ep.path, role.name, status, gotDeny, wantDeny, message)
+			}
+			if !wantDeny && status != 0 {
+				t.Errorf("%s %s as %s: status=%d, want allow", ep.method, ep.path, role.name, status)
+			}
+		}
+	}
+}
+
+func TestRoleRestrictionStopsAdminMutationsBeforeHandler(t *testing.T) {
+	for _, role := range []string{"member", "viewer"} {
+		for _, path := range []string{"/api/v1/skills/install", "/api/v1/settings/updates/install", "/sandbox-profiles"} {
+			called := false
+			next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if status, message := roleRestriction(r.Method, r.URL.Path, role); status != 0 {
+					http.Error(w, message, status)
+					return
+				}
+				next.ServeHTTP(w, r)
+			})
+			req := httptest.NewRequest(http.MethodPost, path, nil)
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			if res.Code != http.StatusForbidden {
+				t.Errorf("%s as %s: status=%d, want 403", path, role, res.Code)
+			}
+			if called {
+				t.Errorf("%s as %s: handler ran after a denied admin mutation", path, role)
+			}
+		}
+	}
+}
+
 func TestTrustedProxyRequest(t *testing.T) {
 	t.Setenv("TASKBOARD_PROXY_SSO_SECRET", "proxy-secret")
 	t.Setenv("TASKBOARD_PROXY_SSO_EMAIL", "owner@example.test")
