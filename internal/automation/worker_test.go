@@ -1471,6 +1471,47 @@ func TestApplyRejectsAnEmptyDiff(t *testing.T) {
 	}
 }
 
+func TestRunDiffIncludesCommittedChangesSinceRunStart(t *testing.T) {
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "main")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	startSHA, err := gitOutput(context.Background(), source, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "implemented.txt"), []byte("implemented\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "implemented.txt")
+	runGit(t, source, "commit", "-m", "implemented")
+	if err := os.WriteFile(filepath.Join(source, "staged.txt"), []byte("staged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "staged.txt")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\nunstaged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	diff, err := runDiffAgainstStart(context.Background(), source, startSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(diff), "implemented.txt") {
+		t.Fatalf("committed run change is missing from diff: %s", diff)
+	}
+	for _, name := range []string{"staged.txt", "base.txt", "unstaged"} {
+		if !strings.Contains(string(diff), name) {
+			t.Fatalf("mixed run change %q is missing from diff: %s", name, diff)
+		}
+	}
+}
+
 func TestRequestedInteractionsRequireAStableDecisionKey(t *testing.T) {
 	logs := []domain.RunLog{{Message: "```taskboard-interaction\n{\"title\":\"Datenbank\",\"fields\":[{\"id\":\"db\",\"label\":\"Wahl\",\"type\":\"text\"}]}\n```"}}
 	if got := requestedInteractions(logs); len(got) != 0 {

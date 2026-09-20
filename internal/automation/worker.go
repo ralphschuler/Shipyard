@@ -909,6 +909,14 @@ func shellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\\"'\\\"'") + "'"
 }
 
+func runDiffAgainstStart(ctx context.Context, worktree, startSHA string) ([]byte, error) {
+	base := strings.TrimSpace(startSHA)
+	if base == "" {
+		base = "HEAD"
+	}
+	return exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--binary", base).Output()
+}
+
 // lockRepository serializes the small but critical delivery window in a
 // source checkout. Agent worktrees are intentionally concurrent; accepting
 // their patches into one branch must not be. A non-blocking flock lets an
@@ -961,8 +969,8 @@ func runCommitExists(ctx context.Context, source, commitSHA string) (bool, error
 // write failed. A subject marker alone is deliberately insufficient here.
 // The candidate must be an ancestor of the managed HEAD and its complete
 // binary diff must equal the still-present isolated run diff.
-func findUnpersistedRunCommit(ctx context.Context, source, worktree, runID string) (string, error) {
-	expected, err := exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--binary", "HEAD").Output()
+func findUnpersistedRunCommit(ctx context.Context, source, worktree, runID string, startSHA ...string) (string, error) {
+	expected, err := runDiffAgainstStart(ctx, worktree, firstValue(startSHA))
 	if err != nil {
 		return "", err
 	}
@@ -991,8 +999,8 @@ func findUnpersistedRunCommit(ctx context.Context, source, worktree, runID strin
 // the task-branch integration path. It closes the boundary between creating
 // the branch commit and recording AppliedAt in the database without touching
 // the shared source checkout.
-func findUnpersistedTaskBranchCommit(ctx context.Context, source, branch, worktree, runID string) (string, error) {
-	expected, err := exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--binary", "HEAD").Output()
+func findUnpersistedTaskBranchCommit(ctx context.Context, source, branch, worktree, runID string, startSHA ...string) (string, error) {
+	expected, err := runDiffAgainstStart(ctx, worktree, firstValue(startSHA))
 	if err != nil {
 		return "", err
 	}
@@ -1015,6 +1023,13 @@ func findUnpersistedTaskBranchCommit(ctx context.Context, source, branch, worktr
 		}
 	}
 	return "", nil
+}
+
+func firstValue(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
 
 func gitOutput(ctx context.Context, directory string, args ...string) (string, error) {
@@ -1551,7 +1566,12 @@ func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, 
 	} else if strings.TrimSpace(string(dirty)) != "" {
 		return "", managedCheckoutProblem("nicht sauber", strings.TrimSpace(string(dirty)), "der verwaltete Synchronisationsanker enthält fremde Änderungen")
 	}
-	diff, diffErr := exec.CommandContext(ctx, "git", "-C", runWorktree, "diff", "--binary", "HEAD").Output()
+	startSHA := ""
+	if len(configuredDefault) > 1 {
+		startSHA = configuredDefault[1]
+		configuredDefault = configuredDefault[:1]
+	}
+	diff, diffErr := runDiffAgainstStart(ctx, runWorktree, startSHA)
 	if diffErr != nil {
 		return "", diffErr
 	}
@@ -1723,14 +1743,14 @@ func syncManagedCheckout(ctx context.Context, path, branch string, acceptedCommi
 // applyRunPatch is retained for legacy callers and focused unit tests. New
 // deliveries use applyRunPatchToTaskBranch so the managed checkout remains a
 // clean synchronization anchor.
-func applyRunPatch(ctx context.Context, source, worktree, runID string) (string, error) {
+func applyRunPatch(ctx context.Context, source, worktree, runID string, startSHA ...string) (string, error) {
 	if dirty, checkErr := exec.CommandContext(ctx, "git", "-C", source, "status", "--porcelain").Output(); checkErr != nil {
 		return "", checkErr
 	} else if strings.TrimSpace(string(dirty)) != "" {
 		return "", managedCheckoutProblem("nicht sauber", strings.TrimSpace(string(dirty)), "fremde oder manuelle Änderungen würden von dieser Übernahme berührt")
 	}
 	// --binary makes newly created binary files representable in the patch.
-	diff, diffErr := exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--binary", "HEAD").Output()
+	diff, diffErr := runDiffAgainstStart(ctx, worktree, firstValue(startSHA))
 	if diffErr != nil {
 		return "", diffErr
 	}
@@ -2657,6 +2677,10 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	if err != nil || worktree == "" {
 		return errors.New("Worktree für diesen Run nicht verfügbar")
 	}
+	runStartSHA, err := w.Store.RunStartSHA(ctx, runID)
+	if err != nil {
+		return fmt.Errorf("Run-Start-Commit konnte nicht gelesen werden: %w", err)
+	}
 	taskBranch, branchErr := ensureTaskBranch(ctx, source, run.TaskID, defaultBranch)
 	if branchErr != nil {
 		return branchErr
@@ -2666,7 +2690,7 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	// for a second time simply because its old SHA no longer exists on the
 	// rebased task branch.
 	if delivery.AcceptedCommitSHA != "" {
-		rebasedSHA, recoveryErr := findUnpersistedTaskBranchCommit(ctx, source, taskBranch, worktree, runID)
+		rebasedSHA, recoveryErr := findUnpersistedTaskBranchCommit(ctx, source, taskBranch, worktree, runID, runStartSHA)
 		if recoveryErr != nil {
 			return fmt.Errorf("rebasierter Task-Branch-Commit konnte nicht geprüft werden: %w", recoveryErr)
 		}
@@ -2684,7 +2708,7 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	}
 	alreadyCommitted := false
 	if delivery.AcceptedCommitSHA == "" {
-		recoveredSHA, recoveryErr := findUnpersistedTaskBranchCommit(ctx, source, taskBranch, worktree, runID)
+		recoveredSHA, recoveryErr := findUnpersistedTaskBranchCommit(ctx, source, taskBranch, worktree, runID, runStartSHA)
 		if recoveryErr != nil {
 			return fmt.Errorf("verwaister Task-Branch-Commit konnte nicht geprüft werden: %w", recoveryErr)
 		}
@@ -2706,7 +2730,7 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	// longer an ancestor of the task branch; otherwise a retry would apply the
 	// same delivery a second time.
 	if !alreadyCommitted {
-		recoveredSHA, recoveryErr := findUnpersistedTaskBranchCommit(ctx, source, taskBranch, worktree, runID)
+		recoveredSHA, recoveryErr := findUnpersistedTaskBranchCommit(ctx, source, taskBranch, worktree, runID, runStartSHA)
 		if recoveryErr != nil {
 			return fmt.Errorf("rebasierter Task-Branch-Commit konnte nicht geprüft werden: %w", recoveryErr)
 		}
@@ -2720,7 +2744,7 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	commitSHA := delivery.AcceptedCommitSHA
 	if !alreadyCommitted {
 		var applyErr error
-		commitSHA, applyErr = applyRunPatchToTaskBranch(ctx, source, worktree, runID, run.TaskID, defaultBranch)
+		commitSHA, applyErr = applyRunPatchToTaskBranch(ctx, source, worktree, runID, run.TaskID, defaultBranch, runStartSHA)
 		if applyErr != nil {
 			if isIntegrationConflict(applyErr) {
 				if recordErr := w.recordIntegrationConflict(ctx, run, applyErr); recordErr != nil {
@@ -2825,7 +2849,11 @@ func (w *Worker) Diff(ctx context.Context, runID string) (string, error) {
 	if err != nil || worktree == "" {
 		return "", errors.New("Worktree für diesen Run nicht verfügbar")
 	}
-	out, err := exec.CommandContext(ctx, "git", "-C", worktree, "diff", "--binary", "HEAD").CombinedOutput()
+	startSHA, startErr := w.Store.RunStartSHA(ctx, runID)
+	if startErr != nil {
+		return "", startErr
+	}
+	out, err := runDiffAgainstStart(ctx, worktree, startSHA)
 	if err != nil {
 		return "", errors.New(RedactSensitiveText(strings.TrimSpace(string(out))))
 	}
@@ -3096,6 +3124,21 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		branchLock()
 		_ = w.Store.AddRunLog(ctx, run.ID, "error", string(out))
 		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", err.Error())
+		_ = w.finish(ctx, run, "failed")
+		return
+	}
+	runStartSHA, startErr := gitOutput(ctx, worktree, "rev-parse", "HEAD")
+	if startErr != nil {
+		branchLock()
+		_ = w.Store.AddRunLog(ctx, run.ID, "error", "Run-Start-Commit konnte nicht bestimmt werden: "+startErr.Error())
+		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Run-Start-Commit konnte nicht bestimmt werden", startErr.Error())
+		_ = w.finish(ctx, run, "failed")
+		return
+	}
+	if err := w.Store.SetRunStartSHA(ctx, run.ID, runStartSHA); err != nil {
+		branchLock()
+		_ = w.Store.AddRunLog(ctx, run.ID, "error", "Run-Start-Commit konnte nicht persistiert werden: "+err.Error())
+		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Run-Start-Commit konnte nicht persistiert werden", err.Error())
 		_ = w.finish(ctx, run, "failed")
 		return
 	}
@@ -3612,10 +3655,14 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	}
 	// Include newly created files in the review diff without staging a commit.
 	_ = exec.Command("git", "-C", run.WorkspaceSnapshot, "add", "-N", ".").Run()
-	diffOut, _ := exec.Command("git", "-C", run.WorkspaceSnapshot, "diff", "--stat").Output()
+	diffBase := strings.TrimSpace(runStartSHA)
+	if diffBase == "" {
+		diffBase = "HEAD"
+	}
+	diffOut, _ := exec.Command("git", "-C", run.WorkspaceSnapshot, "diff", diffBase, "--stat").Output()
 	// Tests are deliberately agent-controlled: a task/agent prompt decides whether and how to run them.
 	// The delivery gate only verifies that the generated patch is syntactically applicable.
-	gateOut, gateErr := exec.Command("git", "-C", run.WorkspaceSnapshot, "diff", "--check").CombinedOutput()
+	gateOut, gateErr := exec.Command("git", "-C", run.WorkspaceSnapshot, "diff", diffBase, "--check").CombinedOutput()
 	gateStatus := "passed"
 	if gateErr != nil {
 		gateStatus = "failed"

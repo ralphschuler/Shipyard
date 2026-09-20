@@ -52,6 +52,19 @@ func TestSandboxEffectivePolicyMigrationBackfillsLegacyRuns(t *testing.T) {
 	}
 }
 
+func TestRunStartSHAMigrationPersistsDiffBase(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/051_run_start_sha.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"run_start_sha TEXT NOT NULL DEFAULT ''", "ADD COLUMN IF NOT EXISTS"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("run start SHA migration is missing %q", required)
+		}
+	}
+}
+
 func TestAgentTransitionSourceMigrationAdmitsWorkerSources(t *testing.T) {
 	body, err := migrationFiles.ReadFile("migrations/034_agent_transition_sources.sql")
 	if err != nil {
