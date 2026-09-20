@@ -96,6 +96,11 @@ func Validate() (Status, error) {
 		}
 		status.Marker = true
 	}
+	status.Migration = migrationInProgress(root)
+	if status.Migration {
+		status.Error = "Workspace-Migration läuft; neue Runs sind pausiert"
+		return status, errors.New(status.Error)
+	}
 	if err := os.MkdirAll(status.Projects, 0o750); err != nil {
 		status.Error = "Workspace-Root ist nicht verfügbar: " + err.Error()
 		return status, errors.New(status.Error)
@@ -138,14 +143,20 @@ func migrationInProgress(root string) bool {
 		return true
 	}
 	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	// Probe with a non-blocking shared lock. An exclusive migration lock
+	// conflicts; the process's own shared run/service lock does not. An
+	// exclusive probe would misclassify that shared lease as a migration
+	// and pause every new run for the lifetime of the daemon.
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
 		return true
 	}
 	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	return false
 }
 
-func (s Status) Ready() bool { return s.Writable && s.Git && s.Error == "" }
+func (s Status) Ready() bool {
+	return s.Writable && s.Git && !s.Migration && s.Error == ""
+}
 
 func (s Status) Summary() string {
 	if s.Ready() {
