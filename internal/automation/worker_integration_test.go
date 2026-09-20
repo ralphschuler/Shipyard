@@ -737,6 +737,76 @@ func TestProcessIntegrationQueueReturnsConflictAuditFailure(t *testing.T) {
 	}
 }
 
+func TestProcessIntegrationQueueDeadLettersMissingHead(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "-b", "master", source)
+	runGit(t, source, "config", "user.name", "Integration Test")
+	runGit(t, source, "config", "user.email", "integration@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	base, err := gitOutput(ctx, source, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	board, err := s.CreateBoard(ctx, "Queue dead-letter "+time.Now().Format("150405.000000000"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	task, err := s.CreateTask(ctx, board.ID, "Queue dead-letter task", "exercise terminal missing head", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "Queue dead-letter agent "+time.Now().Format("150405.000000000"), "integration", "", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := s.CreateRun(ctx, task.ID, agent.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	job, err := s.EnqueueIntegration(ctx, domain.IntegrationJob{
+		RepositoryPath: source,
+		RunID:          run.ID,
+		TaskID:         task.ID,
+		Branch:         "task/" + task.ID,
+		DefaultBranch:  "master",
+		BaseSHA:        base,
+		HeadSHA:        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := &Worker{Store: s}
+	if err := w.processIntegrationQueue(ctx); err == nil || !strings.Contains(err.Error(), "lokal nicht verfügbar") {
+		t.Fatalf("missing head queue error = %v, want lokal nicht verfügbar", err)
+	}
+	var status, step, lastError string
+	var attempts int
+	if err := s.DB.QueryRow(ctx, "SELECT status,step,last_error,attempts FROM repository_integration_queue WHERE id=$1", job.ID).Scan(&status, &step, &lastError, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || attempts < 1 || !strings.Contains(lastError, "lokal nicht verfügbar") {
+		t.Fatalf("missing head dead-letter = status %q step %q attempts %d error %q", status, step, attempts, lastError)
+	}
+	claimed, err := s.IntegrationJobs(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, claimedJob := range claimed {
+		if claimedJob.ID == job.ID {
+			t.Fatalf("failed job remained eligible: %#v", claimedJob)
+		}
+	}
+}
+
 func TestProcessIntegrationQueueEndToEndRebasesPushesCreatesPRAndSyncsMerge(t *testing.T) {
 	s := workerIntegrationStore(t)
 	ctx := context.Background()

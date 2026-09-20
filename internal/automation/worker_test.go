@@ -123,10 +123,165 @@ func TestEnsureIntegrationBranchRecreatesMissingBranchFromAcceptedHead(t *testin
 }
 
 func TestIntegrationFailureIsRequeuedInsteadOfRemainingRunning(t *testing.T) {
+	t.Setenv("SHIPYARD_MAX_INTEGRATION_ATTEMPTS", "8")
 	job := domain.IntegrationJob{Status: "running", Step: "pr", Attempts: 1}
-	status, step := integrationFailureState(job)
+	status, step := integrationFailureState(job, errors.New("Push fehlgeschlagen: exit status 1"))
 	if status != "queued" || step != "pr" {
 		t.Fatalf("failure state = status %q step %q, want queued/pr", status, step)
+	}
+}
+
+func TestIntegrationFailureIsTerminalAfterMaxAttempts(t *testing.T) {
+	t.Setenv("SHIPYARD_MAX_INTEGRATION_ATTEMPTS", "3")
+	job := domain.IntegrationJob{Status: "running", Step: "push", Attempts: 2}
+	status, step := integrationFailureState(job, errors.New("Push fehlgeschlagen: exit status 1"))
+	if status != "failed" || step != "push" {
+		t.Fatalf("exhausted failure state = status %q step %q, want failed/push", status, step)
+	}
+}
+
+func TestOpenPRFailureKeepsStatusUntilAttemptsExhausted(t *testing.T) {
+	t.Setenv("SHIPYARD_MAX_INTEGRATION_ATTEMPTS", "4")
+	job := domain.IntegrationJob{Status: "pr_open", Step: "done", Attempts: 1}
+	status, step := integrationFailureState(job, errors.New("PR-Status konnte nicht gelesen werden: timeout"))
+	if status != "pr_open" || step != "done" {
+		t.Fatalf("transient PR failure state = status %q step %q, want pr_open/done", status, step)
+	}
+	job.Attempts = 3
+	status, step = integrationFailureState(job, errors.New("PR-Status konnte nicht gelesen werden: timeout"))
+	if status != "failed" || step != "done" {
+		t.Fatalf("exhausted PR failure state = status %q step %q, want failed/done", status, step)
+	}
+}
+
+func TestPermanentIntegrationFailureIsNotRequeued(t *testing.T) {
+	t.Setenv("SHIPYARD_MAX_INTEGRATION_ATTEMPTS", "8")
+	cases := []string{
+		"Integrations-Head abc ist lokal nicht verfügbar: fatal: Needed a single revision",
+		"unbekannte Revision origin/master...task/task-1: fatal: unknown revision or path not in the working tree",
+		"Projekt-Checkout ist nicht sauber.",
+		"ungültiger Integrations-Branch",
+		"ungültiges oder unsicheres Integrationsziel",
+	}
+	for _, message := range cases {
+		job := domain.IntegrationJob{Status: "running", Step: "rebase", Attempts: 0}
+		status, step := integrationFailureState(job, errors.New(message))
+		if status != "failed" || step != "rebase" {
+			t.Fatalf("permanent %q = status %q step %q, want failed/rebase", message, status, step)
+		}
+	}
+}
+
+func TestUnknownRevisionRebaseIsNotAnIntegrationConflict(t *testing.T) {
+	err := errors.New("unbekannte Revision origin/master...task/task-1: fatal: unknown revision or path not in the working tree")
+	if isIntegrationConflict(err) {
+		t.Fatal("unknown revision must not be treated as a merge conflict")
+	}
+	if !isPermanentIntegrationFailure(err) {
+		t.Fatal("unknown revision must be terminal")
+	}
+}
+
+func TestMaxIntegrationAttemptsDefaultsAndIsConfigurable(t *testing.T) {
+	t.Setenv("SHIPYARD_MAX_INTEGRATION_ATTEMPTS", "")
+	if got := maxIntegrationAttempts(); got != defaultMaxIntegrationAttempts {
+		t.Fatalf("default attempts = %d, want %d", got, defaultMaxIntegrationAttempts)
+	}
+	t.Setenv("SHIPYARD_MAX_INTEGRATION_ATTEMPTS", "7")
+	if got := maxIntegrationAttempts(); got != 7 {
+		t.Fatalf("configured attempts = %d, want 7", got)
+	}
+}
+
+func TestPrepareIntegrationWorktreeRemovesStaleCheckoutBeforeBranchRepair(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	head, err := gitOutput(ctx, source, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "branch", "task/task-1")
+	stale := filepath.Join(taskIntegrationDirectory(source), "queue-stale")
+	if err := os.MkdirAll(filepath.Dir(stale), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "worktree", "add", stale, "task/task-1")
+	if err := os.WriteFile(filepath.Join(stale, "dirty.txt"), []byte("dirty\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fresh := filepath.Join(taskIntegrationDirectory(source), "queue-fresh")
+	if out, addErr := exec.Command("git", "-C", source, "worktree", "add", fresh, "task/task-1").CombinedOutput(); addErr == nil {
+		t.Fatalf("expected worktree add to fail while the stale queue worktree holds the branch: %s", out)
+	}
+	if err := prepareIntegrationWorktree(ctx, source, "master", "task/task-1", head, fresh); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	t.Cleanup(func() { _ = removeIntegrationWorktree(context.Background(), source, fresh) })
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale worktree still exists: %v", err)
+	}
+	got, err := gitOutput(ctx, fresh, "rev-parse", "HEAD")
+	if err != nil || got != head {
+		t.Fatalf("fresh worktree head = %q, want %q (err=%v)", got, head, err)
+	}
+	if dirty, err := gitOutput(ctx, fresh, "status", "--porcelain"); err != nil || dirty != "" {
+		t.Fatalf("fresh worktree is not clean: %q (%v)", dirty, err)
+	}
+}
+
+func TestRestoreManagedCheckoutBranchSwitchesCleanFeatureBranch(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "switch", "-c", "task/task-1")
+	if err := restoreManagedCheckoutBranch(ctx, source, "master"); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if got := repositoryBranch(ctx, source); got != "master" {
+		t.Fatalf("branch = %q, want master", got)
+	}
+}
+
+func TestRestoreManagedCheckoutBranchLeavesDirtyFeatureBranchUntouched(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "switch", "-c", "feature")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("manual\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := restoreManagedCheckoutBranch(ctx, source, "master")
+	if err == nil || !strings.Contains(err.Error(), "nicht sauber") || !strings.Contains(err.Error(), "base.txt") {
+		t.Fatalf("dirty restore diagnosis = %v", err)
+	}
+	if got := repositoryBranch(ctx, source); got != "feature" {
+		t.Fatalf("dirty checkout was moved: %q", got)
+	}
+	contents, readErr := os.ReadFile(filepath.Join(source, "base.txt"))
+	if readErr != nil || string(contents) != "manual\n" {
+		t.Fatalf("manual change was altered: %q, %v", contents, readErr)
 	}
 }
 
