@@ -1324,7 +1324,7 @@ func (a *App) workspaceSettings(w http.ResponseWriter, r *http.Request) {
 	a.render(r, w, "workspace.html", map[string]any{"Status": status})
 }
 
-func canManageSecrets(u domain.User) bool { return u.Role == "owner" || u.Role == "admin" }
+func canManageSecrets(u domain.User) bool { return isAdminRole(u.Role) }
 func (a *App) secrets(w http.ResponseWriter, r *http.Request) {
 	u, ok := currentUser(r.Context())
 	if !ok {
