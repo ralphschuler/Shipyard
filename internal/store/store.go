@@ -3230,6 +3230,17 @@ func (s *Store) RunWorktree(c context.Context, id string) (string, error) {
 	return path, err
 }
 
+func (s *Store) RunStartSHA(c context.Context, id string) (string, error) {
+	var sha string
+	err := s.DB.QueryRow(c, "SELECT run_start_sha FROM agent_runs WHERE id=$1", id).Scan(&sha)
+	return sha, err
+}
+
+func (s *Store) SetRunStartSHA(c context.Context, id, sha string) error {
+	_, err := s.DB.Exec(c, "UPDATE agent_runs SET run_start_sha=$2 WHERE id=$1 AND run_start_sha=''", id, sha)
+	return err
+}
+
 // ActiveRunWorktreePaths are excluded from a workspace migration. Their
 // providers may still hold files open, so the old checkout remains the safe
 // source of truth until the run reaches a terminal state.

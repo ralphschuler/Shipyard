@@ -1,0 +1,2 @@
+ALTER TABLE agent_runs
+  ADD COLUMN IF NOT EXISTS run_start_sha TEXT NOT NULL DEFAULT '';
