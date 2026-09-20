@@ -33,3 +33,10 @@ der Queue-Eintrag im Status `pr_open`; der Provider-Merge wird wiederanlaufbar
 Fast-Forward auf `origin/<default-branch>` synchronisiert. Ein Rebase-Konflikt
 in diesem Ablauf setzt den Task auf Needs action und protokolliert die
 betroffenen Dateien.
+
+Vorübergehende Push-/PR-/Netzwerkfehler bleiben mit Backoff erneut anlaufbar.
+Dauerhafte Fehler (fehlende Head-SHA, unbekannte Revision, unsauberer
+verwalteter Checkout) und erschöpfte Versuche werden als `failed`
+abgeschlossen statt endlos requeued. Stale Queue-Worktrees werden vor der
+Branch-Reparatur entfernt; ein sauberer verwalteter Checkout, der nicht auf
+dem Default-Branch steht, wird dorthin zurückgeschaltet.
