@@ -104,6 +104,10 @@ func TestUpdatesAPIFailsClosedForUnverifiedRelease(t *testing.T) {
 	if payload["status"] != "unverified" || payload["installable"] != false {
 		t.Fatalf("payload = %#v", payload)
 	}
+	current, _ := payload["current"].(map[string]any)
+	if current == nil || current["goVersion"] == "" {
+		t.Fatalf("current Go toolchain missing from payload: %#v", payload["current"])
+	}
 	if !strings.Contains(payload["reason"].(string), "TASKBOARD_GITHUB_RELEASE_ALLOWLIST") {
 		t.Fatalf("reason = %#v", payload["reason"])
 	}

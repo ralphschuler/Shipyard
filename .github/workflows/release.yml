@@ -38,8 +38,17 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: stable
-          check-latest: true
+          go-version-file: go.mod
+          check-latest: false
+      - name: Pin the patched Go toolchain
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/go-toolchain.sh
+          source ./scripts/go-toolchain.sh
+          toolchain="$(shipyard_minimum_go_toolchain)"
+          echo "GOTOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+          echo "TASKBOARD_GO_VERSION=$toolchain" >> "$GITHUB_ENV"
+          GOTOOLCHAIN="$toolchain" ./scripts/require-go-toolchain.sh
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
@@ -59,11 +68,14 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          TASKBOARD_VERSION: ${{ env.RELEASE_VERSION }}
+          TASKBOARD_COMMIT_SHA: ${{ github.sha }}
+          TASKBOARD_LDFLAGS_EXTRA: "-s -w"
         run: |
           set -euo pipefail
           mkdir -p dist
-          timeout 120s go build -trimpath -ldflags "-s -w -X main.version=${RELEASE_VERSION} -X main.commit=${GITHUB_SHA} -X main.builtAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            -o "dist/shipyard-${GOOS}-${GOARCH}" ./cmd/taskboard
+          ./scripts/build-taskboard.sh -o "dist/shipyard-${GOOS}-${GOARCH}" --scan
+          go version -m "dist/shipyard-${GOOS}-${GOARCH}"
       - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:
