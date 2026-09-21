@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"taskboard/internal/container"
 	"taskboard/internal/domain"
 	"taskboard/internal/sandbox"
@@ -15,6 +16,22 @@ import (
 )
 
 const containerAgentHome = sandboxCLIHome
+
+// modelAPIRelayScriptMode is the mode of the bind-mounted allowlist relay.
+// taskboard.service sets UMask=0077, and the script used to be chmod 0500.
+// Rootless Docker maps `docker exec --user <uid>:<gid>` (the host ids from
+// containerUser) onto a subordinate uid, so that owner-only file is EACCES
+// when python opens /tmp/shipyard-model-api-relay.py. The script is embedded
+// source. 0644 is readable by that subordinate uid and is not world-writable.
+// Chmod is required: WriteFile applies the service umask and would collapse
+// 0644 back to 0600.
+const modelAPIRelayScriptMode os.FileMode = 0o644
+
+// modelAPIRelaySocketMode is connect permission for the same subordinate uid.
+// Write on a unix socket is permission to connect. The socket lives in the
+// 0700 container bind directory, so other host users still cannot resolve it.
+// The bubblewrap proxy keeps its owner-only socket in the service temp dir.
+const modelAPIRelaySocketMode os.FileMode = 0o666
 
 // agentContainerRequest is the production CLI execution boundary. The sandbox
 // profile becomes container mounts and network mode. Bubblewrap is not used
@@ -104,10 +121,12 @@ func cliContainerRuntimeAvailable(ctx context.Context) error {
 //   - Task-assigned secrets are injected through an exec env-file. The
 //     container does not receive the Shipyard service environment.
 //   - Bind sources Shipyard creates (agent home, secret env-file, model-API
-//     socket, relay script, fallback build context) live under the workspace
-//     runtime directory. /tmp and /var/tmp are private to the systemd unit
-//     (PrivateTmp=true) and are invisible to rootless dockerd. The agent home
-//     is created again immediately before the runtime create call.
+//     socket, and relay script) live under the workspace runtime directory.
+//     /tmp and /var/tmp are private to the systemd unit (PrivateTmp=true)
+//     and are invisible to rootless dockerd. The agent home is created again
+//     immediately before the runtime create call. A project without a Dev
+//     Container pulls the published GHCR agent base image; it does not build
+//     a local fallback Dockerfile.
 func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *agentContainerSession, retErr error) {
 	worktree, err := filepath.Abs(req.Worktree)
 	if err != nil {
@@ -154,20 +173,12 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 		return nil, err
 	}
 	if plan.Kind == "fallback" {
-		buildDir, mkErr := os.MkdirTemp(bindRoot, "fallback-build-")
-		if mkErr != nil {
-			return nil, mkErr
+		image, detail, pullErr := pullAgentBaseImage(ctx, runtime)
+		if pullErr != nil {
+			return nil, pullErr
 		}
-		session.closeFns = append(session.closeFns, func() error { return os.RemoveAll(buildDir) })
-		if err := requireDurableBind(buildDir); err != nil {
-			return nil, err
-		}
-		if err := container.MaterializeFallback(buildDir); err != nil {
-			return nil, err
-		}
-		plan.Dockerfile = filepath.Join(buildDir, "Dockerfile")
-		plan.Context = buildDir
-		plan.Image = container.FallbackImage
+		plan.Image = image
+		plan.Detail = detail
 	}
 	resolved, cliBinds, extraPath, err := resolveCLICommand(req.Command)
 	if err != nil {
@@ -203,14 +214,16 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 			_ = relay.Close()
 			return nil, err
 		}
-		if err := relay.Chmod(0o500); err != nil {
-			_ = relay.Close()
-			return nil, err
-		}
 		if err := relay.Close(); err != nil {
 			return nil, err
 		}
+		if err := publishRelayScript(relayScript); err != nil {
+			return nil, err
+		}
 		relaySocket = proxy.path
+		if err := publishContainerRelaySocket(relaySocket); err != nil {
+			return nil, err
+		}
 		if err := requireDurableBind(relayScript); err != nil {
 			return nil, err
 		}
@@ -250,8 +263,8 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 			}
 		}
 		if relaySocket != "" {
-			if _, err := os.Stat(relaySocket); err != nil {
-				return fmt.Errorf("Modell-API-Proxy-Socket fehlt vor dem Container-Start: %w", err)
+			if err := publishContainerRelaySocket(relaySocket); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -375,15 +388,56 @@ func ensureAgentHomeLayout(homeHost string, auth hostCLIAuthPlan) error {
 }
 
 func ensureRelayScript(path string) error {
-	if _, err := os.Stat(path); err == nil {
-		return os.Chmod(path, 0o500)
-	} else if !os.IsNotExist(err) {
+	if _, err := os.Stat(path); err != nil {
+		if !os.IsNotExist(err) {
+			return err
+		}
+		// The mode argument is masked by UMask=0077. publishRelayScript
+		// chmods the final mode after the bytes are in place.
+		if err := os.WriteFile(path, modelAPIRelayScript, modelAPIRelayScriptMode); err != nil {
+			return err
+		}
+	}
+	return publishRelayScript(path)
+}
+
+func publishRelayScript(path string) error {
+	if err := os.Chmod(path, modelAPIRelayScriptMode); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, modelAPIRelayScript, 0o500); err != nil {
+	return alignRelayScriptOwner(path)
+}
+
+// alignRelayScriptOwner keeps the host owner aligned with containerUser.
+// On a rootful runtime that numeric id is the container user, so owner-read
+// works. On rootless the same numbers are a different host uid inside the
+// user namespace; modelAPIRelayScriptMode's other-read bit covers that case.
+// Ownership is left unchanged when it already matches, because a no-op chown
+// can fail on NFS.
+func alignRelayScriptOwner(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
 		return err
 	}
-	return os.Chmod(path, 0o500)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	if int(stat.Uid) == uid && int(stat.Gid) == gid {
+		return nil
+	}
+	if err := os.Chown(path, uid, gid); err != nil {
+		return fmt.Errorf("Modell-API-Relay gehört nicht dem Container-Exec-Benutzer: %w", err)
+	}
+	return nil
+}
+
+func publishContainerRelaySocket(path string) error {
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("Modell-API-Proxy-Socket fehlt vor dem Container-Start: %w", err)
+	}
+	return os.Chmod(path, modelAPIRelaySocketMode)
 }
 
 func containerNetwork(mode string) (string, error) {
@@ -425,9 +479,25 @@ func sanitizeLabel(value string) string {
 	return strings.ReplaceAll(value, "\n", "")
 }
 
+func pullAgentBaseImage(ctx context.Context, runtime container.Provider) (image, detail string, err error) {
+	primary := container.AgentBaseImage()
+	if pullErr := runtime.Pull(ctx, primary); pullErr == nil {
+		return primary, "generischer Fallback (" + primary + ")", nil
+	} else if primary == container.AgentBaseLatestImage() {
+		return "", "", fmt.Errorf("Agent-Basisimage %s konnte nicht gezogen werden: %w", primary, pullErr)
+	} else {
+		latest := container.AgentBaseLatestImage()
+		if latestErr := runtime.Pull(ctx, latest); latestErr != nil {
+			return "", "", fmt.Errorf("Agent-Basisimage %s konnte nicht gezogen werden (%v); %s ebenfalls nicht: %w", primary, pullErr, latest, latestErr)
+		}
+		return latest, "generischer Fallback (" + latest + ", Release-Tag nicht verfügbar)", nil
+	}
+}
+
 func planContainerSource(worktree string, def devContainerConfig, has bool) (containerSourcePlan, error) {
 	if !has {
-		return containerSourcePlan{Kind: "fallback", Image: container.FallbackImage, Detail: "generischer Fallback (" + container.FallbackImage + ")"}, nil
+		image := container.AgentBaseImage()
+		return containerSourcePlan{Kind: "fallback", Image: image, Detail: "generischer Fallback (" + image + ")"}, nil
 	}
 	if def.Dockerfile != "" && len(def.ComposeFiles) == 0 {
 		tag := strings.TrimSpace(def.Image)

@@ -100,6 +100,14 @@ func TestReleaseWorkflowPinsArtifactsAndTagToRunSHA(t *testing.T) {
 		"./scripts/publish-github-release.sh",
 		"needs: gate",
 		"RELEASE_APPROVED_REF: refs/heads/master",
+		"packages: write",
+		"deploy/agent-base/Dockerfile",
+		"platforms: linux/amd64,linux/arm64",
+		"ghcr.io/ralphschuler/shipyard-agent-base:${{ env.RELEASE_VERSION }}",
+		"ghcr.io/ralphschuler/shipyard-agent-base:${{ steps.image.outputs.minor }}",
+		"ghcr.io/ralphschuler/shipyard-agent-base:latest",
+		`minor=${RELEASE_VERSION%.*}`,
+		"/users/${GITHUB_REPOSITORY_OWNER}/packages/container/shipyard-agent-base/visibility",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("release workflow missing %q", required)

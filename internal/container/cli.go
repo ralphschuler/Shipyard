@@ -49,6 +49,17 @@ func (p *cliProvider) Available(ctx context.Context) error {
 	return nil
 }
 
+func (p *cliProvider) Pull(ctx context.Context, image string) error {
+	image = strings.TrimSpace(image)
+	if image == "" || strings.ContainsAny(image, " \t\r\n") {
+		return errors.New("container image reference is invalid")
+	}
+	if _, err := p.run(ctx, "pull", image); err != nil {
+		return fmt.Errorf("container image pull failed: %w", err)
+	}
+	return nil
+}
+
 func (p *cliProvider) Create(ctx context.Context, spec Spec) (string, error) {
 	if err := validateSpec(spec); err != nil {
 		return "", err

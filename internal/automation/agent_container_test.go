@@ -1,6 +1,7 @@
 package automation
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"taskboard/internal/container"
 	"taskboard/internal/domain"
 	"taskboard/internal/sandbox"
@@ -20,6 +22,8 @@ type recordingProvider struct {
 	specs   []container.Spec
 	execs   []container.ExecRequest
 	probes  []container.ExecRequest
+	pulls   []string
+	pullErr func(image string) error
 	execErr error
 	started []string
 	// before runs at the start of Create, before Spec.BeforeCreate. Tests use
@@ -29,6 +33,13 @@ type recordingProvider struct {
 
 func (p *recordingProvider) Name() string { return p.name }
 func (p *recordingProvider) Available(context.Context) error {
+	return nil
+}
+func (p *recordingProvider) Pull(_ context.Context, image string) error {
+	p.pulls = append(p.pulls, image)
+	if p.pullErr != nil {
+		return p.pullErr(image)
+	}
 	return nil
 }
 func (p *recordingProvider) Create(_ context.Context, spec container.Spec) (string, error) {
@@ -69,6 +80,7 @@ func (p *recordingProvider) CopyTo(context.Context, string, string, string) erro
 
 func TestStartAgentContainerUsesFallbackAndBindsAuthAndSecrets(t *testing.T) {
 	useContainerRuntimeRoot(t)
+	t.Setenv("TASKBOARD_VERSION", "v0.1.45")
 	worktree := t.TempDir()
 	outDir := t.TempDir()
 	codexHome := t.TempDir()
@@ -108,8 +120,12 @@ func TestStartAgentContainerUsesFallbackAndBindsAuthAndSecrets(t *testing.T) {
 		t.Fatalf("creates = %d", len(provider.specs))
 	}
 	spec := provider.specs[0]
-	if spec.Image != container.FallbackImage || spec.Dockerfile == "" || spec.Network != "none" {
+	wantImage := "ghcr.io/ralphschuler/shipyard-agent-base:v0.1.45"
+	if spec.Image != wantImage || spec.Dockerfile != "" || spec.ContextDir != "" || spec.Network != "none" {
 		t.Fatalf("fallback spec = %+v", spec)
+	}
+	if len(provider.pulls) != 1 || provider.pulls[0] != wantImage {
+		t.Fatalf("pulls = %#v", provider.pulls)
 	}
 	if spec.User == "" || !strings.Contains(spec.User, ":") {
 		t.Fatalf("container user = %q", spec.User)
@@ -175,12 +191,270 @@ func TestStartAgentContainerUsesFallbackAndBindsAuthAndSecrets(t *testing.T) {
 		t.Fatalf("env-file mode = %o", info.Mode().Perm())
 	}
 	assertDurableRuntimePath(t, provider.execs[0].EnvFile)
-	assertDurableRuntimePath(t, spec.ContextDir)
 	for _, mount := range spec.Mounts {
 		switch mount.Target {
 		case containerAgentHome, "/tmp/shipyard-model-api.sock", "/tmp/shipyard-model-api-relay.py":
 			assertDurableRuntimePath(t, mount.Source)
 		}
+	}
+}
+
+func TestFallbackPullUsesLatestWhenReleaseTagIsMissing(t *testing.T) {
+	useContainerRuntimeRoot(t)
+	t.Setenv("TASKBOARD_VERSION", "v0.1.45")
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("GROK_HOME", t.TempDir())
+	pinned := "ghcr.io/ralphschuler/shipyard-agent-base:v0.1.45"
+	latest := container.AgentBaseLatestImage()
+	provider := &recordingProvider{
+		name: "docker",
+		pullErr: func(image string) error {
+			if image == pinned {
+				return errors.New("manifest unknown")
+			}
+			return nil
+		},
+	}
+	session, err := startAgentContainer(context.Background(), agentContainerRequest{
+		RunID:    "run-fallback-latest",
+		Worktree: t.TempDir(),
+		Policy:   builtinPolicy(t, "strict"),
+		Provider: domain.ProviderSetting{Provider: "codex"},
+		Command:  "sh",
+		Runtime:  provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if len(provider.pulls) != 2 || provider.pulls[0] != pinned || provider.pulls[1] != latest {
+		t.Fatalf("pulls = %#v", provider.pulls)
+	}
+	if provider.specs[0].Image != latest || provider.specs[0].Dockerfile != "" {
+		t.Fatalf("spec = %+v", provider.specs[0])
+	}
+	if !strings.Contains(session.SourceLog, latest) || !strings.Contains(session.SourceLog, "nicht verfügbar") {
+		t.Fatalf("source = %s", session.SourceLog)
+	}
+}
+
+func TestFallbackPullStopsWhenLatestAlsoFails(t *testing.T) {
+	useContainerRuntimeRoot(t)
+	t.Setenv("TASKBOARD_VERSION", "development")
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("GROK_HOME", t.TempDir())
+	provider := &recordingProvider{
+		name: "docker",
+		pullErr: func(string) error {
+			return errors.New("denied")
+		},
+	}
+	_, err := startAgentContainer(context.Background(), agentContainerRequest{
+		RunID:    "run-fallback-denied",
+		Worktree: t.TempDir(),
+		Policy:   builtinPolicy(t, "strict"),
+		Provider: domain.ProviderSetting{Provider: "codex"},
+		Command:  "sh",
+		Runtime:  provider,
+	})
+	if err == nil || !strings.Contains(err.Error(), container.AgentBaseLatestImage()) {
+		t.Fatalf("error = %v", err)
+	}
+	if len(provider.pulls) != 1 || len(provider.specs) != 0 {
+		t.Fatalf("pulls=%#v creates=%d", provider.pulls, len(provider.specs))
+	}
+}
+
+func TestFallbackPullStopsWhenPinnedAndLatestFail(t *testing.T) {
+	useContainerRuntimeRoot(t)
+	t.Setenv("TASKBOARD_VERSION", "v0.1.45")
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("GROK_HOME", t.TempDir())
+	provider := &recordingProvider{
+		name: "docker",
+		pullErr: func(string) error {
+			return errors.New("denied")
+		},
+	}
+	_, err := startAgentContainer(context.Background(), agentContainerRequest{
+		RunID:    "run-fallback-both-denied",
+		Worktree: t.TempDir(),
+		Policy:   builtinPolicy(t, "strict"),
+		Provider: domain.ProviderSetting{Provider: "codex"},
+		Command:  "sh",
+		Runtime:  provider,
+	})
+	if err == nil || !strings.Contains(err.Error(), "v0.1.45") || !strings.Contains(err.Error(), "latest") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(provider.pulls) != 2 || len(provider.specs) != 0 {
+		t.Fatalf("pulls=%#v creates=%d", provider.pulls, len(provider.specs))
+	}
+}
+
+func TestContainerRelayScriptIsReadableByExecUser(t *testing.T) {
+	useContainerRuntimeRoot(t)
+	// taskboard.service sets UMask=0077. The published mode has to survive it.
+	restore := syscall.Umask(0o077)
+	t.Cleanup(func() { syscall.Umask(restore) })
+
+	worktree := t.TempDir()
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("GROK_HOME", t.TempDir())
+	var script, socket string
+	provider := &recordingProvider{name: "docker"}
+	provider.before = func(spec *container.Spec) error {
+		for _, mount := range spec.Mounts {
+			switch mount.Target {
+			case "/tmp/shipyard-model-api-relay.py":
+				script = mount.Source
+				if err := os.Chmod(script, 0o500); err != nil {
+					return err
+				}
+			case "/tmp/shipyard-model-api.sock":
+				socket = mount.Source
+				if err := os.Chmod(socket, 0o600); err != nil {
+					return err
+				}
+			}
+		}
+		if script == "" || socket == "" {
+			return fmt.Errorf("relay mounts missing script=%q socket=%q", script, socket)
+		}
+		return nil
+	}
+	session, err := startAgentContainer(context.Background(), agentContainerRequest{
+		RunID:    "run-relay-perms",
+		Worktree: worktree,
+		Policy:   builtinPolicy(t, "strict"),
+		Provider: domain.ProviderSetting{Provider: "codex"},
+		Command:  "sh",
+		Args:     []string{"-c", "true"},
+		Runtime:  provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	info, err := os.Stat(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != modelAPIRelayScriptMode {
+		t.Fatalf("relay script mode = %o, want %o", info.Mode().Perm(), modelAPIRelayScriptMode)
+	}
+	if info.Mode().Perm()&0o002 != 0 {
+		t.Fatalf("relay script is world-writable: %o", info.Mode().Perm())
+	}
+	assertOwnedByContainerExecUser(t, info)
+	body, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, modelAPIRelayScript) {
+		t.Fatal("relay script contents diverged from the embedded source")
+	}
+	assertDurableRuntimePath(t, script)
+
+	sockInfo, err := os.Stat(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sockInfo.Mode().Perm() != modelAPIRelaySocketMode {
+		t.Fatalf("relay socket mode = %o, want %o", sockInfo.Mode().Perm(), modelAPIRelaySocketMode)
+	}
+	dirInfo, err := os.Stat(filepath.Dir(socket))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirInfo.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("container bind directory is visible to other host users: %o", dirInfo.Mode().Perm())
+	}
+	assertDurableRuntimePath(t, socket)
+
+	if len(provider.execs) != 1 {
+		t.Fatalf("execs = %+v", provider.execs)
+	}
+	execReq := provider.execs[0]
+	if execReq.User != containerUser() {
+		t.Fatalf("exec user = %q, want %s", execReq.User, containerUser())
+	}
+	got := strings.Join(execReq.Command, " ")
+	if !strings.HasPrefix(got, "python3 /tmp/shipyard-model-api-relay.py ") || !strings.HasSuffix(got, "sh -c true") {
+		t.Fatalf("exec command = %q", got)
+	}
+	envText := string(readTestFile(t, execReq.EnvFile))
+	if info, err := os.Stat(execReq.EnvFile); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("env-file mode = %v err=%v", info, err)
+	}
+	if !strings.Contains(envText, "SHIPYARD_MODEL_API_SOCKET=/tmp/shipyard-model-api.sock") {
+		t.Fatalf("exec env missing relay socket: %s", envText)
+	}
+}
+
+func TestEnsureRelayScriptRepairsOwnerOnlyMode(t *testing.T) {
+	restore := syscall.Umask(0o077)
+	t.Cleanup(func() { syscall.Umask(restore) })
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "shipyard-model-api-relay.py")
+	if err := ensureRelayScript(path); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != modelAPIRelayScriptMode {
+		t.Fatalf("created relay mode = %o, want %o (umask must not win)", info.Mode().Perm(), modelAPIRelayScriptMode)
+	}
+	assertOwnedByContainerExecUser(t, info)
+	if err := os.Chmod(path, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureRelayScript(path); err != nil {
+		t.Fatal(err)
+	}
+	info, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != modelAPIRelayScriptMode {
+		t.Fatalf("repaired relay mode = %o, want %o", info.Mode().Perm(), modelAPIRelayScriptMode)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(body, modelAPIRelayScript) {
+		t.Fatal("repaired relay script contents diverged")
+	}
+}
+
+func TestHostModelAPIProxySocketStaysOwnerOnly(t *testing.T) {
+	proxy, err := startModelAPIProxy(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+	info, err := os.Stat(proxy.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("host proxy socket mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func assertOwnedByContainerExecUser(t *testing.T, info os.FileInfo) {
+	t.Helper()
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("file stat is missing unix ownership")
+	}
+	if int(stat.Uid) != os.Getuid() || int(stat.Gid) != os.Getgid() {
+		t.Fatalf("owner = %d:%d, container exec user = %s", stat.Uid, stat.Gid, containerUser())
 	}
 }
 
@@ -276,6 +550,9 @@ func TestStartAgentContainerUsesProjectImageAndComposeDockerfile(t *testing.T) {
 	spec := provider.specs[0]
 	if spec.Image != "mcr.microsoft.com/devcontainers/base:ubuntu" || spec.Dockerfile != "" || spec.Network != "bridge" {
 		t.Fatalf("image spec = %+v", spec)
+	}
+	if len(provider.pulls) != 0 {
+		t.Fatalf("project image pulled the agent base: %#v", provider.pulls)
 	}
 	assertMount(t, spec.Mounts, imageRoot, true)
 	if session.ModelAPIProxy {

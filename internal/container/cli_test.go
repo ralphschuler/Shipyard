@@ -128,7 +128,7 @@ func TestCreateRecreatesDirectoryBindAfterImageBuild(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	provider := NewDocker()
 	_, err := provider.Create(context.Background(), Spec{
-		Image:      "shipyard/agent-fallback:1",
+		Image:      "ghcr.io/ralphschuler/shipyard-agent-base:test",
 		Dockerfile: dockerfile,
 		ContextDir: dir,
 		Network:    "none",
@@ -148,7 +148,7 @@ func TestCreateRecreatesDirectoryBindAfterImageBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = provider.Create(context.Background(), Spec{
-		Image:      "shipyard/agent-fallback:1",
+		Image:      "ghcr.io/ralphschuler/shipyard-agent-base:test",
 		Dockerfile: dockerfile,
 		ContextDir: dir,
 		Network:    "none",
@@ -167,28 +167,60 @@ func TestCreateRecreatesDirectoryBindAfterImageBuild(t *testing.T) {
 	}
 }
 
-func TestFallbackDockerfileMatchesDeployCopy(t *testing.T) {
-	deploy := filepath.Join("..", "..", "deploy", "agent-container", "Dockerfile")
-	body, err := os.ReadFile(deploy)
+func TestPullInvokesRuntimePull(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeRuntime(t, dir, "docker")
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	provider := NewDocker()
+	image := "ghcr.io/ralphschuler/shipyard-agent-base:v0.1.45"
+	if err := provider.Pull(context.Background(), image); err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Pull(context.Background(), "bad image"); err == nil {
+		t.Fatal("image reference with a space was accepted")
+	}
+	log, err := os.ReadFile(filepath.Join(dir, "calls.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(body) != string(FallbackDockerfile()) {
-		t.Fatal("deploy/agent-container/Dockerfile drifted from the embedded fallback image")
+	if !strings.Contains(string(log), "pull\n"+image+"\n") {
+		t.Fatalf("pull was not invoked:\n%s", log)
 	}
-	if !strings.Contains(string(body), "GO_VERSION=1.26.8") || !strings.Contains(string(body), "NODE_VERSION=22.23.2") {
-		t.Fatal("fallback image lost the Dev Container toolchain pins")
-	}
-	if !strings.Contains(string(body), "python3-minimal") {
-		t.Fatal("fallback image must install python3-minimal so the model-API relay can run inside the agent image")
-	}
-	devcontainer := filepath.Join("..", "..", ".devcontainer", "Dockerfile")
-	devBody, err := os.ReadFile(devcontainer)
+}
+
+func TestAgentBaseDockerfileIsTheOnlyToolchainImage(t *testing.T) {
+	base, err := os.ReadFile(filepath.Join("..", "..", "deploy", "agent-base", "Dockerfile"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(devBody), "python3-minimal") {
-		t.Fatal("project Dev Container image must install python3-minimal for the same in-image relay")
+	text := string(base)
+	for _, required := range []string{
+		"FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+		"GO_VERSION=1.26.8",
+		"NODE_VERSION=22.23.2",
+		"python3-minimal",
+		"org.opencontainers.image.source=\"https://github.com/ralphschuler/Shipyard\"",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("agent base Dockerfile missing %q", required)
+		}
+	}
+	if _, err := os.Stat(filepath.Join("..", "..", "deploy", "agent-container", "Dockerfile")); !os.IsNotExist(err) {
+		t.Fatalf("local fallback Dockerfile still exists: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join("fallback", "Dockerfile")); !os.IsNotExist(err) {
+		t.Fatalf("embedded fallback Dockerfile still exists: %v", err)
+	}
+	devBody, err := os.ReadFile(filepath.Join("..", "..", ".devcontainer", "Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := string(devBody)
+	if !strings.Contains(dev, "ARG SHIPYARD_AGENT_BASE=ghcr.io/ralphschuler/shipyard-agent-base:v0.1") || !strings.Contains(dev, "FROM ${SHIPYARD_AGENT_BASE}") {
+		t.Fatalf("devcontainer does not extend the agent base:\n%s", dev)
+	}
+	if strings.Contains(dev, "GO_VERSION=") || strings.Contains(dev, "python3-minimal") || strings.Contains(dev, "NODE_VERSION=") {
+		t.Fatal("devcontainer duplicated the agent base toolchain")
 	}
 }
 
