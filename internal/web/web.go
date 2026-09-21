@@ -100,6 +100,7 @@ func embeddedAppHandler() http.Handler {
 
 type App struct {
 	store        *store.Store
+	userLookup   func(context.Context, string) (domain.User, error)
 	memory       *memory.Store
 	worker       *automation.Worker
 	update       *updates.Orchestrator
