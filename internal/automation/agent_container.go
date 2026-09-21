@@ -401,14 +401,28 @@ func ensureAgentHomeLayout(homeHost string, auth hostCLIAuthPlan) error {
 		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return errors.New("Host-CLI-Login liegt außerhalb des Container-Home")
 		}
-		if err := os.MkdirAll(filepath.Join(homeHost, rel), 0o700); err != nil {
+		// The bind root remains service-private (0700), but every directory
+		// below it must be traversable by the container user. Rootless Docker
+		// remaps that user to a subordinate host UID, so owner-only (0700)
+		// directories here cause CODEX_HOME/CLAUDE_CONFIG_DIR to fail with
+		// EACCES even when the staged files themselves are readable.
+		if err := os.MkdirAll(filepath.Join(homeHost, rel), 0o755); err != nil {
+			return err
+		}
+		if err := os.Chmod(filepath.Join(homeHost, rel), 0o755); err != nil {
 			return err
 		}
 	}
-	if err := os.MkdirAll(filepath.Join(homeHost, ".config"), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Join(homeHost, ".config"), 0o755); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(homeHost, ".cache"), 0o700); err != nil {
+	if err := os.Chmod(filepath.Join(homeHost, ".config"), 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(homeHost, ".cache"), 0o755); err != nil {
+		return err
+	}
+	if err := os.Chmod(filepath.Join(homeHost, ".cache"), 0o755); err != nil {
 		return err
 	}
 	return nil
