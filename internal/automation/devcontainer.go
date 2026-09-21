@@ -547,6 +547,9 @@ func devContainerRuntime(ctx context.Context) (string, error) {
 	return runtime, nil
 }
 
+// startDevContainerAfterSandbox remains for policy tests of the devcontainer
+// CLI. Production CLI runs do not call it: startAgentContainer enforces the
+// sandbox profile as container mounts and network instead of pausing.
 func startDevContainerAfterSandbox(ctx context.Context, runtime string, definition devContainerConfig, runID string, sandboxErr error, approval devContainerApproval) error {
 	if sandboxErr != nil {
 		return errors.New("Sandbox-Profil des Runs ist ungültig oder nicht verfügbar")

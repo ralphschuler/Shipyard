@@ -2765,8 +2765,8 @@ func (w *Worker) checkProviderForAgent(ctx context.Context, name, agentID string
 	if err != nil {
 		return "", err
 	}
-	if _, err := exec.LookPath("bwrap"); err != nil {
-		return "", errors.New("CLI-Agenten benötigen bubblewrap für das Sandbox-Profil")
+	if err := cliContainerRuntimeAvailable(ctx); err != nil {
+		return "", err
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
@@ -3787,7 +3787,6 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	}
 	_ = w.Store.AddRunLog(ctx, run.ID, "info", fmt.Sprintf("Sandbox-Profil: %s · Netzwerk=%s · Schreiben=%s", runSandbox.Name, runSandbox.NetworkMode, runSandbox.WriteMode))
 	devDefinition, hasDevContainer, devErr := discoverDevContainer(worktree)
-	devRuntime := ""
 	if devErr != nil {
 		reason := "Dev-Container pausiert: " + devErr.Error()
 		_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
@@ -3804,29 +3803,9 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			_ = w.finish(ctx, run, "failed")
 			return
 		}
-		devRuntime, devErr = devContainerRuntime(runCtx)
-		if devErr == nil {
-			devErr = startDevContainerAfterSandbox(runCtx, devRuntime, devDefinition, run.ID, sandboxErr, devContainerApproval{})
-		}
-		if devErr != nil {
-			reason := "Dev-Container pausiert: " + devErr.Error()
-			_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
-			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Dev-Container konnte nicht gestartet werden", reason)
-			_ = w.finish(ctx, run, "failed")
-			return
-		}
-		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Dev-Container gestartet; Host-Hooks und Zusatzrechte wurden vor dem Runtime-Aufruf geprüft")
-		defer func() {
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cleanupCancel()
-			if cleanupErr := stopDevContainer(cleanupCtx, run.ID); cleanupErr != nil {
-				_ = w.Store.AddRunLog(context.Background(), run.ID, "warning", cleanupErr.Error())
-			} else {
-				_ = w.Store.AddRunLog(context.Background(), run.ID, "info", "Dev-Container nach Run beendet und bereinigt")
-			}
-		}()
+		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Dev-Container freigegeben")
 	} else {
-		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Kein .devcontainer vorhanden; bestehende Host-Ausführungsumgebung wird verwendet")
+		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Kein .devcontainer vorhanden")
 	}
 	_ = w.Store.AddRunLog(ctx, run.ID, "info", "Codex-Agent gestartet")
 	globalPrefix, globalSuffix, _ := w.Store.AgentPromptPolicy(ctx)
@@ -3959,6 +3938,9 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	var serviceTier string
 	var cliReport *cliUsageReport
 	if usesHTTPResponsesAdapter(provider) {
+		if hasDevContainer {
+			_ = w.Store.AddRunLog(ctx, run.ID, "info", "API-Adapter führt Toolbefehle in der hostseitigen Bubblewrap-Sandbox aus; sie ist für CLI-Läufe veraltet")
+		}
 		secret, ok := secretValueForEnv(secretValues, provider.SecretEnv)
 		if !ok {
 			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "secret_not_assigned")
@@ -3999,14 +3981,6 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			_ = w.finish(ctx, run, "failed")
 			return
 		}
-		if hasDevContainer {
-			reason := "Dev-Container-Läufe können das gewählte Sandbox-Profil nicht technisch erzwingen"
-			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "sandbox_enforcement_failed")
-			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
-			_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
-			_ = w.finish(ctx, run, "failed")
-			return
-		}
 		outDir := filepath.Join(w.agentRunLogsDir(), run.ID+".out")
 		if mkdirErr := os.MkdirAll(outDir, 0o700); mkdirErr != nil {
 			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "sandbox_enforcement_failed")
@@ -4019,13 +3993,17 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			args = withWorkingDirectory(args, run.WorkspaceSnapshot)
 			args = withOutputLastMessage(args, finalPath)
 		}
-		session, wrapErr := startCLISandbox(runCtx, cliSandboxRequest{
-			Worktree:      run.WorkspaceSnapshot,
-			Policy:        runSandbox,
-			Command:       command,
-			Args:          args,
-			ExtraWritable: []string{outDir},
-			Provider:      provider,
+		session, wrapErr := startAgentContainer(runCtx, agentContainerRequest{
+			RunID:           run.ID,
+			Worktree:        run.WorkspaceSnapshot,
+			Policy:          runSandbox,
+			Provider:        provider,
+			Command:         command,
+			Args:            args,
+			ExtraWritable:   []string{outDir},
+			Secrets:         secretValues,
+			Definition:      devDefinition,
+			HasDevContainer: hasDevContainer,
 		})
 		if wrapErr != nil {
 			reason := wrapErr.Error()
@@ -4038,6 +4016,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		defer session.Close()
 		command, args = session.Command, session.Args
 		_ = w.Store.AddRunLog(ctx, run.ID, "info", session.IsolationLog)
+		_ = w.Store.AddRunLog(ctx, run.ID, "info", session.SourceLog)
 		if session.HostAuthLog != "" {
 			_ = w.Store.AddRunLog(ctx, run.ID, "info", session.HostAuthLog)
 		} else if len(secretValues) == 0 {
@@ -4049,21 +4028,20 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		// Record the exact provider invocation without leaking the task prompt.
 		// This makes an adapter/configuration regression visible in the run
 		// protocol and confirms that rich task context is transported via stdin.
+		// Assigned secrets stay in the container env-file, not in this command
+		// line and not in the host process environment.
 		invocation := strings.Join(append([]string{command}, args...), " ")
 		if stdin != "" {
 			invocation += "  (Prompt über stdin)"
 		}
 		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Ausführungsbefehl: "+invocation)
-		env := agentEnvironment("")
-		secretEnv := make([]string, 0, len(secretValues))
 		for _, secret := range secretValues {
-			secretEnv = append(secretEnv, secret.EnvName+"="+secret.Value)
 			if auditErr := w.recordSecretUse(ctx, run, secret); auditErr != nil {
 				w.failSecretAudit(ctx, run, provider.Provider, provider.Model)
 				return
 			}
 		}
-		env = append(env, secretEnv...)
+		env := session.HostEnv
 		_ = os.Remove(finalPath)
 		trustedOutputPath := ""
 		if provider.Provider != "codex" {

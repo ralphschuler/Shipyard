@@ -303,10 +303,10 @@ func cliSandboxArgs(worktree string, policy sandbox.Profile, command string, com
 	})
 }
 
-// startCLISandbox is the production CLI execution boundary. It derives
-// Bubblewrap arguments from the frozen run profile, fails closed when the
-// combination cannot be enforced, and (for NetworkMode=none) starts a host
-// allowlist proxy so model-API traffic is distinct from tool/project network.
+// startCLISandbox is the deprecated host bubblewrap envelope for CLI agents.
+// Production CLI runs execute through startAgentContainer. API-adapter tool
+// commands still call buildSandboxArgs directly. Do not extend this envelope
+// for new CLI isolation.
 func startCLISandbox(ctx context.Context, req cliSandboxRequest) (*cliSandbox, error) {
 	if _, err := sandbox.EffectiveProfile(req.Policy, req.Worktree); err != nil {
 		return nil, err

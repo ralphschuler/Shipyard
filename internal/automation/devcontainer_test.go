@@ -200,9 +200,9 @@ func TestReviewDevcontainerValidatesSandboxBeforeLifecycle(t *testing.T) {
 	}
 	src := string(workerSrc)
 	sandboxIdx := strings.Index(src, "RunSandboxPolicy(")
-	startIdx := strings.Index(src, "startDevContainerAfterSandbox(")
+	startIdx := strings.Index(src, "startAgentContainer(")
 	if sandboxIdx < 0 || startIdx < 0 || sandboxIdx > startIdx {
-		t.Fatal("production execute path must validate sandbox policy before Dev Container start")
+		t.Fatal("production execute path must validate sandbox policy before container start")
 	}
 }
 
