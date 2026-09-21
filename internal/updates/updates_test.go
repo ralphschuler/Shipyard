@@ -233,25 +233,111 @@ func TestValidateReleaseForBranchRequiresSignedTagCommitOnApprovedBranch(t *test
 	}
 }
 
-func TestResolveRejectsTagNotContainedInApprovedBranch(t *testing.T) {
+func TestApprovedReleaseTargetAllowsBranchOrBoundCommitSHA(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	if !approvedReleaseTarget("master", "master") {
+		t.Fatal("approved branch target must remain valid")
+	}
+	if !approvedReleaseTarget(commit, "master") {
+		t.Fatal("full SHA target must be accepted so --target <sha> releases are not rejected")
+	}
+	if approvedReleaseTarget("feature", "master") {
+		t.Fatal("unapproved branch target must be rejected")
+	}
+	if approvedReleaseTarget(commit, "") {
+		t.Fatal("empty approved branch must fail closed")
+	}
+	if releaseTargetMatchesTag("master", "master", commit) != true {
+		t.Fatal("legacy branch target must match after the tag resolves")
+	}
+	if !releaseTargetMatchesTag(commit, "master", commit) {
+		t.Fatal("SHA target must match the resolved tag commit")
+	}
+	if releaseTargetMatchesTag(strings.Repeat("b", 40), "master", commit) {
+		t.Fatal("SHA target that is not the tag commit must be rejected")
+	}
+}
+
+func TestResolveAcceptsReleaseBoundToTagCommitSHA(t *testing.T) {
 	commit := strings.Repeat("a", 40)
 	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		var body string
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/releases/latest"):
-			body = fmt.Sprintf(`{"tag_name":"v1.3.0","html_url":"https://github.com/acme/shipyard/releases/tag/v1.3.0","published_at":"2026-09-17T10:00:00Z","target_commitish":"master","assets":[{"name":"shipyard-linux-amd64","browser_download_url":"https://github.com/acme/shipyard/releases/download/v1.3.0/shipyard-linux-amd64","digest":"sha256:%s"}]}`, strings.Repeat("0", 64))
-		case strings.HasSuffix(r.URL.Path, "/commits/v1.3.0"):
+			body = fmt.Sprintf(`{"tag_name":"v0.1.5","html_url":"https://github.com/ralphschuler/Shipyard/releases/tag/v0.1.5","target_commitish":"%s","assets":[{"name":"shipyard-linux-amd64","browser_download_url":"https://github.com/ralphschuler/Shipyard/releases/download/v0.1.5/shipyard-linux-amd64","digest":"sha256:%s"}]}`, commit, strings.Repeat("0", 64))
+		case strings.HasSuffix(r.URL.Path, "/commits/v0.1.5"):
 			body = fmt.Sprintf(`{"sha":"%s","commit":{"verification":{"verified":true}}}`, commit)
 		case strings.HasSuffix(r.URL.Path, "/compare/master..."+commit):
-			body = `{"status":"diverged","ahead_by":2,"behind_by":1}`
+			body = `{"status":"behind","ahead_by":0,"behind_by":1}`
 		default:
-			return nil, fmt.Errorf("unexpected GitHub path %s", r.URL.Path)
+			t.Fatalf("unexpected GitHub path %s", r.URL.Path)
 		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
 	})
-	snapshot := Resolve(context.Background(), Current{Version: "1.2.0"}, "acme/shipyard", "master", Client{HTTP: &http.Client{Transport: transport}, GOOS: "linux", GOARCH: "amd64"})
+	snapshot := Resolve(context.Background(), Current{Version: "v0.1.3"}, "ralphschuler/Shipyard", "master", Client{ApprovedTags: []string{"v0.1.*"}, HTTP: &http.Client{Transport: transport}, GOOS: "linux", GOARCH: "amd64"})
+	if snapshot.Status != "update_available" || !snapshot.Installable || snapshot.Release.Commit != commit {
+		t.Fatalf("snapshot = %#v, want installable SHA-bound release", snapshot)
+	}
+}
+
+func TestResolveRejectsReleaseTargetedAtUnapprovedBranch(t *testing.T) {
+	client := Client{ApprovedTags: []string{"v0.1.*"}, HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"tag_name":"v0.1.5","html_url":"https://github.com/ralphschuler/Shipyard/releases/tag/v0.1.5","target_commitish":"feature","assets":[]}`
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}, GOOS: "linux", GOARCH: "amd64"}
+	snapshot := Resolve(context.Background(), Current{Version: "v0.1.3"}, "ralphschuler/Shipyard", "master", client)
 	if snapshot.Installable || snapshot.Status != "unverified" {
-		t.Fatalf("snapshot = %#v, want non-installable unverified release", snapshot)
+		t.Fatalf("snapshot = %#v, want unverified unapproved-branch release", snapshot)
+	}
+}
+
+func TestResolveRejectsReleaseTargetedAtDifferentSHA(t *testing.T) {
+	tagCommit := strings.Repeat("a", 40)
+	other := strings.Repeat("b", 40)
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var body string
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/releases/latest"):
+			body = fmt.Sprintf(`{"tag_name":"v0.1.5","html_url":"https://github.com/ralphschuler/Shipyard/releases/tag/v0.1.5","target_commitish":"%s","assets":[{"name":"shipyard-linux-amd64","browser_download_url":"https://github.com/ralphschuler/Shipyard/releases/download/v0.1.5/shipyard-linux-amd64","digest":"sha256:%s"}]}`, other, strings.Repeat("0", 64))
+		case strings.HasSuffix(r.URL.Path, "/commits/v0.1.5"):
+			body = fmt.Sprintf(`{"sha":"%s","commit":{"verification":{"verified":true}}}`, tagCommit)
+		default:
+			t.Fatalf("unexpected GitHub path %s", r.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})
+	snapshot := Resolve(context.Background(), Current{Version: "v0.1.3"}, "ralphschuler/Shipyard", "master", Client{ApprovedTags: []string{"v0.1.*"}, HTTP: &http.Client{Transport: transport}, GOOS: "linux", GOARCH: "amd64"})
+	if snapshot.Installable || snapshot.Status != "unverified" {
+		t.Fatalf("snapshot = %#v, want unverified mismatched SHA target", snapshot)
+	}
+}
+
+func TestResolveRejectsTagNotContainedInApprovedBranch(t *testing.T) {
+	commit := strings.Repeat("a", 40)
+	for _, target := range []string{"master", commit} {
+		t.Run("target="+target, func(t *testing.T) {
+			transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				var body string
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/releases/latest"):
+					body = fmt.Sprintf(`{"tag_name":"v1.3.0","html_url":"https://github.com/acme/shipyard/releases/tag/v1.3.0","published_at":"2026-09-17T10:00:00Z","target_commitish":"%s","assets":[{"name":"shipyard-linux-amd64","browser_download_url":"https://github.com/acme/shipyard/releases/download/v1.3.0/shipyard-linux-amd64","digest":"sha256:%s"}]}`, target, strings.Repeat("0", 64))
+				case strings.HasSuffix(r.URL.Path, "/commits/v1.3.0"):
+					body = fmt.Sprintf(`{"sha":"%s","commit":{"verification":{"verified":true}}}`, commit)
+				case strings.HasSuffix(r.URL.Path, "/compare/master..."+commit):
+					body = `{"status":"diverged","ahead_by":2,"behind_by":1}`
+				default:
+					return nil, fmt.Errorf("unexpected GitHub path %s", r.URL.Path)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+			})
+			snapshot := Resolve(context.Background(), Current{Version: "1.2.0"}, "acme/shipyard", "master", Client{ApprovedTags: []string{"v1.3.0"}, HTTP: &http.Client{Transport: transport}, GOOS: "linux", GOARCH: "amd64"})
+			if snapshot.Installable || snapshot.Status != "unverified" {
+				t.Fatalf("snapshot = %#v, want non-installable unverified release", snapshot)
+			}
+			if !strings.Contains(snapshot.Reason, "Zielbranch") {
+				t.Fatalf("reason = %q, want branch-membership rejection", snapshot.Reason)
+			}
+		})
 	}
 }
 
