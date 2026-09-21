@@ -1,0 +1,424 @@
+package automation
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"taskboard/internal/domain"
+	"taskboard/internal/sandbox"
+
+	_ "embed"
+)
+
+//go:embed sandbox_relay.py
+var modelAPIRelayScript []byte
+
+const (
+	sandboxLayoutTool sandboxLayout = iota
+	sandboxLayoutCLI
+)
+
+type sandboxLayout int
+
+type sandboxExec struct {
+	Worktree      string
+	Policy        sandbox.Profile
+	Layout        sandboxLayout
+	Command       string
+	Args          []string
+	ShellCommand  string
+	ExtraWritable []string
+	ExtraROBinds  []string
+	ExtraPATH     string
+	RelayScript   string
+	RelaySocket   string
+	RelayPython   string
+}
+
+type cliSandboxRequest struct {
+	Worktree      string
+	Policy        sandbox.Profile
+	Command       string
+	Args          []string
+	ExtraWritable []string
+	Provider      domain.ProviderSetting
+}
+
+type cliSandbox struct {
+	Command       string
+	Args          []string
+	ModelAPIProxy bool
+	IsolationLog  string
+	closeFns      []func() error
+}
+
+func (s *cliSandbox) Close() error {
+	if s == nil {
+		return nil
+	}
+	var errs []error
+	for i := len(s.closeFns) - 1; i >= 0; i-- {
+		if err := s.closeFns[i](); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func sandboxIsolationSummary(policy sandbox.Profile) string {
+	return fmt.Sprintf("Sandbox-Profil wirksam: %s · Netzwerk=%s · Schreiben=%s · Isolation=bwrap", policy.Name, policy.NetworkMode, policy.WriteMode)
+}
+
+func sandboxSystemROBindArgs() []string {
+	var args []string
+	for _, directory := range []string{"/usr", "/bin", "/lib", "/lib64"} {
+		if _, err := os.Stat(directory); err == nil {
+			args = append(args, "--ro-bind", directory, directory)
+		}
+	}
+	return args
+}
+
+func sandboxTLSROBindArgs() []string {
+	var args []string
+	for _, directory := range []string{"/etc/ssl", "/etc/ca-certificates", "/etc/pki"} {
+		if info, err := os.Stat(directory); err == nil && info.IsDir() {
+			args = append(args, "--ro-bind", directory, directory)
+		}
+	}
+	return args
+}
+
+func sandboxQANetROBindArgs() []string {
+	var args []string
+	for _, file := range []string{"/etc/resolv.conf", "/etc/hosts"} {
+		if _, err := os.Stat(file); err == nil {
+			args = append(args, "--ro-bind", file, file)
+		}
+	}
+	return args
+}
+
+func sandboxWorktreeBind(abs string, policy sandbox.Profile, dest string) []string {
+	bind := "--bind"
+	if policy.WriteMode == "readonly" {
+		bind = "--ro-bind"
+	}
+	return []string{bind, abs, dest, "--chdir", dest}
+}
+
+func buildSandboxArgs(spec sandboxExec) ([]string, error) {
+	abs, err := filepath.Abs(spec.Worktree)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := sandbox.EffectiveProfile(spec.Policy, abs); err != nil {
+		return nil, err
+	}
+	switch spec.Policy.NetworkMode {
+	case "none", "qa-network":
+	case "bridge-only":
+		return nil, errors.New("release-bridge erlaubt nur den hostseitigen Release-Bridge-Dienst")
+	default:
+		return nil, fmt.Errorf("Sandbox-Netzwerkmodus %q wird vom Ausführungsadapter nicht unterstützt", spec.Policy.NetworkMode)
+	}
+	if spec.Policy.WriteMode != "worktree" && spec.Policy.WriteMode != "readonly" {
+		return nil, fmt.Errorf("Sandbox-Schreibmodus %q wird vom Ausführungsadapter nicht unterstützt", spec.Policy.WriteMode)
+	}
+	args := []string{"--die-with-parent", "--unshare-all", "--new-session"}
+	if spec.Policy.NetworkMode == "qa-network" {
+		args = append(args, "--share-net")
+	}
+	args = append(args, sandboxSystemROBindArgs()...)
+	if spec.Layout == sandboxLayoutCLI || spec.Policy.NetworkMode == "qa-network" {
+		args = append(args, sandboxTLSROBindArgs()...)
+	}
+	if spec.Policy.NetworkMode == "qa-network" {
+		args = append(args, sandboxQANetROBindArgs()...)
+	}
+	args = append(args, "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp")
+	dest := "/workspace"
+	home := "/workspace"
+	path := "/usr/bin:/bin"
+	if spec.Layout == sandboxLayoutCLI {
+		dest = abs
+		home = "/tmp/shipyard-home"
+		path = "/usr/bin:/bin:/usr/local/bin"
+		if spec.ExtraPATH != "" {
+			path = spec.ExtraPATH + ":" + path
+		}
+		args = append(args, "--tmpfs", home)
+	}
+	args = append(args, sandboxWorktreeBind(abs, spec.Policy, dest)...)
+	for _, extra := range spec.ExtraROBinds {
+		extraAbs, extraErr := filepath.Abs(extra)
+		if extraErr != nil {
+			return nil, extraErr
+		}
+		if extraAbs == "/" || extraAbs == abs {
+			continue
+		}
+		args = append(args, "--ro-bind", extraAbs, extraAbs)
+	}
+	for _, extra := range spec.ExtraWritable {
+		extraAbs, extraErr := filepath.Abs(extra)
+		if extraErr != nil {
+			return nil, extraErr
+		}
+		if extraAbs == "/" || extraAbs == abs || strings.HasPrefix(extraAbs+string(filepath.Separator), abs+string(filepath.Separator)) {
+			continue
+		}
+		if !filepath.IsAbs(extraAbs) {
+			return nil, errors.New("zusätzlicher Sandbox-Schreibpfad muss absolut sein")
+		}
+		args = append(args, "--bind", extraAbs, extraAbs)
+	}
+	if spec.RelaySocket != "" {
+		args = append(args, "--bind", spec.RelaySocket, "/tmp/shipyard-model-api.sock")
+	}
+	if spec.RelayScript != "" {
+		args = append(args, "--ro-bind", spec.RelayScript, "/tmp/shipyard-model-api-relay.py")
+	}
+	args = append(args,
+		"--setenv", "HOME", home,
+		"--setenv", "PATH", path,
+		"--setenv", "LANG", "C",
+		"--setenv", "XDG_CONFIG_HOME", filepath.Join(home, ".config"),
+		"--setenv", "XDG_CACHE_HOME", filepath.Join(home, ".cache"),
+	)
+	if spec.RelaySocket != "" {
+		args = append(args, "--setenv", "SHIPYARD_MODEL_API_SOCKET", "/tmp/shipyard-model-api.sock")
+	}
+	if spec.Layout == sandboxLayoutTool {
+		if strings.TrimSpace(spec.ShellCommand) == "" {
+			return nil, errors.New("sandbox command is empty")
+		}
+		return append(args, "/bin/sh", "-lc", spec.ShellCommand), nil
+	}
+	if strings.TrimSpace(spec.Command) == "" {
+		return nil, errors.New("CLI-Kommando fehlt")
+	}
+	if spec.RelayScript != "" {
+		python := spec.RelayPython
+		if python == "" {
+			var err error
+			python, err = exec.LookPath("python3")
+			if err != nil {
+				return nil, errors.New("CLI-Sandbox kann Modell-API-Zugang nicht vom Tool-Netzwerk trennen (python3 fehlt)")
+			}
+		}
+		return append(append(args, python, "/tmp/shipyard-model-api-relay.py", spec.Command), spec.Args...), nil
+	}
+	return append(append(args, spec.Command), spec.Args...), nil
+}
+
+func openAISandboxArgs(worktree, command string) ([]string, error) {
+	return openAISandboxArgsForProfile(worktree, command, "strict")
+}
+
+func openAISandboxArgsForProfile(worktree, command, profile string) ([]string, error) {
+	abs, err := filepath.Abs(worktree)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := sandbox.Effective(profile, abs)
+	if err != nil || policy.NetworkMode == "bridge-only" {
+		return nil, errors.New("sandbox profile does not permit direct provider commands")
+	}
+	return openAISandboxArgsForPolicy(abs, command, policy)
+}
+
+func openAISandboxArgsForPolicy(abs, command string, policy sandbox.Profile) ([]string, error) {
+	if _, err := sandbox.EffectiveProfile(policy, abs); err != nil || policy.NetworkMode == "bridge-only" {
+		return nil, errors.New("sandbox profile does not permit direct provider commands")
+	}
+	return buildSandboxArgs(sandboxExec{
+		Worktree:     abs,
+		Policy:       policy,
+		Layout:       sandboxLayoutTool,
+		ShellCommand: command,
+	})
+}
+
+// cliSandboxInvocation builds the same worktree-only bubblewrap envelope for
+// local CLI adapters. The caller still controls provider-specific arguments.
+func cliSandboxInvocation(worktree, profileName, command string, commandArgs []string) (string, []string, error) {
+	profile, err := sandbox.Effective(profileName, worktree)
+	if err != nil {
+		return "", nil, err
+	}
+	args, err := cliSandboxArgs(worktree, profile, command, commandArgs, nil)
+	if err != nil {
+		return "", nil, err
+	}
+	return "bwrap", args, nil
+}
+
+func cliSandboxArgs(worktree string, policy sandbox.Profile, command string, commandArgs, extraWritable []string) ([]string, error) {
+	return buildSandboxArgs(sandboxExec{
+		Worktree:      worktree,
+		Policy:        policy,
+		Layout:        sandboxLayoutCLI,
+		Command:       command,
+		Args:          commandArgs,
+		ExtraWritable: extraWritable,
+	})
+}
+
+// startCLISandbox is the production CLI execution boundary. It derives
+// Bubblewrap arguments from the frozen run profile, fails closed when the
+// combination cannot be enforced, and (for NetworkMode=none) starts a host
+// allowlist proxy so model-API traffic is distinct from tool/project network.
+func startCLISandbox(ctx context.Context, req cliSandboxRequest) (*cliSandbox, error) {
+	if _, err := sandbox.EffectiveProfile(req.Policy, req.Worktree); err != nil {
+		return nil, err
+	}
+	if req.Policy.NetworkMode == "bridge-only" {
+		return nil, errors.New("release-bridge erlaubt nur den hostseitigen Release-Bridge-Dienst")
+	}
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		return nil, errors.New("CLI-Agenten benötigen bubblewrap (bwrap) für das Sandbox-Profil; installiere das Paket bubblewrap auf dem Server und starte taskboard.service neu")
+	}
+	if os.Getenv("TASKBOARD_BWRAP_PREFLIGHT") != "0" {
+		if err := bubblewrapPreflight(ctx); err != nil {
+			return nil, err
+		}
+	}
+	command, extraBinds, extraPath, err := resolveCLICommand(req.Command)
+	if err != nil {
+		return nil, err
+	}
+	session := &cliSandbox{Command: "bwrap", IsolationLog: sandboxIsolationSummary(req.Policy)}
+	spec := sandboxExec{
+		Worktree:      req.Worktree,
+		Policy:        req.Policy,
+		Layout:        sandboxLayoutCLI,
+		Command:       command,
+		Args:          req.Args,
+		ExtraWritable: req.ExtraWritable,
+		ExtraROBinds:  extraBinds,
+		ExtraPATH:     extraPath,
+	}
+	if req.Policy.NetworkMode == "none" {
+		python, err := exec.LookPath("python3")
+		if err != nil {
+			return nil, errors.New("CLI-Sandbox kann Modell-API-Zugang nicht vom Tool-Netzwerk trennen (python3 fehlt)")
+		}
+		python, extraPython, extraPythonPath, err := resolveCLICommand(python)
+		if err != nil {
+			return nil, err
+		}
+		spec.RelayPython = python
+		spec.ExtraROBinds = uniquePaths(append(append([]string{}, spec.ExtraROBinds...), extraPython...))
+		if extraPythonPath != "" && spec.ExtraPATH == "" {
+			spec.ExtraPATH = extraPythonPath
+		} else if extraPythonPath != "" && !strings.Contains(spec.ExtraPATH, extraPythonPath) {
+			spec.ExtraPATH = extraPythonPath + ":" + spec.ExtraPATH
+		}
+		proxy, err := startModelAPIProxy(modelAPIAllowlist(req.Provider))
+		if err != nil {
+			return nil, fmt.Errorf("Modell-API-Proxy konnte nicht gestartet werden: %w", err)
+		}
+		session.closeFns = append(session.closeFns, proxy.Close)
+		relay, err := os.CreateTemp("", "shipyard-model-api-relay-*.py")
+		if err != nil {
+			_ = session.Close()
+			return nil, err
+		}
+		if _, err := relay.Write(modelAPIRelayScript); err != nil {
+			_ = relay.Close()
+			_ = os.Remove(relay.Name())
+			_ = session.Close()
+			return nil, err
+		}
+		if err := relay.Chmod(0o500); err != nil {
+			_ = relay.Close()
+			_ = os.Remove(relay.Name())
+			_ = session.Close()
+			return nil, err
+		}
+		if err := relay.Close(); err != nil {
+			_ = os.Remove(relay.Name())
+			_ = session.Close()
+			return nil, err
+		}
+		relayPath := relay.Name()
+		session.closeFns = append(session.closeFns, func() error { return os.Remove(relayPath) })
+		spec.RelaySocket = proxy.path
+		spec.RelayScript = relayPath
+		session.ModelAPIProxy = true
+	}
+	args, err := buildSandboxArgs(spec)
+	if err != nil {
+		_ = session.Close()
+		return nil, err
+	}
+	session.Args = args
+	return session, nil
+}
+
+func resolveCLICommand(command string) (string, []string, string, error) {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return "", nil, "", errors.New("CLI-Kommando fehlt")
+	}
+	resolved, err := exec.LookPath(command)
+	if err != nil {
+		if filepath.IsAbs(command) {
+			return "", nil, "", fmt.Errorf("CLI-Executable %q nicht gefunden", command)
+		}
+		return command, nil, "", nil
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return "", nil, "", err
+	}
+	real := resolved
+	if target, evalErr := filepath.EvalSymlinks(resolved); evalErr == nil && target != "" {
+		real = target
+	}
+	if sandboxSystemPath(real) && sandboxSystemPath(resolved) {
+		return resolved, nil, "", nil
+	}
+	binds := []string{real}
+	if resolved != real {
+		binds = append(binds, resolved)
+	}
+	extraPath := ""
+	if dir := filepath.Dir(real); dir != "/" && !sandboxSystemPath(dir) {
+		binds = append(binds, dir)
+		extraPath = dir
+	}
+	return resolved, uniquePaths(binds), extraPath, nil
+}
+
+func sandboxSystemPath(path string) bool {
+	path = filepath.Clean(path)
+	for _, root := range []string{"/usr", "/bin", "/lib", "/lib64"} {
+		if path == root || strings.HasPrefix(path, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+func uniquePaths(paths []string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = filepath.Clean(path)
+		if path == "" || path == "/" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		result = append(result, path)
+	}
+	return result
+}

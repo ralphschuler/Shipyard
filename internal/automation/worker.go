@@ -1111,27 +1111,6 @@ func validateRunSandboxSnapshot(name string, payload []byte, workspace string) (
 	return sandbox.EffectiveProfile(profile, workspace)
 }
 
-// cliSandboxInvocation builds the same worktree-only bubblewrap envelope for
-// local CLI adapters. The caller still controls provider-specific arguments.
-func cliSandboxInvocation(worktree, profileName, command string, commandArgs []string) (string, []string, error) {
-	profile, err := sandbox.Effective(profileName, worktree)
-	if err != nil {
-		return "", nil, err
-	}
-	if profile.NetworkMode == "bridge-only" {
-		return "", nil, errors.New("release-bridge erlaubt nur den hostseitigen Release-Bridge-Dienst")
-	}
-	args, err := openAISandboxArgsForPolicy(worktree, "true", profile)
-	if err != nil {
-		return "", nil, err
-	}
-	// Replace the harmless sentinel command with the requested executable.
-	args = args[:len(args)-3]
-	args = append(args, command)
-	args = append(args, commandArgs...)
-	return "bwrap", args, nil
-}
-
 func integrationPushArgs(branch, defaultBranch string) ([]string, error) {
 	branch = strings.TrimSpace(branch)
 	defaultBranch = strings.TrimSpace(defaultBranch)
@@ -2422,6 +2401,9 @@ func (w *Worker) checkProviderForAgent(ctx context.Context, name, agentID string
 	if err != nil {
 		return "", err
 	}
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		return "", errors.New("CLI-Agenten benötigen bubblewrap für das Sandbox-Profil")
+	}
 	checkCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(checkCtx, command, "--version").CombinedOutput()
@@ -3565,22 +3547,47 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			_ = w.finish(ctx, run, "failed")
 			return
 		}
-		finalPath := filepath.Join("/home/agent/.taskboard-run-logs", run.ID+".final")
 		if hasDevContainer {
-			finalPath = filepath.Join(run.WorkspaceSnapshot, ".shipyard-"+run.ID+".final")
+			reason := "Dev-Container-Läufe können das gewählte Sandbox-Profil nicht technisch erzwingen"
+			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "sandbox_enforcement_failed")
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
+			_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+			_ = w.finish(ctx, run, "failed")
+			return
 		}
-		if provider.Provider == "codex" && !hasDevContainer {
-			args = withWorkingDirectory(args, run.WorkspaceSnapshot)
+		outDir := filepath.Join("/home/agent/.taskboard-run-logs", run.ID+".out")
+		if mkdirErr := os.MkdirAll(outDir, 0o700); mkdirErr != nil {
+			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "sandbox_enforcement_failed")
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", mkdirErr.Error())
+			_ = w.finish(ctx, run, "failed")
+			return
 		}
+		finalPath := filepath.Join(outDir, "final")
 		if provider.Provider == "codex" {
-			if hasDevContainer {
-				args = withOutputLastMessage(args, filepath.Join(devContainerWorkspaceFolder(devDefinition, run.WorkspaceSnapshot), ".shipyard-"+run.ID+".final"))
-			} else {
-				args = withOutputLastMessage(args, finalPath)
-			}
+			args = withWorkingDirectory(args, run.WorkspaceSnapshot)
+			args = withOutputLastMessage(args, finalPath)
 		}
-		if hasDevContainer {
-			command, args = devContainerExecArgs(devRuntime, devDefinition, command, args)
+		session, wrapErr := startCLISandbox(runCtx, cliSandboxRequest{
+			Worktree:      run.WorkspaceSnapshot,
+			Policy:        runSandbox,
+			Command:       command,
+			Args:          args,
+			ExtraWritable: []string{outDir},
+			Provider:      provider,
+		})
+		if wrapErr != nil {
+			reason := wrapErr.Error()
+			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "sandbox_enforcement_failed")
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
+			_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		defer session.Close()
+		command, args = session.Command, session.Args
+		_ = w.Store.AddRunLog(ctx, run.ID, "info", session.IsolationLog)
+		if session.ModelAPIProxy {
+			_ = w.Store.AddRunLog(ctx, run.ID, "info", "Modell-API-Netzwerk: Allowlist-Proxy; Tool-/Projektnetzwerk isoliert")
 		}
 		// Record the exact provider invocation without leaking the task prompt.
 		// This makes an adapter/configuration regression visible in the run

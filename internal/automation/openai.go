@@ -219,47 +219,6 @@ func toolDefinitions() []map[string]any {
 	}}
 }
 
-func openAISandboxArgs(worktree, command string) ([]string, error) {
-	return openAISandboxArgsForProfile(worktree, command, "strict")
-}
-
-func openAISandboxArgsForProfile(worktree, command, profile string) ([]string, error) {
-	abs, err := filepath.Abs(worktree)
-	if err != nil {
-		return nil, err
-	}
-	policy, err := sandbox.Effective(profile, abs)
-	if err != nil || policy.NetworkMode == "bridge-only" {
-		return nil, errors.New("sandbox profile does not permit direct provider commands")
-	}
-	return openAISandboxArgsForPolicy(abs, command, policy)
-}
-
-func openAISandboxArgsForPolicy(abs, command string, policy sandbox.Profile) ([]string, error) {
-	if _, err := sandbox.EffectiveProfile(policy, abs); err != nil || policy.NetworkMode == "bridge-only" {
-		return nil, errors.New("sandbox profile does not permit direct provider commands")
-	}
-	args := []string{"--die-with-parent", "--unshare-all", "--new-session"}
-	if policy.NetworkMode == "qa-network" {
-		args = append(args, "--share-net")
-	}
-	for _, directory := range []string{"/usr", "/bin", "/lib", "/lib64"} {
-		if _, statErr := os.Stat(directory); statErr == nil {
-			args = append(args, "--ro-bind", directory, directory)
-		}
-	}
-	workspaceBind := "--bind"
-	if policy.WriteMode == "readonly" {
-		workspaceBind = "--ro-bind"
-	}
-	return append(args,
-		"--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-		workspaceBind, abs, "/workspace", "--chdir", "/workspace",
-		"--setenv", "HOME", "/workspace", "--setenv", "PATH", "/usr/bin:/bin",
-		"--setenv", "LANG", "C", "/bin/sh", "-lc", command,
-	), nil
-}
-
 func runToolCommand(ctx context.Context, worktree, command string) string {
 	return runToolCommandForProfile(ctx, worktree, command, "strict")
 }
