@@ -276,6 +276,25 @@ func TestMemoryHardeningAllowsOnlyExplicitRetentionDeletes(t *testing.T) {
 	}
 }
 
+func TestGrokbotProviderMigrationRegistersXAIDefaults(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/051_grokbot_provider.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{
+		"'grokbot'",
+		"'XAI_API_KEY'",
+		"https://api.x.ai/v1",
+		`"models":["grok-4"]`,
+		"ON CONFLICT (provider) DO NOTHING",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("grokbot provider migration missing %q", required)
+		}
+	}
+}
+
 func TestMemoryRetentionMigrationAddsScopedAgeIndexes(t *testing.T) {
 	body, err := migrationFiles.ReadFile("migrations/049_memory_retention_indexes.sql")
 	if err != nil {

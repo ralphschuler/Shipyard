@@ -5,7 +5,21 @@ import (
 	"errors"
 	"strings"
 	"taskboard/internal/domain"
+	"time"
 )
+
+// usesHTTPResponsesAdapter reports whether a run should call the OpenAI-compatible
+// Responses API instead of a local CLI. Grokbot uses HTTP when no command is set.
+func usesHTTPResponsesAdapter(provider domain.ProviderSetting) bool {
+	switch strings.TrimSpace(provider.Provider) {
+	case "openai":
+		return true
+	case "grokbot":
+		return strings.TrimSpace(provider.Command) == ""
+	default:
+		return false
+	}
+}
 
 func validateGrokbotConfiguration(provider domain.ProviderSetting) error {
 	if strings.TrimSpace(provider.Model) == "" {
@@ -35,7 +49,7 @@ func validateGrokbotOptions(raw string) error {
 // This keeps availability installation-specific and avoids hard-coded model
 // names in the agent UI.
 func GrokbotCapabilities(raw string) CapabilityDiscovery {
-	result := CapabilityDiscovery{Efforts: []string{"low", "medium", "high"}, Source: "Grokbot-Provideroptionen"}
+	result := CapabilityDiscovery{Efforts: []string{"low", "medium", "high"}, Source: "Grokbot-Provideroptionen", At: time.Now()}
 	var options struct {
 		Models  []string `json:"models"`
 		Efforts []string `json:"efforts"`

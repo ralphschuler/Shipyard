@@ -17,6 +17,14 @@ Die Provider-Optionen können `models` und `efforts` als JSON-Arrays enthalten, 
 Beispiel `{"models":["grok-4"],"efforts":["low","medium","high"]}`. Damit bleibt
 die Modellverfügbarkeit installations- und adapterabhängig.
 
+## Optionaler CLI-Adapter
+
+Bleibt das Kommando leer, nutzt Shipyard den HTTP-Adapter. Für den offiziellen
+`grok`-CLI (`npm i -g @xai-official/grok` oder das Installationsskript von xAI)
+trage das Kommando ein, zum Beispiel `grok --always-approve`. Shipyard ergänzt
+Modell und Effort aus dem Agent-Profil und sendet den Prompt per `-p`. Der
+API-Schlüssel kommt weiterhin nur aus der Secret-Zuordnung (`XAI_API_KEY`).
+
 ## Einschränkungen
 
 Der xAI-Adapter nutzt dieselbe serverseitige Worktree-Sandbox, Cancellation,

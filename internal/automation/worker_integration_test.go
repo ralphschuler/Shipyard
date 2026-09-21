@@ -177,6 +177,20 @@ func TestCheckProviderForAgentRejectsUnassignedSecret(t *testing.T) {
 	}
 }
 
+func TestGrokbotProviderIsRegisteredAfterMigration(t *testing.T) {
+	s := workerIntegrationStore(t)
+	provider, err := s.Provider(context.Background(), "grokbot")
+	if err != nil {
+		t.Fatalf("grokbot provider was not registered: %v", err)
+	}
+	if provider.Provider != "grokbot" || provider.SecretEnv != "XAI_API_KEY" || provider.BaseURL != "https://api.x.ai/v1" {
+		t.Fatalf("grokbot defaults = %#v", provider)
+	}
+	if !strings.Contains(provider.Options, `"models"`) {
+		t.Fatalf("grokbot options missing model discovery: %s", provider.Options)
+	}
+}
+
 func TestProcessKeepsTaskCompletedRetryableWhenReleasePublisherIsMissing(t *testing.T) {
 	s := workerIntegrationStore(t)
 	ctx := context.Background()
@@ -1046,7 +1060,6 @@ func TestReworkWorkerSelectionUsesStoredBudgetAndPersistsSnapshot(t *testing.T) 
 		t.Fatalf("run snapshot missing limit/cost: %#v", snapshot)
 	}
 }
-
 
 func TestClaudeDeliveryRunProcessesSelfReviewWithArgvPrompt(t *testing.T) {
 	if _, err := exec.LookPath("tmux"); err != nil {

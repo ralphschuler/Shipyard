@@ -2447,6 +2447,18 @@ func ValidateProviderConfiguration(provider, command, options string) error {
 
 func commandForProvider(provider domain.ProviderSetting) (string, []string, error) {
 	switch provider.Provider {
+	case "grokbot":
+		if strings.TrimSpace(provider.Command) == "" {
+			return "", nil, errors.New("Grokbot Responses API ist als HTTP-Adapter konfiguriert; setze ein CLI-Kommando für den grok-Adapter")
+		}
+		if err := ValidateProviderConfiguration(provider.Provider, provider.Command, provider.Options); err != nil {
+			return "", nil, err
+		}
+		configured := strings.Fields(provider.Command)
+		if provider.Model != "" {
+			configured = append(configured, "--model", provider.Model)
+		}
+		return configured[0], configured[1:], nil
 	case "codex":
 		if err := ValidateProviderConfiguration(provider.Provider, provider.Command, provider.Options); err != nil {
 			return "", nil, err
@@ -2494,6 +2506,9 @@ func cliInvocation(provider domain.ProviderSetting, prompt string) (string, []st
 	if provider.Provider == "codex" {
 		return command, append(args, "-"), prompt, nil
 	}
+	if provider.Provider == "grokbot" {
+		return command, append(args, "-p", prompt), "", nil
+	}
 	return command, append(args, prompt), "", nil
 }
 
@@ -2517,6 +2532,14 @@ func cliInvocationForAgent(provider domain.ProviderSetting, agent domain.Agent, 
 		// explicit and deterministic.
 		args = append(args[:len(args)-1], effortArgs...)
 		args = append(args, "-")
+	}
+	if provider.Provider == "grokbot" {
+		if len(args) >= 2 && args[len(args)-2] == "-p" {
+			promptArg := args[len(args)-1]
+			args = append(append([]string{}, args[:len(args)-2]...), "--effort", strings.TrimSpace(agent.ReasoningEffort), "-p", promptArg)
+		} else {
+			args = append(args, "--effort", strings.TrimSpace(agent.ReasoningEffort))
+		}
 	}
 	return command, args, stdin, nil
 }
@@ -2583,7 +2606,7 @@ func (w *Worker) checkProviderForAgent(ctx context.Context, name, agentID string
 	if !provider.Enabled {
 		return "", errors.New("Provider ist pausiert")
 	}
-	if provider.Provider == "openai" || provider.Provider == "grokbot" {
+	if usesHTTPResponsesAdapter(provider) {
 		if provider.Provider == "grokbot" {
 			if err := validateGrokbotConfiguration(provider); err != nil {
 				return "", err
@@ -2603,7 +2626,7 @@ func (w *Worker) checkProviderForAgent(ctx context.Context, name, agentID string
 			return "", errors.New("kein aktives Secret ist einem Agent zugeordnet")
 		}
 		if _, err := exec.LookPath("bwrap"); err != nil {
-			return "", errors.New("OpenAI-Agenten benötigen bubblewrap für den isolierten Worktree")
+			return "", errors.New("API-Agenten benötigen bubblewrap für den isolierten Worktree")
 		}
 		return provider.Provider + "-Adapter ist konfiguriert; das Secret und die Worktree-Sandbox sind auf dem Server verfügbar.", nil
 	}
@@ -3721,7 +3744,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	var nativeCostMicrousd *int64
 	var serviceTier string
 	var cliReport *cliUsageReport
-	if provider.Provider == "openai" || provider.Provider == "grokbot" {
+	if usesHTTPResponsesAdapter(provider) {
 		secret, ok := secretValueForEnv(secretValues, provider.SecretEnv)
 		if !ok {
 			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "secret_not_assigned")
@@ -3836,7 +3859,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	// CLI adapters may emit a final machine-readable usage event even when the
 	// process exits non-zero. Read it before constructing and persisting the
 	// report so partial runs retain all measured telemetry.
-	if provider.Provider != "openai" {
+	if !usesHTTPResponsesAdapter(provider) {
 		if logs, logErr := w.Store.RunLogs(ctx, run.ID); logErr == nil {
 			if reported, ok := reportedCLIUsage(logs); ok {
 				cliReport = &reported
@@ -3919,7 +3942,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	}
 	// CLI output has already been copied into append-only run-log records by
 	// tmux. API providers return one response and are recorded here instead.
-	if provider.Provider == "openai" || provider.Provider == "grokbot" {
+	if usesHTTPResponsesAdapter(provider) {
 		text := strings.TrimSpace(string(out))
 		if text != "" {
 			_ = w.Store.AddRunLog(ctx, run.ID, "info", text)
