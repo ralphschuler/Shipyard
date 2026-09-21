@@ -2743,6 +2743,12 @@ func releaseAuditComment(request release.Request, result release.Result) string 
 }
 
 func automationEventIsNoop(event domain.AutomationEvent) bool {
+	// Completions are never a return no-op. A historical QA→Done payload may
+	// still carry qa_return=true with change_available=false; discarding it
+	// would skip release publication and task.completed rules.
+	if event.Type == "task.completed" {
+		return false
+	}
 	if len(event.Payload) == 0 || string(event.Payload) == "null" {
 		return false
 	}

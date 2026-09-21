@@ -1469,11 +1469,14 @@ func TestSelfReviewGateFailsClosedWhenRunLogsCannotBeRead(t *testing.T) {
 }
 
 func TestAutomationEventNoopOnlySuppressesUnchangedReviewReturns(t *testing.T) {
-	if !automationEventIsNoop(domain.AutomationEvent{Payload: []byte(`{"qa_return":true,"change_available":false}`)}) {
+	if !automationEventIsNoop(domain.AutomationEvent{Type: "task.entered_column", Payload: []byte(`{"qa_return":true,"change_available":false}`)}) {
 		t.Fatal("unchanged QA/review return must be a terminal no-op")
 	}
-	if automationEventIsNoop(domain.AutomationEvent{Payload: []byte(`{"qa_return":true,"change_available":false,"rework_requested":true}`)}) {
+	if automationEventIsNoop(domain.AutomationEvent{Type: "task.entered_column", Payload: []byte(`{"qa_return":true,"change_available":false,"rework_requested":true}`)}) {
 		t.Fatal("explicit QA/rework return must remain processable")
+	}
+	if automationEventIsNoop(domain.AutomationEvent{Type: "task.completed", Payload: []byte(`{"qa_return":true,"change_available":false}`)}) {
+		t.Fatal("task.completed must not be discarded as a return no-op")
 	}
 	for _, event := range []domain.AutomationEvent{
 		{Payload: []byte(`{"qa_return":true,"change_available":true}`)},

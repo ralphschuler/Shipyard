@@ -159,6 +159,33 @@ func TestBoardInheritanceEligibleColumn(t *testing.T) {
 	}
 }
 
+func TestQAReviewReturnDistinguishesForwardMovesFromRework(t *testing.T) {
+	// Personal: Inbox 0, Backlog 1, In Progress 2, Review 3, QA 4, Blocked 5, Done 6
+	// Software: Inbox 0, Backlog 1, Entwicklung 2, Review 3, Erledigt 4
+	cases := []struct {
+		name, from, targetType string
+		fromPos, toPos         int
+		want                   bool
+	}{
+		{name: "review to QA", from: "Review", fromPos: 3, targetType: "standard", toPos: 4},
+		{name: "QA to Done", from: "QA", fromPos: 4, targetType: "done", toPos: 6},
+		{name: "review to Erledigt", from: "Review", fromPos: 3, targetType: "done", toPos: 4},
+		{name: "review to Blocked", from: "Review", fromPos: 3, targetType: "needs_action", toPos: 5},
+		{name: "in progress to review", from: "In Progress", fromPos: 2, targetType: "standard", toPos: 3},
+		{name: "review to in progress", from: "Review", fromPos: 3, targetType: "standard", toPos: 2, want: true},
+		{name: "QA to in progress", from: "QA", fromPos: 4, targetType: "standard", toPos: 2, want: true},
+		{name: "review to Entwicklung", from: "Review", fromPos: 3, targetType: "standard", toPos: 2, want: true},
+		{name: "QA to Entwicklung", from: "QA", fromPos: 4, targetType: "standard", toPos: 2, want: true},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := qaReviewReturn(test.from, test.fromPos, test.targetType, test.toPos); got != test.want {
+				t.Fatalf("qaReviewReturn(%q,%d,%q,%d)=%t, want %t", test.from, test.fromPos, test.targetType, test.toPos, got, test.want)
+			}
+		})
+	}
+}
+
 func TestRunTargetSelectionRejectsMissingTargets(t *testing.T) {
 	if err := requireRunTargets(nil); !errors.Is(err, ErrTargetSelectionRequired) {
 		t.Fatalf("missing targets error = %v, want ErrTargetSelectionRequired", err)
