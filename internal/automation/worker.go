@@ -1635,6 +1635,162 @@ func repositoryBranch(ctx context.Context, source string) string {
 	return "master"
 }
 
+func cleanCheckoutPath(path string) string {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "." {
+		return ""
+	}
+	return path
+}
+
+func sshSiblingBase(path string) (string, bool) {
+	if path == "" || !strings.HasSuffix(path, "-ssh") {
+		return "", false
+	}
+	base := strings.TrimSuffix(path, "-ssh")
+	if base == "" || base == path {
+		return "", false
+	}
+	return base, true
+}
+
+func gitCheckoutExists(path string) bool {
+	if strings.TrimSpace(path) == "" {
+		return false
+	}
+	info, err := os.Stat(filepath.Join(path, ".git"))
+	if err != nil {
+		return false
+	}
+	return info.IsDir() || info.Mode().IsRegular()
+}
+
+// selectDeliveryCheckout returns the single managed clone used to create run
+// worktrees. A sibling "<id>-ssh" directory is a second clone of the same
+// project; Delivery must not reset task/<id> there while Apply commits on the
+// other clone. Prefer the recorded source workspace when that checkout exists,
+// and do not create a new "-ssh" clone when the canonical path is the one to
+// sync. If only the "-ssh" checkout is on disk, keep it so sync does not
+// invent a divergent sibling.
+func selectDeliveryCheckout(recordedSource string, project domain.Project) string {
+	recorded := cleanCheckoutPath(recordedSource)
+	configured := cleanCheckoutPath(project.LocalPath)
+	canonical := ""
+	if id := strings.TrimSpace(project.ID); id != "" {
+		canonical = filepath.Clean(workspace.ProjectPath(id))
+	}
+	if base, ok := sshSiblingBase(configured); ok {
+		preferred := ""
+		switch {
+		case recorded != "" && recorded != configured && (recorded == base || (canonical != "" && recorded == canonical)):
+			preferred = recorded
+		case canonical != "" && canonical == base && canonical != configured:
+			preferred = canonical
+		case recorded == base:
+			preferred = base
+		}
+		if preferred != "" {
+			if gitCheckoutExists(preferred) || !gitCheckoutExists(configured) {
+				return preferred
+			}
+			return configured
+		}
+		if gitCheckoutExists(base) {
+			return base
+		}
+	}
+	if configured != "" {
+		return configured
+	}
+	if recorded != "" {
+		return recorded
+	}
+	return canonical
+}
+
+// absoluteGitCommonDir is the shared git directory of a checkout or linked
+// worktree. Sibling clones do not share this path.
+func absoluteGitCommonDir(ctx context.Context, path string) (string, error) {
+	common, err := gitOutput(ctx, path, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil || strings.TrimSpace(common) == "" {
+		common, err = gitOutput(ctx, path, "rev-parse", "--git-common-dir")
+		if err != nil {
+			return "", fmt.Errorf("Git-Verzeichnis konnte nicht bestimmt werden: %w", err)
+		}
+		common = strings.TrimSpace(common)
+		if common != "" && !filepath.IsAbs(common) {
+			common = filepath.Join(path, common)
+		}
+	}
+	common = filepath.Clean(strings.TrimSpace(common))
+	if common == "" || common == "." {
+		return "", errors.New("Git-Verzeichnis konnte nicht bestimmt werden")
+	}
+	return common, nil
+}
+
+// gitRepositoryRoot returns the main working tree that owns path. Run
+// worktrees and Apply must use this directory, not a sibling clone recorded
+// in source_workspace.
+func gitRepositoryRoot(ctx context.Context, path string) (string, error) {
+	common, err := absoluteGitCommonDir(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	list, listErr := gitOutput(ctx, path, "worktree", "list", "--porcelain")
+	if listErr == nil {
+		for _, line := range strings.Split(list, "\n") {
+			rest, ok := strings.CutPrefix(line, "worktree ")
+			if !ok {
+				continue
+			}
+			root := filepath.Clean(strings.TrimSpace(rest))
+			if root == "" {
+				break
+			}
+			rootCommon, rootErr := absoluteGitCommonDir(ctx, root)
+			if rootErr == nil && filepath.Clean(rootCommon) == common {
+				return root, nil
+			}
+			if filepath.Base(common) == ".git" && filepath.Clean(filepath.Dir(common)) == root {
+				return root, nil
+			}
+			break
+		}
+	}
+	if filepath.Base(common) == ".git" {
+		return filepath.Dir(common), nil
+	}
+	return "", fmt.Errorf("Git-Hauptverzeichnis konnte nicht aus %s bestimmt werden", common)
+}
+
+// resolveIntegrationRepository returns the git checkout Apply must commit
+// into. The run worktree wins over source_workspace whenever they are
+// different clones.
+func resolveIntegrationRepository(ctx context.Context, recordedSource, worktree string) (string, error) {
+	recorded := cleanCheckoutPath(recordedSource)
+	worktree = strings.TrimSpace(worktree)
+	if worktree == "" {
+		if recorded == "" {
+			return "", errors.New("Quell-Workspace für diesen Run nicht verfügbar")
+		}
+		return recorded, nil
+	}
+	root, err := gitRepositoryRoot(ctx, worktree)
+	if err != nil {
+		return "", fmt.Errorf("Run-Worktree gehört zu keinem gemeinsamen Git-Repository: %w", err)
+	}
+	return root, nil
+}
+
+func repositoryOwningWorktree(ctx context.Context, recordedSource, worktree string) string {
+	resolved, err := resolveIntegrationRepository(ctx, recordedSource, worktree)
+	if err != nil || strings.TrimSpace(resolved) == "" {
+		return recordedSource
+	}
+	return resolved
+}
+
 func trustedManagedCommit(ctx context.Context, path, sha string, accepted map[string]bool) bool {
 	sha = strings.TrimSpace(sha)
 	if sha == "" || accepted[sha] {
@@ -1670,6 +1826,21 @@ func ensureTaskBranch(ctx context.Context, source, taskID string, configuredDefa
 		return "", fmt.Errorf("Task-Branch %s konnte nicht angelegt werden: %w", branch, err)
 	}
 	return branch, nil
+}
+
+// prepareDeliveryTaskBranch chooses the commit a delivery worktree is created
+// from. The first delivery may create task/<id> from the remote default
+// branch and rebase it forward. A rework keeps the current task-branch tip:
+// resetting that branch to origin/<default> drops previously accepted commits,
+// and the next apply then three-way conflicts on the same files.
+func prepareDeliveryTaskBranch(ctx context.Context, source, taskID, runID, defaultBranch string, rework bool) (string, error) {
+	branch := taskIntegrationBranch(taskID)
+	if rework {
+		if _, err := gitOutput(ctx, source, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+			return branch, nil
+		}
+	}
+	return refreshTaskBranch(ctx, source, taskID, runID, defaultBranch)
 }
 
 // refreshTaskBranch rebases an existing task branch onto the newest remote
@@ -1794,7 +1965,18 @@ func gitConflictFiles(ctx context.Context, directory string) string {
 // branch. The managed source checkout is never modified, which means two
 // tasks can be accepted independently even while the remote default branch
 // advances between their runs.
+//
+// The repository that owns the run worktree is the integration target.
+// agent_runs.source_workspace can still point at a sibling clone (for example
+// projects/<id> while the worktree's common git dir is projects/<id>-ssh).
+// Applying in that other clone three-way conflicts with commits the run never
+// contained.
 func applyRunPatchToTaskBranch(ctx context.Context, source, runWorktree, runID, taskID string, configuredDefault ...string) (string, error) {
+	resolved, resolveErr := resolveIntegrationRepository(ctx, source, runWorktree)
+	if resolveErr != nil {
+		return "", resolveErr
+	}
+	source = resolved
 	if dirty, checkErr := exec.CommandContext(ctx, "git", "-C", source, "status", "--porcelain").Output(); checkErr != nil {
 		return "", checkErr
 	} else if strings.TrimSpace(string(dirty)) != "" {
@@ -2644,6 +2826,7 @@ func (w *Worker) Start(ctx context.Context) {
 			source, sourceErr := w.Store.RunSource(ctx, run.ID)
 			worktree, worktreeErr := w.Store.RunWorktree(ctx, run.ID)
 			if sourceErr == nil && worktreeErr == nil && source != "" && worktree != "" {
+				source = repositoryOwningWorktree(ctx, source, worktree)
 				unlock, lockErr := lockRepository(ctx, source)
 				if lockErr != nil {
 					_ = w.Store.AddRunLog(ctx, run.ID, "warning", "Worktree nach Dienstneustart konnte nicht gesperrt und bereinigt werden: "+lockErr.Error())
@@ -2710,12 +2893,13 @@ func (w *Worker) cleanupExpiredWorktrees(ctx context.Context) {
 		if strings.TrimSpace(candidate.SourceWorkspace) == "" || strings.TrimSpace(candidate.WorktreePath) == "" {
 			continue
 		}
-		unlock, lockErr := lockRepository(ctx, candidate.SourceWorkspace)
+		source := repositoryOwningWorktree(ctx, candidate.SourceWorkspace, candidate.WorktreePath)
+		unlock, lockErr := lockRepository(ctx, source)
 		if lockErr != nil {
 			_ = w.Store.AddRunLog(ctx, candidate.RunID, "warning", "Abgelaufener Worktree konnte nicht gesperrt und bereinigt werden: "+lockErr.Error())
 			continue
 		}
-		cleanupErr := w.cleanupRunWorktree(ctx, candidate.RunID, candidate.SourceWorkspace, candidate.WorktreePath)
+		cleanupErr := w.cleanupRunWorktree(ctx, candidate.RunID, source, candidate.WorktreePath)
 		unlock()
 		if cleanupErr != nil {
 			_ = w.Store.AddRunLog(ctx, candidate.RunID, "warning", "Abgelaufener Worktree konnte nicht bereinigt werden: "+cleanupErr.Error())
@@ -3013,6 +3197,18 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	if err != nil || source == "" {
 		return errors.New("Quell-Workspace für diesen Run nicht verfügbar")
 	}
+	worktree, err := w.Store.RunWorktree(ctx, runID)
+	if err != nil || worktree == "" {
+		return errors.New("Worktree für diesen Run nicht verfügbar")
+	}
+	recordedSource := source
+	source, err = resolveIntegrationRepository(ctx, recordedSource, worktree)
+	if err != nil {
+		return err
+	}
+	if filepath.Clean(source) != filepath.Clean(recordedSource) {
+		_ = w.Store.AddRunLog(ctx, runID, "info", "Übernahme folgt dem Git-Repository des Run-Worktrees: "+source)
+	}
 	project := domain.Project{}
 	if run.TargetProject != "" {
 		project, err = w.Store.Project(ctx, run.TargetProject)
@@ -3043,10 +3239,6 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 		return errors.New("Änderungen dieses Runs wurden bereits übernommen")
 	}
 
-	worktree, err := w.Store.RunWorktree(ctx, runID)
-	if err != nil || worktree == "" {
-		return errors.New("Worktree für diesen Run nicht verfügbar")
-	}
 	runStartSHA, err := w.Store.RunStartSHA(ctx, runID)
 	if err != nil {
 		return fmt.Errorf("Run-Start-Commit konnte nicht gelesen werden: %w", err)
@@ -3281,15 +3473,16 @@ func (w *Worker) Discard(ctx context.Context, runID string) error {
 	if err != nil {
 		return err
 	}
+	worktree, err := w.Store.RunWorktree(ctx, runID)
+	if err != nil {
+		return err
+	}
+	source = repositoryOwningWorktree(ctx, source, worktree)
 	unlock, err := lockRepository(ctx, source)
 	if err != nil {
 		return fmt.Errorf("Repository-Verwerfen konnte nicht gesperrt werden: %w", err)
 	}
 	defer unlock()
-	worktree, err := w.Store.RunWorktree(ctx, runID)
-	if err != nil {
-		return err
-	}
 	if err := w.cleanupRunWorktree(ctx, runID, source, worktree); err != nil {
 		return err
 	}
@@ -3338,6 +3531,9 @@ func removeRunWorktree(ctx context.Context, runID, source, worktree string) erro
 // before a task starts. Worktrees are then created from that exact revision,
 // so no task can reuse another task's working directory.
 func (w *Worker) syncManagedProject(ctx context.Context, project domain.Project) error {
+	if chosen := selectDeliveryCheckout(project.LocalPath, project); chosen != "" {
+		project.LocalPath = chosen
+	}
 	root := workspace.ProjectsRoot()
 	path := filepath.Clean(project.LocalPath)
 	relative, err := filepath.Rel(root, path)
@@ -3423,12 +3619,17 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		_ = w.finish(ctx, run, "failed")
 		return
 	}
+	recordedCheckout := strings.TrimSpace(run.WorkspaceSnapshot)
 	if run.TargetProject != "" {
 		project, projectErr := w.Store.Project(runCtx, run.TargetProject)
 		if projectErr != nil {
 			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", projectErr.Error())
 			_ = w.finish(ctx, run, "failed")
 			return
+		}
+		if checkout := selectDeliveryCheckout(recordedCheckout, project); checkout != "" && filepath.Clean(checkout) != filepath.Clean(project.LocalPath) {
+			_ = w.Store.AddRunLog(ctx, run.ID, "info", "Abweichenden Projekt-Checkout ignoriert ("+project.LocalPath+"); gemeinsames Git-Repository: "+checkout)
+			project.LocalPath = checkout
 		}
 		if project.RepositoryURL != "" {
 			if syncErr := w.syncManagedProject(runCtx, project); syncErr != nil {
@@ -3481,7 +3682,11 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			defaultBranch = integrationDefaultBranch(project, defaultBranch)
 		}
 	}
-	taskBranch, taskBranchErr := refreshTaskBranch(ctx, run.WorkspaceSnapshot, run.TaskID, run.ID, defaultBranch)
+	reworkDelivery := false
+	if taskForBranch, taskForBranchErr := w.Store.GetTask(ctx, run.TaskID); taskForBranchErr == nil && taskForBranch.ReworkCount > 0 {
+		reworkDelivery = true
+	}
+	taskBranch, taskBranchErr := prepareDeliveryTaskBranch(ctx, run.WorkspaceSnapshot, run.TaskID, run.ID, defaultBranch, reworkDelivery)
 	if taskBranchErr != nil {
 		branchLock()
 		_ = w.Store.AddRunLog(ctx, run.ID, "error", taskBranchErr.Error())
@@ -3514,7 +3719,11 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	}
 	branchLock()
 	_ = w.Store.SetRunWorktree(ctx, run.ID, worktree)
-	_ = w.Store.AddRunLog(ctx, run.ID, "info", "Task-Branch vor Delivery auf origin/"+defaultBranch+" aktualisiert: "+taskBranch)
+	if reworkDelivery {
+		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Task-Branch für Rework beibehalten: "+taskBranch)
+	} else {
+		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Task-Branch vor Delivery auf origin/"+defaultBranch+" aktualisiert: "+taskBranch)
+	}
 	_ = w.Store.AddRunLog(ctx, run.ID, "info", "Isolierter Git-Worktree: "+worktree)
 	run.WorkspaceSnapshot = worktree
 	agent, agentErr := w.Store.GetAgent(ctx, run.AgentID)

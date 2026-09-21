@@ -1089,6 +1089,238 @@ func TestApplyRunPatchToTaskBranchUsesThreeWayForExistingRebasedFile(t *testing.
 	runGit(t, source, "worktree", "remove", "--force", runWorktree)
 }
 
+func TestSelectDeliveryCheckoutIgnoresSiblingSSHClone(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("TASKBOARD_WORKSPACE_ROOT", root)
+	id := "11111111-1111-1111-1111-111111111111"
+	canonical := filepath.Join(root, "projects", id)
+	sshClone := canonical + "-ssh"
+	if err := os.MkdirAll(filepath.Join(sshClone, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	project := domain.Project{ID: id, LocalPath: sshClone}
+	if got := selectDeliveryCheckout("", project); got != sshClone {
+		t.Fatalf("only the -ssh checkout exists, got %q", got)
+	}
+	if err := os.MkdirAll(filepath.Join(canonical, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := selectDeliveryCheckout(canonical, project); got != canonical {
+		t.Fatalf("delivery checkout = %q, want canonical %q", got, canonical)
+	}
+	if got := selectDeliveryCheckout("", project); got != canonical {
+		t.Fatalf("canonical sibling must replace -ssh when both exist, got %q", got)
+	}
+	plain := filepath.Join(root, "projects", "plain")
+	if got := selectDeliveryCheckout(plain, domain.Project{LocalPath: plain}); got != plain {
+		t.Fatalf("matching checkout changed: %q", got)
+	}
+}
+
+func TestReworkDeliveryKeepsAcceptedTaskBranchTip(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, t.TempDir(), "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "auth.go"), []byte("package auth\n\nfunc Token() string { return \"base\" }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "auth.go")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+
+	taskID := "rework-tip"
+	branch, err := ensureTaskBranch(context.Background(), source, taskID, "master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted := filepath.Join(t.TempDir(), "accepted")
+	runGit(t, source, "worktree", "add", "-b", "agent/run-accepted", accepted, branch)
+	if err := os.WriteFile(filepath.Join(accepted, "auth.go"), []byte("package auth\n\nfunc Token() string { return \"accepted\" }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, accepted, "add", "auth.go")
+	if _, err := applyRunPatchToTaskBranch(context.Background(), source, accepted, "run-accepted", taskID, "master"); err != nil {
+		t.Fatalf("first accept: %v", err)
+	}
+	runGit(t, source, "worktree", "remove", "--force", accepted)
+	tip, err := gitOutput(context.Background(), source, "rev-parse", branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	other := filepath.Join(t.TempDir(), "other")
+	runGit(t, t.TempDir(), "clone", remote, other)
+	runGit(t, other, "config", "user.name", "Other")
+	runGit(t, other, "config", "user.email", "other@example.invalid")
+	if err := os.WriteFile(filepath.Join(other, "remote.txt"), []byte("remote\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, other, "add", "remote.txt")
+	runGit(t, other, "commit", "-m", "remote advance")
+	runGit(t, other, "push", "origin", "master")
+
+	kept, err := prepareDeliveryTaskBranch(context.Background(), source, taskID, "rework-run", "master", true)
+	if err != nil {
+		t.Fatalf("rework branch: %v", err)
+	}
+	if kept != branch {
+		t.Fatalf("branch = %q, want %q", kept, branch)
+	}
+	after, err := gitOutput(context.Background(), source, "rev-parse", branch)
+	if err != nil || after != tip {
+		t.Fatalf("rework reset task branch from %s to %s (%v)", tip, after, err)
+	}
+	runGit(t, source, "fetch", "origin", "master")
+	origin, err := gitOutput(context.Background(), source, "rev-parse", "origin/master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after == origin {
+		t.Fatal("rework delivery pointed task branch at origin/master and dropped the accepted commit")
+	}
+	body, err := gitOutput(context.Background(), source, "show", branch+":auth.go")
+	if err != nil || !strings.Contains(body, `return "accepted"`) {
+		t.Fatalf("accepted auth.go missing from rework base: %q %v", body, err)
+	}
+}
+
+func TestSecondDeliveryApplyOnOverlappingFilesDoesNotConflict(t *testing.T) {
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	source := filepath.Join(t.TempDir(), "source")
+	runGit(t, t.TempDir(), "init", "--bare", remote)
+	runGit(t, t.TempDir(), "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	writeAuthFiles(t, source, "base")
+	runGit(t, source, "add", "auth.go", "auth_test.go")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+
+	taskID := "overlap-task"
+	branch, err := ensureTaskBranch(context.Background(), source, taskID, "master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(t.TempDir(), "first")
+	runGit(t, source, "worktree", "add", "-b", "agent/run-first", first, branch)
+	writeAuthFiles(t, first, "accepted")
+	runGit(t, first, "add", "auth.go", "auth_test.go")
+	if _, err := applyRunPatchToTaskBranch(context.Background(), source, first, "run-first", taskID, "master"); err != nil {
+		t.Fatalf("first overlapping apply: %v", err)
+	}
+	runGit(t, source, "worktree", "remove", "--force", first)
+
+	kept, err := prepareDeliveryTaskBranch(context.Background(), source, taskID, "run-second", "master", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := filepath.Join(t.TempDir(), "second")
+	runGit(t, source, "worktree", "add", "-b", "agent/run-second", second, kept)
+	writeAuthFiles(t, second, "rework")
+	runGit(t, second, "add", "auth.go", "auth_test.go")
+	common, err := gitOutput(context.Background(), second, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(filepath.Dir(common)) != filepath.Clean(source) {
+		t.Fatalf("worktree common dir %s is not %s", common, source)
+	}
+	if _, err := applyRunPatchToTaskBranch(context.Background(), source, second, "run-second", taskID, "master"); err != nil {
+		t.Fatalf("second overlapping apply: %v", err)
+	}
+	for _, name := range []string{"auth.go", "auth_test.go"} {
+		body, showErr := gitOutput(context.Background(), source, "show", branch+":"+name)
+		if showErr != nil || !strings.Contains(body, `"rework"`) {
+			t.Fatalf("%s after second apply = %q (%v)", name, body, showErr)
+		}
+	}
+	runGit(t, source, "worktree", "remove", "--force", second)
+}
+
+func TestApplyUsesWorktreeGitDirNotSiblingSSHClone(t *testing.T) {
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	source := filepath.Join(root, "project")
+	sshClone := source + "-ssh"
+	runGit(t, root, "init", "--bare", remote)
+	runGit(t, root, "clone", remote, source)
+	runGit(t, source, "switch", "-c", "master")
+	runGit(t, source, "config", "user.name", "Test")
+	runGit(t, source, "config", "user.email", "test@example.invalid")
+	writeAuthFiles(t, source, "base")
+	runGit(t, source, "add", "auth.go", "auth_test.go")
+	runGit(t, source, "commit", "-m", "initial")
+	runGit(t, source, "push", "-u", "origin", "master")
+	runGit(t, root, "clone", remote, sshClone)
+	runGit(t, sshClone, "config", "user.name", "SSH")
+	runGit(t, sshClone, "config", "user.email", "ssh@example.invalid")
+
+	taskID := "ssh-split"
+	branch, err := ensureTaskBranch(context.Background(), source, taskID, "master")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(root, "first")
+	runGit(t, source, "worktree", "add", "-b", "agent/run-first", first, branch)
+	writeAuthFiles(t, first, "accepted")
+	runGit(t, first, "add", "auth.go", "auth_test.go")
+	if _, err := applyRunPatchToTaskBranch(context.Background(), sshClone, first, "run-first", taskID, "master"); err != nil {
+		t.Fatalf("first apply must follow the worktree git dir, not %s: %v", sshClone, err)
+	}
+	if _, err := gitOutput(context.Background(), sshClone, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+		t.Fatal("apply created the task branch on the sibling -ssh clone")
+	}
+	runGit(t, source, "worktree", "remove", "--force", first)
+
+	second := filepath.Join(root, "second")
+	runGit(t, source, "worktree", "add", "-b", "agent/run-second", second, branch)
+	writeAuthFiles(t, second, "rework")
+	runGit(t, second, "add", "auth.go", "auth_test.go")
+	rootDir, err := gitRepositoryRoot(context.Background(), second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Clean(rootDir) != filepath.Clean(source) {
+		t.Fatalf("worktree repository = %q, want %q", rootDir, source)
+	}
+	sshHeadBefore, err := gitOutput(context.Background(), sshClone, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applyRunPatchToTaskBranch(context.Background(), sshClone, second, "run-second", taskID, "master"); err != nil {
+		t.Fatalf("rework apply through sibling -ssh source: %v", err)
+	}
+	sshHeadAfter, err := gitOutput(context.Background(), sshClone, "rev-parse", "HEAD")
+	if err != nil || sshHeadAfter != sshHeadBefore {
+		t.Fatalf("sibling -ssh clone changed during apply: before %s after %s (%v)", sshHeadBefore, sshHeadAfter, err)
+	}
+	if _, err := gitOutput(context.Background(), sshClone, "show-ref", "--verify", "--quiet", "refs/heads/"+branch); err == nil {
+		t.Fatal("rework apply read the sibling -ssh clone")
+	}
+	body, err := gitOutput(context.Background(), source, "show", branch+":auth.go")
+	if err != nil || !strings.Contains(body, `"rework"`) {
+		t.Fatalf("accepted rework missing on the worktree repository: %q %v", body, err)
+	}
+	runGit(t, source, "worktree", "remove", "--force", second)
+}
+
+func writeAuthFiles(t *testing.T, dir, token string) {
+	t.Helper()
+	auth := "package auth\n\nfunc Token() string { return \"" + token + "\" }\n"
+	testFile := "package auth\n\nfunc TestToken(t *testing.T) {\n\tif Token() != \"" + token + "\" {\n\t\tt.Fatal(Token())\n\t}\n}\n"
+	if err := os.WriteFile(filepath.Join(dir, "auth.go"), []byte(auth), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auth_test.go"), []byte(testFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestApplyRunPatchBlocksDirtyCheckoutWithoutChangingIt(t *testing.T) {
 	source := t.TempDir()
 	runGit(t, source, "init", "-b", "master")
