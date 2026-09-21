@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -240,6 +241,66 @@ func TestReviewDevcontainerLoggedHashIsNotAnApprovalGate(t *testing.T) {
 	runtime := writeFakeDevcontainerRuntime(t)
 	if err := startDevContainer(context.Background(), runtime, config, "run-hash", approval); err == nil || fakeRuntimeInvoked(runtime) {
 		t.Fatal("unapproved initializeCommand reached host execution")
+	}
+}
+
+func TestShipyardDevcontainerMeetsPolicy(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("locate test file")
+	}
+	root := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	config, found, err := discoverDevContainer(root)
+	if err != nil || !found {
+		t.Fatalf("discover repo devcontainer: found=%v err=%v", found, err)
+	}
+	if err := reviewDevContainerPolicy(config, devContainerApproval{}); err != nil {
+		t.Fatalf("repo devcontainer was rejected: %v", err)
+	}
+	if config.definition.Service != "dev" {
+		t.Fatalf("service = %q", config.definition.Service)
+	}
+	if config.WorkspaceFolder != "/workspaces/Shipyard" {
+		t.Fatalf("workspace = %q", config.WorkspaceFolder)
+	}
+	if config.HasFeatures || len(config.FeatureIDs) != 0 {
+		t.Fatalf("features = %v", config.FeatureIDs)
+	}
+	if len(config.ComposeFiles) != 1 {
+		t.Fatalf("compose files = %v", config.ComposeFiles)
+	}
+	if jsonFieldPresent(config.definition.InitializeCommand) || config.definition.Privileged {
+		t.Fatal("host hooks or privileged mode are part of the recommended definition")
+	}
+	if jsonFieldPresent(config.definition.RunArgs) || jsonFieldPresent(config.definition.CapAdd) || jsonFieldPresent(config.definition.SecurityOpt) || jsonFieldPresent(config.definition.Mounts) {
+		t.Fatal("extra docker rights or mounts are part of the recommended definition")
+	}
+	raw, err := os.ReadFile(config.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"initializeCommand", "docker.sock", "\"privileged\""} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("devcontainer.json contains %q", forbidden)
+		}
+	}
+	compose, err := os.ReadFile(config.ComposeFiles[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(compose)
+	for _, forbidden := range []string{"docker.sock", "privileged", "cap_add", "security_opt", "network_mode", "ports:", "source: /", "- /:"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("compose contains %q", forbidden)
+		}
+	}
+	for _, required := range []string{"pg_isready", "postgres:16-alpine", "shipyard_dev_postgres", "dockerfile: Dockerfile"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("compose missing %q", required)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, ".devcontainer", "Dockerfile")); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -147,6 +147,12 @@ npm run test:e2e
 
 The end-to-end suite uses deterministic fixtures and does not require production credentials. Its reports and failure artifacts are ignored locally.
 
+### Dev Container
+
+A Dev Container in [`.devcontainer/`](.devcontainer/devcontainer.json) is the reproducible local toolchain: Go 1.26.8, Node.js 22, Playwright Chromium, and a PostgreSQL 16 Compose service. Open the folder in VS Code, Cursor, or Codex and choose **Reopen in Container**. The container installs modules and frontend dependencies on first start. It does not publish database or application ports, so a Shipyard process and PostgreSQL on the host keep their own settings. GitHub Actions stays on the existing runners.
+
+Editor tasks for `go test`, the frontend build, Playwright, and the embedded production browser check live in [`.vscode/tasks.json`](.vscode/tasks.json). Versions, commands, and the current agent-runner interaction are in [Dev Container](docs/devcontainer.md).
+
 ## Contributing
 
 1. Fork the repository and create a focused branch from `master`.
@@ -163,5 +169,6 @@ Please do not include secrets, private infrastructure details, generated build o
 - [Grokbot / xAI provider](docs/grokbot.md)
 - [Secret handling](docs/secrets.md)
 - [Frontend design system](docs/design-system.md)
+- [Dev Container](docs/devcontainer.md)
 - [Deployment examples](deploy/)
 - [GitHub repository and issue tracker](https://github.com/ralphschuler/Shipyard)
