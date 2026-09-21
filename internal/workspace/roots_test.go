@@ -3,6 +3,7 @@ package workspace
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -17,6 +18,9 @@ func TestRootsUseLegacyLocationsWithoutConfiguration(t *testing.T) {
 	if got := IntegrationsRoot(); got != "" {
 		t.Fatalf("IntegrationsRoot() = %q, want empty legacy fallback", got)
 	}
+	if got, want := RuntimeRoot(), legacyRuntimeRoot; got != want {
+		t.Fatalf("RuntimeRoot() = %q, want %q", got, want)
+	}
 }
 
 func TestRootsUseConfiguredWorkspaceRoot(t *testing.T) {
@@ -29,6 +33,9 @@ func TestRootsUseConfiguredWorkspaceRoot(t *testing.T) {
 	}
 	if got, want := IntegrationsRoot(), "/srv/codex/workspaces/shipyard/integrations"; got != want {
 		t.Fatalf("IntegrationsRoot() = %q, want %q", got, want)
+	}
+	if got, want := RuntimeRoot(), "/srv/codex/workspaces/shipyard/runtime"; got != want {
+		t.Fatalf("RuntimeRoot() = %q, want %q", got, want)
 	}
 }
 
@@ -45,11 +52,50 @@ func TestValidateConfiguredWorkspace(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, ".shipyard-migration.lock")); !os.IsNotExist(err) {
 		t.Fatalf("preflight created a migration lock file: %v", err)
 	}
-	for _, path := range []string{status.Projects, status.Runs, status.Integrations} {
+	for _, path := range []string{status.Projects, status.Runs, status.Integrations, status.Runtime} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("managed directory %q missing: %v", path, err)
 		}
 	}
+	info, err := os.Stat(status.Runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("runtime mode = %o, want 0700", info.Mode().Perm())
+	}
+}
+
+func TestRuntimeRootIsOutsidePrivateTmp(t *testing.T) {
+	t.Setenv("TASKBOARD_WORKSPACE_ROOT", "/srv/codex/workspaces/shipyard")
+	if got, want := RuntimeRoot(), "/srv/codex/workspaces/shipyard/runtime"; got != want {
+		t.Fatalf("RuntimeRoot() = %q, want %q", got, want)
+	}
+	if privateTmpPath(RuntimeRoot()) {
+		t.Fatalf("configured runtime root %s is inside PrivateTmp", RuntimeRoot())
+	}
+	t.Setenv("TASKBOARD_WORKSPACE_ROOT", "")
+	if got, want := RuntimeRoot(), legacyRuntimeRoot; got != want {
+		t.Fatalf("RuntimeRoot() = %q, want %q", got, want)
+	}
+	if privateTmpPath(RuntimeRoot()) {
+		t.Fatalf("legacy runtime root %s is inside PrivateTmp", RuntimeRoot())
+	}
+	for _, private := range []string{"/tmp", "/var/tmp"} {
+		if privateTmpPath(filepath.Join(private, "shipyard-agent-home-1")) != true {
+			t.Fatalf("expected %s to be treated as PrivateTmp", private)
+		}
+	}
+}
+
+func privateTmpPath(path string) bool {
+	clean := filepath.Clean(path)
+	for _, root := range []string{"/tmp", "/var/tmp"} {
+		if clean == root || strings.HasPrefix(clean, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestValidateRejectsRootPath(t *testing.T) {

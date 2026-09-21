@@ -16,6 +16,10 @@ import (
 const (
 	legacyProjectsRoot = "/home/agent/.taskboard-projects"
 	legacyRunsRoot     = "/home/agent/.taskboard-runs"
+	// legacyRuntimeRoot sits beside the legacy run directory, on the real host
+	// filesystem. It must not be /tmp or /var/tmp: the taskboard unit sets
+	// PrivateTmp=true, so those paths are invisible to rootless dockerd.
+	legacyRuntimeRoot = "/home/agent/.taskboard-runtime"
 )
 
 // Root returns an explicitly configured persistent workspace root. It is
@@ -30,6 +34,7 @@ type Status struct {
 	Projects     string
 	Runs         string
 	Integrations string
+	Runtime      string
 	Storage      string
 	Marker       bool
 	Migration    bool
@@ -59,7 +64,7 @@ func Validate() (Status, error) {
 		return invalidStatus(root, "TASKBOARD_WORKSPACE_ROOT muss ein absoluter Nicht-Root-Pfad sein")
 	}
 	root = filepath.Clean(root)
-	status := Status{Root: root, Projects: ProjectsRoot(), Runs: RunsRoot(), Integrations: IntegrationsRoot()}
+	status := Status{Root: root, Projects: ProjectsRoot(), Runs: RunsRoot(), Integrations: IntegrationsRoot(), Runtime: RuntimeRoot()}
 	if status.Integrations == "" {
 		status.Integrations = filepath.Join(root, "integrations")
 	}
@@ -111,6 +116,14 @@ func Validate() (Status, error) {
 	}
 	if err := os.MkdirAll(status.Integrations, 0o750); err != nil {
 		status.Error = "Integrations-Workspace ist nicht verfügbar: " + err.Error()
+		return status, errors.New(status.Error)
+	}
+	if err := os.MkdirAll(status.Runtime, 0o700); err != nil {
+		status.Error = "Runtime-Verzeichnis ist nicht verfügbar: " + err.Error()
+		return status, errors.New(status.Error)
+	}
+	if err := os.Chmod(status.Runtime, 0o700); err != nil {
+		status.Error = "Runtime-Verzeichnis ist nicht verfügbar: " + err.Error()
 		return status, errors.New(status.Error)
 	}
 	tmp, err := os.CreateTemp(root, ".shipyard-preflight-*")
@@ -186,4 +199,16 @@ func IntegrationsRoot() string {
 		return filepath.Join(filepath.Clean(root), "integrations")
 	}
 	return ""
+}
+
+// RuntimeRoot is the host directory for files the container runtime must be
+// able to see. Configured workspaces use <root>/runtime, next to projects and
+// runs. The legacy default is /home/agent/.taskboard-runtime. Callers must not
+// put container bind sources in /tmp or /var/tmp: systemd PrivateTmp=true
+// hides those directories from rootless dockerd.
+func RuntimeRoot() string {
+	if root := Root(); root != "" {
+		return filepath.Join(filepath.Clean(root), "runtime")
+	}
+	return legacyRuntimeRoot
 }

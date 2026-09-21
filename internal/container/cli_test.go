@@ -106,6 +106,59 @@ func TestProviderRejectsHostNetworkSocketAndRootMounts(t *testing.T) {
 	}
 }
 
+func TestCreateRecreatesDirectoryBindAfterImageBuild(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "agent-home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := filepath.Join(dir, "Dockerfile")
+	if err := os.WriteFile(dockerfile, []byte("FROM scratch\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBuildRaceRuntime(t, dir, home)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	provider := NewDocker()
+	_, err := provider.Create(context.Background(), Spec{
+		Image:      "shipyard/agent-fallback:1",
+		Dockerfile: dockerfile,
+		ContextDir: dir,
+		Network:    "none",
+		Mounts:     []Mount{{Source: home, Target: "/tmp/shipyard-home"}},
+		BeforeCreate: func() error {
+			return os.MkdirAll(home, 0o700)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(home)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("agent home was not recreated before create: %v", err)
+	}
+	if err := os.RemoveAll(home); err != nil {
+		t.Fatal(err)
+	}
+	_, err = provider.Create(context.Background(), Spec{
+		Image:      "shipyard/agent-fallback:1",
+		Dockerfile: dockerfile,
+		ContextDir: dir,
+		Network:    "none",
+		Mounts:     []Mount{{Source: home, Target: "/tmp/shipyard-home"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "bind source path does not exist") {
+		t.Fatalf("missing bind source was accepted: %v", err)
+	}
+	log, err := os.ReadFile(filepath.Join(dir, "calls.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(log)
+	if strings.Count(text, "create\n") != 1 {
+		t.Fatalf("docker create ran %d times, want 1 (the recreated home):\n%s", strings.Count(text, "create\n"), text)
+	}
+}
+
 func TestFallbackDockerfileMatchesDeployCopy(t *testing.T) {
 	deploy := filepath.Join("..", "..", "deploy", "agent-container", "Dockerfile")
 	body, err := os.ReadFile(deploy)
@@ -140,6 +193,34 @@ esac
 exit 0
 `
 	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeBuildRaceRuntime(t *testing.T, dir, home string) {
+	t.Helper()
+	logPath := filepath.Join(dir, "calls.log")
+	script := fmt.Sprintf(`#!/bin/sh
+set -eu
+{
+  printf '%%s\n' "$@"
+  echo '---'
+} >> %q
+case "${1:-}" in
+  version) echo fake; exit 0 ;;
+  build) rm -rf %q; exit 0 ;;
+  create)
+    if [ ! -d %q ]; then
+      echo "bind source path does not exist: %s" >&2
+      exit 1
+    fi
+    echo cid-test
+    exit 0
+    ;;
+esac
+exit 0
+`, logPath, home, home, home)
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 }
