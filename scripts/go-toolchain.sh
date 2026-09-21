@@ -66,16 +66,19 @@ shipyard_selected_go_version() {
 
 shipyard_artifact_go_version() {
   local binary="$1"
+  local metadata
   if [[ ! -e "$binary" ]]; then
     printf 'artifact %s does not exist\n' "$binary" >&2
     return 1
   fi
-  go version -m "$binary" | awk 'NR==1 {
+  # Capture first so pipefail cannot turn an early awk/grep close into SIGPIPE 141.
+  metadata="$(go version -m "$binary")"
+  awk 'NR==1 {
     for (i = 1; i <= NF; i++) {
       if ($i ~ /^go[0-9]/) { print $i; exit }
     }
     exit 1
-  }'
+  }' <<<"$metadata"
 }
 
 shipyard_require_patched_go() {
