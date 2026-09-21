@@ -67,3 +67,66 @@ func TestGrokbotResponsesUsesBearerSecretWithoutLoggingIt(t *testing.T) {
 		t.Fatalf("result = %q, usage = %#v, err = %v", result, usage, err)
 	}
 }
+
+func TestGrokbotResponsesRedactsSecretOnAPIError(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"message":"invalid key secret-value"}}`)
+	}))
+	defer server.Close()
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	defer func() { http.DefaultTransport = previousTransport }()
+
+	_, _, err := runGrokbotResponses(context.Background(), domain.ProviderSetting{
+		Provider:  "grokbot",
+		Model:     "grok-4",
+		SecretEnv: "XAI_API_KEY",
+		BaseURL:   server.URL,
+	}, "secret-value", "hello")
+	if err == nil {
+		t.Fatal("expected API error")
+	}
+	if strings.Contains(err.Error(), "secret-value") {
+		t.Fatalf("secret leaked in error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "[redacted]") || !strings.Contains(err.Error(), "Grokbot-Anfrage fehlgeschlagen") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestValidateGrokbotOptionsRejectsInvalidJSON(t *testing.T) {
+	if err := validateGrokbotOptions(`{"models":["grok-4"],"efforts":["low"]}`); err != nil {
+		t.Fatalf("valid options rejected: %v", err)
+	}
+	if err := validateGrokbotOptions(""); err != nil {
+		t.Fatalf("empty options rejected: %v", err)
+	}
+	if err := validateGrokbotOptions("{"); err == nil {
+		t.Fatal("invalid JSON was accepted")
+	}
+}
+
+func TestUsesHTTPResponsesAdapterForGrokbotWithoutCommand(t *testing.T) {
+	httpProvider := domain.ProviderSetting{Provider: "grokbot", Command: ""}
+	if !usesHTTPResponsesAdapter(httpProvider) {
+		t.Fatal("empty grokbot command must use the HTTP adapter")
+	}
+	if usesHTTPResponsesAdapter(domain.ProviderSetting{Provider: "grokbot", Command: "grok --always-approve"}) {
+		t.Fatal("configured grokbot command must use the CLI adapter")
+	}
+	if !usesHTTPResponsesAdapter(domain.ProviderSetting{Provider: "openai", Command: "ignored"}) {
+		t.Fatal("openai must stay on the HTTP adapter")
+	}
+	if usesHTTPResponsesAdapter(domain.ProviderSetting{Provider: "codex", Command: "codex exec"}) {
+		t.Fatal("codex must stay on the CLI adapter")
+	}
+}
+
+func TestGrokbotCapabilitiesRecordsDiscoveryTime(t *testing.T) {
+	got := GrokbotCapabilities(`{"models":["grok-4"],"efforts":["medium"]}`)
+	if got.At.IsZero() || !got.Confirmed() || !got.Supports("grok-4", "medium") {
+		t.Fatalf("capabilities = %#v", got)
+	}
+}

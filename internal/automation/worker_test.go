@@ -2004,6 +2004,28 @@ func TestCommandForUnsupportedOpenAIIsExplicit(t *testing.T) {
 	}
 }
 
+func TestCommandForGrokbotHTTPRejectsCLIInvocation(t *testing.T) {
+	_, _, err := commandForProvider(domain.ProviderSetting{Provider: "grokbot", Model: "grok-4"})
+	if err == nil {
+		t.Fatal("empty grokbot command must not invent a CLI adapter")
+	}
+}
+
+func TestCommandForGrokbotCLIUsesConfiguredExecutableAndModel(t *testing.T) {
+	command, args, err := commandForProvider(domain.ProviderSetting{Provider: "grokbot", Command: "grok --always-approve", Model: "grok-4"})
+	if err != nil || command != "grok" || !reflect.DeepEqual(args, []string{"--always-approve", "--model", "grok-4"}) {
+		t.Fatalf("unexpected grokbot CLI adapter: %q %#v %v", command, args, err)
+	}
+	command, args, stdin, err := cliInvocation(domain.ProviderSetting{Provider: "grokbot", Command: "grok --always-approve", Model: "grok-4"}, "implement the task")
+	if err != nil || command != "grok" || stdin != "" || !reflect.DeepEqual(args, []string{"--always-approve", "--model", "grok-4", "-p", "implement the task"}) {
+		t.Fatalf("unexpected grokbot invocation: %q %#v %q %v", command, args, stdin, err)
+	}
+	command, args, stdin, err = cliInvocationForAgent(domain.ProviderSetting{Provider: "grokbot", Command: "grok --always-approve"}, domain.Agent{Model: "grok-4", ReasoningEffort: "high"}, "implement the task")
+	if err != nil || command != "grok" || stdin != "" || !reflect.DeepEqual(args, []string{"--always-approve", "--model", "grok-4", "--effort", "high", "-p", "implement the task"}) {
+		t.Fatalf("unexpected grokbot agent invocation: %q %#v %q %v", command, args, stdin, err)
+	}
+}
+
 func TestValidateProviderOptionsFailsBeforeRunForInvalidCodexSettings(t *testing.T) {
 	if err := ValidateProviderOptions("codex", `{"reasoning_effort":"turbo"}`); err == nil {
 		t.Fatal("expected invalid Codex options to be rejected")
@@ -2013,6 +2035,12 @@ func TestValidateProviderOptionsFailsBeforeRunForInvalidCodexSettings(t *testing
 	}
 	if err := ValidateProviderOptions("claude", `{"future_option":true}`); err != nil {
 		t.Fatalf("extensible provider options rejected: %v", err)
+	}
+	if err := ValidateProviderOptions("grokbot", `{"models":["grok-4"],"efforts":["low","medium"]}`); err != nil {
+		t.Fatalf("valid grokbot options rejected: %v", err)
+	}
+	if err := ValidateProviderOptions("grokbot", `{`); err == nil {
+		t.Fatal("invalid grokbot options were accepted")
 	}
 }
 

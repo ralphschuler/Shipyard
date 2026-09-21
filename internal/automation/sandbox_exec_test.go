@@ -286,7 +286,7 @@ func TestModelAPIAllowlistIncludesProviderBaseURLAndLocalMCP(t *testing.T) {
 	t.Setenv("TASKBOARD_ADDR", "127.0.0.1:8080")
 	items := modelAPIAllowlist(domain.ProviderSetting{Provider: "codex", BaseURL: "https://gateway.example:8443/v1"})
 	set := allowlistSet(items)
-	for _, want := range []string{"gateway.example:8443", "api.openai.com:443", "127.0.0.1:8080"} {
+	for _, want := range []string{"gateway.example:8443", "api.openai.com:443", "api.x.ai:443", "127.0.0.1:8080"} {
 		if _, ok := set[want]; !ok {
 			t.Fatalf("allowlist missing %s: %#v", want, set)
 		}

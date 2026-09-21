@@ -68,6 +68,9 @@ func TestAgentsTemplatePreservesSandboxProfileActiveState(t *testing.T) {
 	if !strings.Contains(html, `name="active" value="true"{{if .Active}} checked{{end}}`) {
 		t.Fatal("sandbox profile active checkbox must reflect persisted state")
 	}
+	if !strings.Contains(html, `name="adapter"`) || !strings.Contains(html, `{{range $.Providers}}`) {
+		t.Fatal("agents template must let operators pick any registered provider")
+	}
 }
 
 func TestProviderTemplateRequiresAgentContextForConnectionTests(t *testing.T) {

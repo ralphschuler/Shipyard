@@ -1064,7 +1064,7 @@ function Agents() {
               </Badge>
             </div>
             <p className="mt-1 text-sm text-muted-foreground">
-              {agent.Description || text("Profil ohne festen Workspace", "Profile without a fixed workspace")}
+              {[agent.Adapter, agent.Description || text("Profil ohne festen Workspace", "Profile without a fixed workspace")].filter(Boolean).join(" · ")}
             </p>
           </a>
         )) : <EmptyState title={text("Noch kein Agent", "No agents yet")} description={text("Lege einen Agenten mit Arbeitsanweisung und erlaubten Skills an.", "Create an agent with instructions and permitted skills.")} actionHref="#/agents/new" actionLabel={text("Agent anlegen", "Create agent")} />}
@@ -1110,6 +1110,7 @@ function AgentDetail({ id }: { id: string }) {
   const capability = capabilities.find((item: any) => item.provider === (form.Adapter || "codex"));
   const models = capability?.models || [];
   const efforts = capability?.efforts || [];
+  const providerNames = Array.from(new Set([form.Adapter || "codex", ...capabilities.map((item: any) => item.provider).filter(Boolean)]));
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
     const body = new FormData();
@@ -1120,6 +1121,7 @@ function AgentDetail({ id }: { id: string }) {
     body.set("prompt_suffix", form.PromptSuffix || "");
     body.set("max_parallel_runs", String(form.MaxParallelRuns || 1));
     body.set("enabled", String(form.Enabled));
+    body.set("adapter", form.Adapter || "codex");
     body.set("model", form.Model || "");
     body.set("reasoning_effort", form.ReasoningEffort || "");
     body.set("escalation_policy", policy);
@@ -1191,8 +1193,14 @@ function AgentDetail({ id }: { id: string }) {
               placeholder={text("Wird vor der Arbeitsanweisung und dem Task-Kontext gesetzt.", "Placed before the instructions and task context.")}
             />
           </label>
+          <label className="grid gap-2 text-sm">{text("Provider", "Provider")}
+            <select required aria-label={text("Provider", "Provider")} className="h-9 rounded-md border bg-background px-2" value={form.Adapter || "codex"} onChange={(e) => setForm({ ...form, Adapter: e.target.value, Model: "", ReasoningEffort: "" })}>
+              {providerNames.map((provider: string) => <option key={provider} value={provider}>{provider}</option>)}
+            </select>
+            <span className="text-xs text-muted-foreground">{text("Wählt den technischen Adapter. Modell und Effort kommen aus dessen Discovery.", "Selects the technical adapter. Model and effort come from its discovery.")}</span>
+          </label>
           <label className="grid gap-2 text-sm">{text("Modell", "Model")}
-            <select required className="h-9 rounded-md border bg-background px-2" value={form.Model || ""} onChange={(e) => setForm({ ...form, Model: e.target.value })}>
+            <select required aria-label={text("Agent-Modell", "Agent model")} className="h-9 rounded-md border bg-background px-2" value={form.Model || ""} onChange={(e) => setForm({ ...form, Model: e.target.value })}>
               <option value="">{text("Modell aus Discovery wählen", "Choose a discovered model")}</option>
               {form.Model && !models.includes(form.Model) && <option value={form.Model}>{form.Model} (gespeichert)</option>}
               {models.map((model: string) => <option key={model} value={model}>{model}</option>)}
@@ -1298,13 +1306,15 @@ function AgentForm() {
   const [message, setMessage] = useState("");
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
+  const [adapter, setAdapter] = useState("codex");
   const [sandboxProfile, setSandboxProfile] = useState("strict");
   // An empty object deliberately selects Shipyard's tested default escalation
   // sequence. A stages:[] value would look configured while being invalid as
   // soon as the task is returned from review.
   const [policy, setPolicy] = useState("{}");
   if (!skills || !sandboxProfiles || !capabilities) return <Loading />;
-  const capability = capabilities.find((item: any) => item.provider === "codex");
+  const capability = capabilities.find((item: any) => item.provider === adapter);
+  const providerNames = Array.from(new Set([adapter, ...capabilities.map((item: any) => item.provider).filter(Boolean)]));
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     const form = new FormData();
@@ -1314,6 +1324,7 @@ function AgentForm() {
     form.set("prompt", prompt);
     form.set("prompt_suffix", suffix);
     form.set("max_parallel_runs", "1");
+    form.set("adapter", adapter);
     form.set("model", model);
     form.set("reasoning_effort", effort);
     form.set("escalation_policy", policy);
@@ -1370,8 +1381,13 @@ function AgentForm() {
               placeholder={text("Fester Kontext vor der Arbeitsanweisung", "Fixed context before the instructions")}
             />
           </label>
+          <label className="grid gap-2 text-sm">{text("Provider", "Provider")}
+            <select required aria-label={text("Provider", "Provider")} className="h-9 rounded-md border bg-background px-2" value={adapter} onChange={(e) => { setAdapter(e.target.value); setModel(""); setEffort(""); }}>
+              {providerNames.map((provider: string) => <option key={provider} value={provider}>{provider}</option>)}
+            </select>
+          </label>
           <label className="grid gap-2 text-sm">{text("Modell", "Model")}
-            <select required className="h-9 rounded-md border bg-background px-2" value={model} onChange={(e) => setModel(e.target.value)}>
+            <select required aria-label={text("Agent-Modell", "Agent model")} className="h-9 rounded-md border bg-background px-2" value={model} onChange={(e) => setModel(e.target.value)}>
               <option value="">{text("Modell aus Discovery wählen", "Choose a discovered model")}</option>
               {(capability?.models || []).map((value: string) => <option key={value} value={value}>{value}</option>)}
             </select>
@@ -1746,17 +1762,32 @@ function Providers() {
   const [drafts, setDrafts] = useState<Record<string, Record<string, unknown>>>({});
   if (error) return <Failure />;
   if (!data) return <Loading />;
-  const providers = ["codex", "openai", "claude"].map(
-    (name) =>
-      data.find((provider) => provider.Provider === name) || {
+  const providers = (() => {
+    const known = ["codex", "openai", "claude", "grokbot"];
+    const extra = data.map((provider) => provider.Provider).filter((name) => name && !known.includes(name));
+    return [...known, ...extra].map((name) => {
+      const found = data.find((provider) => provider.Provider === name);
+      if (found) return found;
+      if (name === "grokbot") {
+        return {
+          Provider: "grokbot",
+          Command: "",
+          SecretEnv: "XAI_API_KEY",
+          BaseURL: "https://api.x.ai/v1",
+          Options: '{"models":["grok-4"],"efforts":["low","medium","high"]}',
+          Enabled: false,
+        };
+      }
+      return {
         Provider: name,
         Command: name === "codex" ? "codex" : "",
         SecretEnv: "",
         BaseURL: "",
         Options: "{}",
         Enabled: false,
-      },
-  );
+      };
+    });
+  })();
   const save = async (provider: any) => {
     const form = new FormData();
     form.set("command", provider.Command);
@@ -1847,6 +1878,12 @@ function Providers() {
                 />{" "}
                 Aktiv
               </label>
+              {provider.Provider === "grokbot" && (
+                <p className="text-xs text-muted-foreground">
+                  HTTP-Adapter mit Base URL <code>https://api.x.ai/v1</code> und Secret <code>XAI_API_KEY</code>.
+                  Optionales CLI-Kommando: <code>grok --always-approve</code>.
+                </p>
+              )}
               <div className="flex flex-wrap gap-2">
                 <Button className="w-fit" onClick={() => save(provider)}>
                   Provider speichern
