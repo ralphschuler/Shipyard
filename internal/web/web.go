@@ -3241,7 +3241,12 @@ func (a *App) cancelRun(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/runs/"+r.PathValue("id"), 303)
 }
 func (a *App) applyRun(w http.ResponseWriter, r *http.Request) {
-	if e := a.worker.Apply(r.Context(), r.PathValue("id")); e != nil {
+	user, ok := currentUser(r.Context())
+	if !ok {
+		http.Error(w, "Authentifizierung erforderlich", http.StatusUnauthorized)
+		return
+	}
+	if e := a.worker.Apply(r.Context(), r.PathValue("id"), user.ID); e != nil {
 		http.Error(w, e.Error(), 409)
 		return
 	}

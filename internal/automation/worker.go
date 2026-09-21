@@ -3179,7 +3179,7 @@ func (w *Worker) Cancel(ctx context.Context, runID string) error {
 	}
 	return w.Store.CreateNotification(ctx, run.TaskID, run.ID, "cancelled", "Agent-Run abgebrochen")
 }
-func (w *Worker) Apply(ctx context.Context, runID string) error {
+func (w *Worker) Apply(ctx context.Context, runID string, actors ...string) error {
 	run, err := w.Store.Run(ctx, runID)
 	if err != nil {
 		return err
@@ -3193,6 +3193,20 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	}
 	if delivery.AppliedAt != nil {
 		return errors.New("Änderungen dieses Runs wurden bereits übernommen")
+	}
+	task, err := w.Store.GetTask(ctx, run.TaskID)
+	if err != nil {
+		return err
+	}
+	if !isQAColumn(task) {
+		return errors.New("Änderungen dürfen nur aus der Human-QA-Spalte übernommen werden")
+	}
+	approved, err := w.Store.HumanQAApproved(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if !approved {
+		return errors.New("positive Human-QA-Freigabe fehlt")
 	}
 	source, err := w.Store.RunSource(ctx, runID)
 	if err != nil || source == "" {
@@ -3333,7 +3347,11 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	if _, err := w.Store.EnqueueIntegration(ctx, domain.IntegrationJob{RepositoryPath: source, RunID: runID, TaskID: run.TaskID, Branch: taskBranch, DefaultBranch: defaultBranch, BaseSHA: strings.TrimSpace(baseSHA), HeadSHA: strings.TrimSpace(commitSHA)}); err != nil {
 		return fmt.Errorf("Integrationswarteschlange konnte nicht angelegt werden: %w", err)
 	}
-	applied, err := w.Store.MarkRunApplied(ctx, runID, commitSHA)
+	actor := ""
+	if len(actors) > 0 {
+		actor = strings.TrimSpace(actors[0])
+	}
+	applied, err := w.Store.MarkRunAppliedByHumanQA(ctx, runID, commitSHA, actor)
 	if err != nil {
 		return err
 	}
@@ -3350,34 +3368,10 @@ func (w *Worker) Apply(ctx context.Context, runID string) error {
 	} else {
 		_ = w.Store.AddRunLog(ctx, runID, "info", "Isolierter Worktree nach Übernahme bereinigt")
 	}
-	if run.RuleID == "" {
-		_, err = w.Store.MoveTaskToNamedColumn(ctx, run.TaskID, "Review", "automation")
-		if err != nil {
-			return err
-		}
-		_ = w.Store.AddComment(ctx, run.TaskID, "Taskboard", "Änderungen übernommen; Task wurde zur Review weitergegeben.")
-		return nil
-	}
-	if run.BatchID != "" {
-		ready, readyErr := w.Store.ConsumeBatchDelivery(ctx, run.BatchID)
-		if readyErr != nil {
-			return readyErr
-		}
-		if !ready {
-			return nil // Other repository targets still await delivery approval.
-		}
-	}
-	rule, err := w.Store.GetRule(ctx, run.RuleID)
-	if err != nil {
+	if _, err = w.Store.MoveTaskToNamedColumn(ctx, run.TaskID, "Done", "human_qa"); err != nil {
 		return err
 	}
-	if rule.SuccessColumnID == "" {
-		return nil
-	}
-	if _, err = w.Store.MoveTask(ctx, run.TaskID, rule.SuccessColumnID, "automation"); err != nil {
-		return err
-	}
-	_ = w.Store.AddComment(ctx, run.TaskID, "Taskboard", "Änderungen übernommen; Erfolgs-Transition wurde ausgeführt.")
+	_ = w.Store.AddComment(ctx, run.TaskID, "Taskboard", "Human QA hat die Änderungen übernommen; Task wurde abgeschlossen.")
 	return nil
 }
 
@@ -4596,7 +4590,13 @@ func (w *Worker) finish(ctx context.Context, run domain.AgentRun, status string)
 		// complete, but its automation must not consume the success transition
 		// before the person has answered and explicitly chosen the next step.
 		interactions, interactionErr := w.Store.OpenInteractions(ctx, run.TaskID)
-		if interactionErr == nil && len(interactions) > 0 {
+		awaitingInteraction := interactionErr == nil && len(interactions) > 0
+		if awaitingInteraction && run.RuleID != "" {
+			if rule, ruleErr := w.Store.GetRule(ctx, run.RuleID); ruleErr == nil && rule.RequireDeliveryApproval {
+				awaitingInteraction = false
+			}
+		}
+		if awaitingInteraction {
 			if run.BatchID != "" {
 				_, _ = w.Store.RefreshRunBatch(ctx, run.BatchID)
 			}
@@ -4624,7 +4624,11 @@ func (w *Worker) finish(ctx context.Context, run domain.AgentRun, status string)
 				return ruleErr
 			}
 			if rule.RequireDeliveryApproval {
-				_ = w.Store.AddComment(ctx, run.TaskID, "Taskboard", "Alle Agent-Runs waren erfolgreich. Übernimm die Änderungen in den Run-Details, bevor die Erfolgs-Transition ausgeführt wird.")
+				_, moveErr := w.Store.MoveTaskToNamedColumn(ctx, run.TaskID, "Review", "automation")
+				if moveErr != nil {
+					return moveErr
+				}
+				_ = w.Store.AddComment(ctx, run.TaskID, "Taskboard", "Delivery erfolgreich; Task wurde ohne Übernahme zur Review weitergegeben.")
 				return nil
 			}
 		}
@@ -4648,7 +4652,11 @@ func (w *Worker) finish(ctx context.Context, run domain.AgentRun, status string)
 		target = rule.FailureColumnID
 	}
 	if status == "succeeded" && rule.RequireDeliveryApproval {
-		_ = w.Store.AddComment(ctx, run.TaskID, "Taskboard", "Agent-Run erfolgreich. Übernimm die Änderungen in den Run-Details; danach wird die Erfolgs-Transition ausgeführt.")
+		_, moveErr := w.Store.MoveTaskToNamedColumn(ctx, run.TaskID, "Review", "automation")
+		if moveErr != nil {
+			return moveErr
+		}
+		_ = w.Store.AddComment(ctx, run.TaskID, "Taskboard", "Delivery erfolgreich; Task wurde ohne Übernahme zur Review weitergegeben.")
 		return nil
 	}
 	if target == "" {

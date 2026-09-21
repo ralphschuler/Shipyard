@@ -44,6 +44,21 @@ func TestCodexManagedWorktreeTrustFlagPrecedesStdinPrompt(t *testing.T) {
 	}
 }
 
+func TestCodexContainerIsolationDisablesOnlyInnerSandbox(t *testing.T) {
+	args := []string{"exec", "--approve-for-me", "--model", "gpt-5.6-luna", "-"}
+	want := []string{"exec", "--model", "gpt-5.6-luna", "--dangerously-bypass-approvals-and-sandbox", "-"}
+	if got := withCodexContainerIsolation(args); !reflect.DeepEqual(got, want) {
+		t.Fatalf("container args = %#v, want %#v", got, want)
+	}
+	if got := withCodexContainerIsolation(want); !reflect.DeepEqual(got, want) {
+		t.Fatalf("container isolation must be idempotent, got %#v", got)
+	}
+	unchanged := []string{"--version"}
+	if got := withCodexContainerIsolation(unchanged); !reflect.DeepEqual(got, unchanged) {
+		t.Fatalf("non-exec args = %#v, want %#v", got, unchanged)
+	}
+}
+
 func (p *recordingProvider) Name() string { return p.name }
 func (p *recordingProvider) Available(context.Context) error {
 	return nil
@@ -521,7 +536,7 @@ func TestContainerExecUsesImageCodexCLI(t *testing.T) {
 			t.Fatalf("missing auth dir was mounted: %s", source)
 		}
 	}
-	want := []string{"python3", "/tmp/shipyard-model-api-relay.py", "/usr/local/bin/codex", "exec", "--skip-git-repo-check"}
+	want := []string{"python3", "/tmp/shipyard-model-api-relay.py", "/usr/local/bin/codex", "exec", "--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"}
 	if !reflect.DeepEqual(provider.execs[0].Command, want) {
 		t.Fatalf("exec = %#v", provider.execs[0].Command)
 	}
@@ -565,6 +580,27 @@ func TestPrepareContainerMountAccessForRootlessAgent(t *testing.T) {
 		t.Fatal(err)
 	} else if info.Mode().Perm() != 0o666 {
 		t.Fatalf("plain file mode = %o", info.Mode().Perm())
+	}
+}
+
+func TestPrepareContainerMountAccessLeavesReadonlyDeliverySnapshotUntouched(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "container-owned.go")
+	if err := os.WriteFile(file, []byte("package example\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(file, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareContainerMountAccess(root, false); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("readonly snapshot file mode = %o, want 600", info.Mode().Perm())
 	}
 }
 

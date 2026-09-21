@@ -339,6 +339,20 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 	session.closeFns = append(session.closeFns, func() error { return os.Remove(envFile) })
 	execCommand := append([]string{}, cli.Argv...)
 	agentArgs := append([]string{}, req.Args...)
+	// A CLI run is already isolated by the per-run container: it sees only the
+	// dedicated worktree, the staged provider login and explicitly assigned
+	// secrets. Linux Codex uses bubblewrap for its own sandbox, which cannot
+	// create user namespaces in our rootless container runtime. Do not start a
+	// second, non-functional sandbox layer inside that boundary. This is scoped
+	// to the in-image Codex executable; host and non-container invocations keep
+	// their normal sandbox policy.
+	//
+	// The provider configuration cannot inject arbitrary Codex CLI flags, and
+	// the outer container retains the selected network, mounts and write mode.
+	// See https://learn.chatgpt.com/docs/agent-approvals-security#run-codex-in-dev-containers
+	if req.Provider.Provider == "codex" && filepath.Base(cli.Argv[0]) == "codex" && len(agentArgs) > 0 && agentArgs[0] == "exec" {
+		agentArgs = withCodexContainerIsolation(agentArgs)
+	}
 	// The worktree has already been created and validated by Shipyard before
 	// this container is started. In a rootless container Git reports the bind
 	// source as owned by a remapped UID, which makes Codex reject it as an
@@ -397,6 +411,14 @@ func prepareContainerMountAccess(path string, writable bool) error {
 	if !info.IsDir() {
 		return fmt.Errorf("%s ist kein Verzeichnis", root)
 	}
+	// A review mounts the finished Delivery worktree read-only. That worktree
+	// was made container-readable when Delivery started; changing it again is
+	// both unnecessary and unsafe. In particular, files written by a rootless
+	// container are owned by a subordinate host UID and NFS correctly rejects a
+	// later chmod by the Shipyard service. Preserve the immutable snapshot.
+	if !writable {
+		return nil
+	}
 	return filepath.WalkDir(root, func(current string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -405,11 +427,7 @@ func prepareContainerMountAccess(path string, writable bool) error {
 			return nil
 		}
 		if entry.IsDir() {
-			mode := os.FileMode(0o755)
-			if writable {
-				mode = 0o777
-			}
-			return os.Chmod(current, mode)
+			return os.Chmod(current, 0o777)
 		}
 		if !entry.Type().IsRegular() {
 			return nil
@@ -418,10 +436,7 @@ func prepareContainerMountAccess(path string, writable bool) error {
 		if err != nil {
 			return err
 		}
-		mode := os.FileMode(0o644)
-		if writable {
-			mode = 0o666
-		}
+		mode := os.FileMode(0o666)
 		if fileInfo.Mode().Perm()&0o111 != 0 {
 			mode |= 0o111
 		}
@@ -447,6 +462,36 @@ func withCodexManagedWorktreeTrust(args []string) []string {
 		}
 	}
 	return append(args, "--skip-git-repo-check")
+}
+
+// withCodexContainerIsolation replaces the local auto-sandbox preset only
+// when Codex runs in Shipyard's already-isolated per-run container. It keeps
+// arguments deterministic and inserts the switch before the stdin prompt.
+func withCodexContainerIsolation(args []string) []string {
+	if len(args) == 0 || args[0] != "exec" {
+		return args
+	}
+	for _, arg := range args {
+		if arg == "--dangerously-bypass-approvals-and-sandbox" || arg == "--yolo" {
+			return args
+		}
+	}
+	result := make([]string, 0, len(args)+1)
+	for _, arg := range args {
+		// --approve-for-me selects Codex's workspace-write sandbox and is
+		// mutually exclusive with the no-inner-sandbox mode.
+		if arg == "--approve-for-me" {
+			continue
+		}
+		if arg == "-" {
+			result = append(result, "--dangerously-bypass-approvals-and-sandbox")
+		}
+		result = append(result, arg)
+	}
+	if len(result) == 0 || result[len(result)-1] != "-" {
+		result = append(result, "--dangerously-bypass-approvals-and-sandbox")
+	}
+	return result
 }
 
 // agentContainerBindRoot is the directory both this process and the container
