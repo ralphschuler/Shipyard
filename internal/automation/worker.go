@@ -47,6 +47,12 @@ type Worker struct {
 	// executeRun is injectable only for orchestration tests. Production workers
 	// leave it nil and use the real provider execution path below.
 	executeRun func(context.Context, domain.AgentRun)
+
+	// tmuxServer and runLogsDir override the production tmux socket and run-log
+	// directory. Tests use isolated values so overlapping-run secret checks
+	// cannot touch the live taskboard server or host log directory.
+	tmuxServer string
+	runLogsDir string
 }
 
 func (w *Worker) memoryScope(ctx context.Context, run domain.AgentRun) (memory.Scope, error) {
@@ -131,8 +137,30 @@ const integrationQueueInterval = 5 * time.Second
 const defaultMaxIntegrationAttempts = 12
 
 const tmuxSocket = "taskboard"
+const defaultRunLogsDir = "/home/agent/.taskboard-run-logs"
 
 const repositoryApplyLockName = "taskboard-apply.lock"
+
+func (w *Worker) tmuxServerName() string {
+	if w != nil && strings.TrimSpace(w.tmuxServer) != "" {
+		return strings.TrimSpace(w.tmuxServer)
+	}
+	return tmuxSocket
+}
+
+func (w *Worker) agentRunLogsDir() string {
+	if w != nil && strings.TrimSpace(w.runLogsDir) != "" {
+		return strings.TrimSpace(w.runLogsDir)
+	}
+	return defaultRunLogsDir
+}
+
+func (w *Worker) addRunLog(ctx context.Context, runID, level, message string) {
+	if w == nil || w.Store == nil {
+		return
+	}
+	_ = w.Store.AddRunLog(ctx, runID, level, message)
+}
 
 var interactionFence = regexp.MustCompile("(?s)```taskboard-interaction\\s*(\\{.*?\\})\\s*```")
 var taskCommentFence = regexp.MustCompile("(?s)```taskboard-comment\\s*(.*?)\\s*```")
@@ -1958,11 +1986,98 @@ func applyRunPatch(ctx context.Context, source, worktree, runID string, startSHA
 	return commitSHA, nil
 }
 
+// nulTerminated encodes records the way the tmux runner reads them: each
+// value followed by a NUL. Secret values stay in these files and are never
+// copied into process arguments or tmux diagnostic strings.
+func nulTerminated(values []string) []byte {
+	buf := make([]byte, 0)
+	for _, value := range values {
+		buf = append(buf, value...)
+		buf = append(buf, 0)
+	}
+	return buf
+}
+
+// tmuxClientEnvironment is the environment of tmux client processes only.
+// The first client to a socket becomes the long-lived server and keeps this
+// environment globally. It must therefore contain no run-assigned secrets.
+func tmuxClientEnvironment() []string {
+	keys := []string{"HOME", "PATH", "LANG", "LC_ALL", "USER", "LOGNAME", "SHELL", "TMPDIR"}
+	env := make([]string, 0, len(keys)+1)
+	for _, key := range keys {
+		if value, ok := os.LookupEnv(key); ok && value != "" {
+			env = append(env, key+"="+value)
+		}
+	}
+	return append(env, "TERM=dumb")
+}
+
+func tmuxRunnerScript(bashPath string) string {
+	if strings.TrimSpace(bashPath) == "" {
+		bashPath = "/bin/bash"
+	}
+	quoted := shellQuote(bashPath)
+	return `#!/usr/bin/env bash
+set +e
+if [[ "${1:-}" != "--cleaned" ]]; then
+  exec -c ` + quoted + ` "$0" --cleaned "$@"
+fi
+shift
+sleep 0.1
+args_path=$1
+exit_path=$2
+stdin_path=$3
+output_path=$4
+env_path=$5
+while IFS= read -r -d '' assignment || [[ -n "$assignment" ]]; do
+  [[ -z "$assignment" ]] && continue
+  export -- "$assignment"
+done < "$env_path"
+rm -f -- "$env_path"
+mapfile -d '' -t argv < "$args_path"
+if [[ -n "$stdin_path" && -n "$output_path" ]]; then
+  "${argv[@]}" < "$stdin_path" > "$output_path"
+elif [[ -n "$stdin_path" ]]; then
+  "${argv[@]}" < "$stdin_path"
+else
+  "${argv[@]}"
+fi
+code=$?
+printf '%s' "$code" > "$exit_path"
+exit "$code"
+`
+}
+
+func tmuxWindowCommand(bashPath, runnerPath, argsPath, exitPath, stdinPath, outputPath, envPath string) string {
+	if strings.TrimSpace(bashPath) == "" {
+		bashPath = "bash"
+	}
+	return strings.Join([]string{
+		shellQuote(bashPath),
+		shellQuote(runnerPath),
+		shellQuote(argsPath),
+		shellQuote(exitPath),
+		shellQuote(stdinPath),
+		shellQuote(outputPath),
+		shellQuote(envPath),
+	}, " ")
+}
+
+func (w *Worker) killTmuxSession(runID string) {
+	_ = exec.Command("tmux", "-L", w.tmuxServerName(), "kill-session", "-t", tmuxSession(runID)).Run()
+}
+
 // runInTmux keeps a real interactive terminal for each CLI provider while
 // mirroring every pane byte into the durable run log. The separate logfile
 // avoids tmux's finite scrollback being the source of truth.
+//
+// The agent environment is rebuilt inside the runner from a per-run env file
+// after exec -c drops the tmux server's global environment. Secrets are never
+// copied into the tmux server environment or passed through the tmux client, so
+// a later session cannot inherit another run's credentials and a
+// revoke/reassignment applies to the next run without restarting the tmux server.
 func (w *Worker) runInTmux(ctx context.Context, runID, directory, command string, args []string, stdin, trustedOutputPath string, env []string) (int, error) {
-	root := "/home/agent/.taskboard-run-logs"
+	root := w.agentRunLogsDir()
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		return 0, err
 	}
@@ -1971,17 +2086,16 @@ func (w *Worker) runInTmux(ctx context.Context, runID, directory, command string
 	argsPath := filepath.Join(root, runID+".args")
 	runnerPath := filepath.Join(root, runID+".runner")
 	stdinPath := filepath.Join(root, runID+".stdin")
+	envPath := filepath.Join(root, runID+".env")
 	_ = os.Remove(logPath)
 	_ = os.Remove(exitPath)
-	// Never embed a prompt in a shell command. It commonly contains quotes,
-	// newlines and code examples. Bash reads the exact argv array from this
-	// NUL-delimited file instead, so it cannot execute prompt text by mistake.
-	argv := make([]byte, 0, len(command)+1)
-	for _, value := range append([]string{command}, args...) {
-		argv = append(argv, value...)
-		argv = append(argv, 0)
+	_ = os.Remove(envPath)
+	// Never embed a prompt or secret in a shell command. Bash reads the exact
+	// argv array and KEY=VALUE environment records from NUL-delimited files.
+	if err := os.WriteFile(argsPath, nulTerminated(append([]string{command}, args...)), 0o600); err != nil {
+		return 0, err
 	}
-	if err := os.WriteFile(argsPath, argv, 0o600); err != nil {
+	if err := os.WriteFile(envPath, nulTerminated(env), 0o600); err != nil {
 		return 0, err
 	}
 	if stdin != "" {
@@ -1989,31 +2103,35 @@ func (w *Worker) runInTmux(ctx context.Context, runID, directory, command string
 			return 0, err
 		}
 	}
-	const runner = "#!/usr/bin/env bash\nset +e\nsleep 0.1\nmapfile -d '' -t argv < \"$1\"\nif [[ -n \"$3\" && -n \"$4\" ]]; then\n  \"${argv[@]}\" < \"$3\" > \"$4\"\nelif [[ -n \"$3\" ]]; then\n  \"${argv[@]}\" < \"$3\"\nelse\n  \"${argv[@]}\"\nfi\ncode=$?\nprintf '%s' \"$code\" > \"$2\"\nexit \"$code\"\n"
-	if err := os.WriteFile(runnerPath, []byte(runner), 0o700); err != nil {
+	bashPath, lookErr := exec.LookPath("bash")
+	if lookErr != nil {
+		bashPath = "bash"
+	}
+	if err := os.WriteFile(runnerPath, []byte(tmuxRunnerScript(bashPath)), 0o700); err != nil {
 		return 0, err
 	}
 	defer os.Remove(argsPath)
 	defer os.Remove(runnerPath)
 	defer os.Remove(stdinPath)
+	defer os.Remove(envPath)
 	session := tmuxSession(runID)
 	stdinArgument := ""
 	if stdin != "" {
 		stdinArgument = stdinPath
 	}
-	outputArgument := trustedOutputPath
-	startCommand := "bash " + shellQuote(runnerPath) + " " + shellQuote(argsPath) + " " + shellQuote(exitPath) + " " + shellQuote(stdinArgument) + " " + shellQuote(outputArgument)
-	start := exec.Command("tmux", "-L", tmuxSocket, "new-session", "-d", "-s", session, "-c", directory, startCommand)
-	start.Env = env
+	socket := w.tmuxServerName()
+	startCommand := tmuxWindowCommand(bashPath, runnerPath, argsPath, exitPath, stdinArgument, trustedOutputPath, envPath)
+	start := exec.Command("tmux", "-L", socket, "new-session", "-d", "-s", session, "-c", directory, startCommand)
+	start.Env = tmuxClientEnvironment()
 	if out, err := start.CombinedOutput(); err != nil {
 		return 0, fmt.Errorf("tmux session could not start: %s", strings.TrimSpace(string(out)))
 	}
-	pipe := exec.Command("tmux", "-L", tmuxSocket, "pipe-pane", "-o", "-t", session, "cat >> "+shellQuote(logPath))
-	pipe.Env = env
+	pipe := exec.Command("tmux", "-L", socket, "pipe-pane", "-o", "-t", session, "cat >> "+shellQuote(logPath))
+	pipe.Env = tmuxClientEnvironment()
 	if out, err := pipe.CombinedOutput(); err != nil {
 		return 0, fmt.Errorf("tmux output pipe could not start: %s", strings.TrimSpace(string(out)))
 	}
-	_ = w.Store.AddRunLog(ctx, runID, "info", "Live-Terminal: tmux -L "+tmuxSocket+" attach -t "+session)
+	w.addRunLog(ctx, runID, "info", "Live-Terminal: tmux -L "+socket+" attach -t "+session)
 	var offset int
 	stream := func() {
 		data, err := os.ReadFile(logPath)
@@ -2027,7 +2145,7 @@ func (w *Worker) runInTmux(ctx context.Context, runID, directory, command string
 			if end > 4096 {
 				end = 4096
 			}
-			_ = w.Store.AddRunLog(ctx, runID, "info", string(chunk[:end]))
+			w.addRunLog(ctx, runID, "info", string(chunk[:end]))
 			chunk = chunk[end:]
 		}
 	}
@@ -2036,7 +2154,7 @@ func (w *Worker) runInTmux(ctx context.Context, runID, directory, command string
 	for {
 		select {
 		case <-ctx.Done():
-			_ = exec.Command("tmux", "-L", tmuxSocket, "kill-session", "-t", session).Run()
+			w.killTmuxSession(runID)
 			stream()
 			return offset, ctx.Err()
 		case <-ticker.C:
@@ -2450,7 +2568,7 @@ func (w *Worker) Start(ctx context.Context) {
 			// be streamed. That also means a service restart would otherwise leave
 			// the old provider process editing an orphaned worktree. Terminate the
 			// matching session before publishing the recovered failure state.
-			_ = exec.Command("tmux", "-L", tmuxSocket, "kill-session", "-t", tmuxSession(run.ID)).Run()
+			w.killTmuxSession(run.ID)
 			if logErr := w.Store.AddRunLog(ctx, run.ID, "error", "Taskboard wurde während dieses Agent-Runs neu gestartet"); logErr != nil {
 				log.Printf("restart recovery: run log %s could not be persisted: %v", run.ID, logErr)
 			}
@@ -2801,7 +2919,7 @@ func (w *Worker) Cancel(ctx context.Context, runID string) error {
 	if value, ok := w.cancels.Load(runID); ok {
 		value.(context.CancelFunc)()
 	}
-	_ = exec.Command("tmux", "-L", tmuxSocket, "kill-session", "-t", tmuxSession(runID)).Run()
+	w.killTmuxSession(runID)
 	if run.BatchID != "" {
 		_, _ = w.Store.RefreshRunBatch(ctx, run.BatchID)
 	}
@@ -3562,7 +3680,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			_ = w.finish(ctx, run, "failed")
 			return
 		}
-		outDir := filepath.Join("/home/agent/.taskboard-run-logs", run.ID+".out")
+		outDir := filepath.Join(w.agentRunLogsDir(), run.ID+".out")
 		if mkdirErr := os.MkdirAll(outDir, 0o700); mkdirErr != nil {
 			w.persistIncompleteUsage(ctx, run, provider.Provider, provider.Model, "sandbox_enforcement_failed")
 			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", mkdirErr.Error())
