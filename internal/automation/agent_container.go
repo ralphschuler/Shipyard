@@ -325,7 +325,19 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 	}
 	session.closeFns = append(session.closeFns, func() error { return os.Remove(envFile) })
 	execCommand := append([]string{}, cli.Argv...)
-	execCommand = append(execCommand, req.Args...)
+	agentArgs := append([]string{}, req.Args...)
+	// The worktree has already been created and validated by Shipyard before
+	// this container is started. In a rootless container Git reports the bind
+	// source as owned by a remapped UID, which makes Codex reject it as an
+	// untrusted repository even though it is the dedicated run worktree. Scope
+	// the bypass to the in-image Codex CLI and this validated container path;
+	// do not weaken checks for arbitrary provider commands.
+	// Only `codex exec` consults the repository trust check. Keep diagnostic
+	// commands such as `codex --version` byte-for-byte unchanged.
+	if req.Provider.Provider == "codex" && filepath.Base(cli.Argv[0]) == "codex" && len(agentArgs) > 0 && agentArgs[0] == "exec" {
+		agentArgs = withCodexManagedWorktreeTrust(agentArgs)
+	}
+	execCommand = append(execCommand, agentArgs...)
 	if relayScript != "" {
 		execCommand = append([]string{"python3", "/tmp/shipyard-model-api-relay.py"}, execCommand...)
 	}
@@ -352,6 +364,26 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 		session.SourceLog += "; Worktree nur lesend eingehängt"
 	}
 	return session, nil
+}
+
+func withCodexManagedWorktreeTrust(args []string) []string {
+	for _, arg := range args {
+		if arg == "--skip-git-repo-check" {
+			return args
+		}
+	}
+	// Codex treats the final "-" as the stdin prompt marker, so every option
+	// must precede it.
+	for index, arg := range args {
+		if arg == "-" {
+			trusted := make([]string, 0, len(args)+1)
+			trusted = append(trusted, args[:index]...)
+			trusted = append(trusted, "--skip-git-repo-check")
+			trusted = append(trusted, args[index:]...)
+			return trusted
+		}
+	}
+	return append(args, "--skip-git-repo-check")
 }
 
 // agentContainerBindRoot is the directory both this process and the container

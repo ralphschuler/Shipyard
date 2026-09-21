@@ -33,6 +33,17 @@ type recordingProvider struct {
 	before func(*container.Spec) error
 }
 
+func TestCodexManagedWorktreeTrustFlagPrecedesStdinPrompt(t *testing.T) {
+	args := withCodexManagedWorktreeTrust([]string{"exec", "--approve-for-me", "--model", "gpt-5.6-luna", "-"})
+	want := []string{"exec", "--approve-for-me", "--model", "gpt-5.6-luna", "--skip-git-repo-check", "-"}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("trusted Codex args = %#v, want %#v", args, want)
+	}
+	if got := withCodexManagedWorktreeTrust(args); !reflect.DeepEqual(got, want) {
+		t.Fatalf("trust flag must be idempotent, got %#v", got)
+	}
+}
+
 func (p *recordingProvider) Name() string { return p.name }
 func (p *recordingProvider) Available(context.Context) error {
 	return nil
@@ -507,7 +518,7 @@ func TestContainerExecUsesImageCodexCLI(t *testing.T) {
 			t.Fatalf("missing auth dir was mounted: %s", source)
 		}
 	}
-	want := []string{"python3", "/tmp/shipyard-model-api-relay.py", "/usr/local/bin/codex", "exec"}
+	want := []string{"python3", "/tmp/shipyard-model-api-relay.py", "/usr/local/bin/codex", "exec", "--skip-git-repo-check"}
 	if !reflect.DeepEqual(provider.execs[0].Command, want) {
 		t.Fatalf("exec = %#v", provider.execs[0].Command)
 	}
