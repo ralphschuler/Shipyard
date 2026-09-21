@@ -90,6 +90,8 @@ Mounts:
 | Allowlisted host CLI login files (`auth.json` and the small companion files) | Read-only, under the container home. The host home directory is not mounted. |
 | Task-assigned secrets | Process environment inside the container, via an env-file. They are not arguments and not the host process environment. The Shipyard service environment is not copied in. |
 
+Shipyard-created bind sources (agent home, secret env-file, model-API proxy socket, relay script, and the fallback build context) are created under the workspace runtime directory: `$TASKBOARD_WORKSPACE_ROOT/runtime/container`, or `/home/agent/.taskboard-runtime/container` when the workspace root is unset. They are not placed in `/tmp` or `/var/tmp`. The taskboard unit sets `PrivateTmp=true`, so those directories exist only inside the service mount namespace and rootless `dockerd` rejects the bind. The agent home is created again immediately before `docker create`, after the image build.
+
 `NetworkMode=none` keeps the container off the Docker bridge and allows model-API traffic only through the existing host allowlist proxy. The image needs `python3` for that proxy. `qa-network` uses the bridge. `release-bridge` still refuses a direct provider command.
 
 API adapters still run tool commands in the host bubblewrap sandbox. That path is deprecated for CLI runs and is not used once a container starts. Host `go test`, frontend commands, and GitHub Actions do not take the agent-run path.

@@ -10,6 +10,7 @@ import (
 	"taskboard/internal/container"
 	"taskboard/internal/domain"
 	"taskboard/internal/sandbox"
+	"taskboard/internal/workspace"
 	"testing"
 )
 
@@ -18,6 +19,9 @@ type recordingProvider struct {
 	specs   []container.Spec
 	execs   []container.ExecRequest
 	started []string
+	// before runs at the start of Create, before Spec.BeforeCreate. Tests use
+	// it to delete a bind source and prove the create path puts it back.
+	before func(*container.Spec) error
 }
 
 func (p *recordingProvider) Name() string { return p.name }
@@ -25,6 +29,16 @@ func (p *recordingProvider) Available(context.Context) error {
 	return nil
 }
 func (p *recordingProvider) Create(_ context.Context, spec container.Spec) (string, error) {
+	if p.before != nil {
+		if err := p.before(&spec); err != nil {
+			return "", err
+		}
+	}
+	if spec.BeforeCreate != nil {
+		if err := spec.BeforeCreate(); err != nil {
+			return "", err
+		}
+	}
 	p.specs = append(p.specs, spec)
 	return "cid-recorded", nil
 }
@@ -47,6 +61,7 @@ func (p *recordingProvider) Logs(context.Context, string) ([]byte, error) {
 func (p *recordingProvider) CopyTo(context.Context, string, string, string) error { return nil }
 
 func TestStartAgentContainerUsesFallbackAndBindsAuthAndSecrets(t *testing.T) {
+	useContainerRuntimeRoot(t)
 	worktree := t.TempDir()
 	outDir := t.TempDir()
 	codexHome := t.TempDir()
@@ -152,9 +167,18 @@ func TestStartAgentContainerUsesFallbackAndBindsAuthAndSecrets(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("env-file mode = %o", info.Mode().Perm())
 	}
+	assertDurableRuntimePath(t, provider.execs[0].EnvFile)
+	assertDurableRuntimePath(t, spec.ContextDir)
+	for _, mount := range spec.Mounts {
+		switch mount.Target {
+		case containerAgentHome, "/tmp/shipyard-model-api.sock", "/tmp/shipyard-model-api-relay.py":
+			assertDurableRuntimePath(t, mount.Source)
+		}
+	}
 }
 
 func TestStartAgentContainerMountsReviewWorktreeReadOnly(t *testing.T) {
+	useContainerRuntimeRoot(t)
 	worktree := t.TempDir()
 	t.Setenv("CODEX_HOME", t.TempDir())
 	t.Setenv("GROK_HOME", t.TempDir())
@@ -185,6 +209,7 @@ func TestStartAgentContainerMountsReviewWorktreeReadOnly(t *testing.T) {
 }
 
 func TestStartAgentContainerUsesProjectImageAndComposeDockerfile(t *testing.T) {
+	useContainerRuntimeRoot(t)
 	imageRoot := writeDevcontainer(t, `{"image":"mcr.microsoft.com/devcontainers/base:ubuntu"}`)
 	imageDef, found, err := discoverDevContainer(imageRoot)
 	if err != nil || !found {
@@ -357,7 +382,64 @@ func TestContainerRuntimeSelection(t *testing.T) {
 	}
 }
 
+func TestAgentHomeIsRecreatedImmediatelyBeforeCreate(t *testing.T) {
+	useContainerRuntimeRoot(t)
+	worktree := t.TempDir()
+	codexHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte(`{"token":"login"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("GROK_HOME", t.TempDir())
+	var home string
+	provider := &recordingProvider{name: "docker"}
+	provider.before = func(spec *container.Spec) error {
+		for _, mount := range spec.Mounts {
+			if mount.Target != containerAgentHome {
+				continue
+			}
+			home = mount.Source
+			if err := os.RemoveAll(mount.Source); err != nil {
+				return err
+			}
+			if _, err := os.Stat(mount.Source); !os.IsNotExist(err) {
+				return fmt.Errorf("agent home still exists after simulated cleanup: %v", err)
+			}
+		}
+		if home == "" {
+			return fmt.Errorf("agent home mount missing")
+		}
+		return nil
+	}
+	session, err := startAgentContainer(context.Background(), agentContainerRequest{
+		RunID:    "run-recreate",
+		Worktree: worktree,
+		Policy:   builtinPolicy(t, "strict"),
+		Provider: domain.ProviderSetting{Provider: "codex"},
+		Command:  "sh",
+		Runtime:  provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	info, err := os.Stat(home)
+	if err != nil || !info.IsDir() {
+		t.Fatalf("agent home was not recreated before create: %v", err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("agent home mode = %o", info.Mode().Perm())
+	}
+	for _, dir := range []string{".config", ".cache", ".codex"} {
+		if _, err := os.Stat(filepath.Join(home, dir)); err != nil {
+			t.Fatalf("recreated home missing %s: %v", dir, err)
+		}
+	}
+	assertDurableRuntimePath(t, home)
+}
+
 func TestStartAgentContainerDockerCLIOmitsServiceEnvironment(t *testing.T) {
+	useContainerRuntimeRoot(t)
 	dir := t.TempDir()
 	writeFakeContainerCLI(t, dir, "docker")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -392,6 +474,38 @@ func TestStartAgentContainerDockerCLIOmitsServiceEnvironment(t *testing.T) {
 	}
 	if !strings.Contains(session.SourceLog, "nur lesend") || !strings.Contains(session.IsolationLog, "Isolation=container") {
 		t.Fatalf("logs = %s | %s", session.IsolationLog, session.SourceLog)
+	}
+}
+
+func useContainerRuntimeRoot(t *testing.T) string {
+	t.Helper()
+	// A short directory keeps the model-API unix socket under sun_path's 108
+	// byte limit. t.TempDir() embeds the full test name and makes that path
+	// too long once it sits under runtime/container.
+	root, err := os.MkdirTemp("", "sy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	t.Setenv("TASKBOARD_WORKSPACE_ROOT", root)
+	return root
+}
+
+func assertDurableRuntimePath(t *testing.T, path string) {
+	t.Helper()
+	path = filepath.Clean(path)
+	root := filepath.Clean(filepath.Join(workspace.RuntimeRoot(), "container"))
+	if path != root && !strings.HasPrefix(path, root+string(filepath.Separator)) {
+		t.Fatalf("bind source %s is outside the durable runtime directory %s", path, root)
+	}
+	parent := filepath.Dir(path)
+	for _, private := range []string{"/tmp", "/var/tmp", filepath.Clean(os.TempDir())} {
+		if path == private || parent == private {
+			t.Fatalf("bind source %s is under PrivateTmp path %s", path, private)
+		}
+	}
+	if strings.Contains(filepath.Base(path), "shipyard-agent-home-") && parent == filepath.Clean(os.TempDir()) {
+		t.Fatalf("bind source %s still uses a service-private temp home", path)
 	}
 }
 

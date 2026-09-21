@@ -100,7 +100,20 @@ type modelAPIProxy struct {
 }
 
 func startModelAPIProxy(allow []allowedEndpoint) (*modelAPIProxy, error) {
-	f, err := os.CreateTemp("", "shipyard-model-api-*.sock")
+	return startModelAPIProxyIn(os.TempDir(), allow)
+}
+
+// startModelAPIProxyIn listens on a socket created inside dir. Container runs
+// pass the workspace runtime directory so the bind is visible to dockerd.
+// The host bubblewrap path keeps using the process temp directory.
+func startModelAPIProxyIn(dir string, allow []allowedEndpoint) (*modelAPIProxy, error) {
+	if strings.TrimSpace(dir) == "" {
+		dir = os.TempDir()
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	f, err := os.CreateTemp(dir, "shipyard-model-api-*.sock")
 	if err != nil {
 		return nil, err
 	}

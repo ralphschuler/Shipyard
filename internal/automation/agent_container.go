@@ -11,6 +11,7 @@ import (
 	"taskboard/internal/container"
 	"taskboard/internal/domain"
 	"taskboard/internal/sandbox"
+	"taskboard/internal/workspace"
 )
 
 const containerAgentHome = sandboxCLIHome
@@ -102,6 +103,11 @@ func cliContainerRuntimeAvailable(ctx context.Context) error {
 //     container home. The host home directory itself is never mounted.
 //   - Task-assigned secrets are injected through an exec env-file. The
 //     container does not receive the Shipyard service environment.
+//   - Bind sources Shipyard creates (agent home, secret env-file, model-API
+//     socket, relay script, fallback build context) live under the workspace
+//     runtime directory. /tmp and /var/tmp are private to the systemd unit
+//     (PrivateTmp=true) and are invisible to rootless dockerd. The agent home
+//     is created again immediately before the runtime create call.
 func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *agentContainerSession, retErr error) {
 	worktree, err := filepath.Abs(req.Worktree)
 	if err != nil {
@@ -143,12 +149,19 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 			_ = session.Close()
 		}
 	}()
+	bindRoot, err := agentContainerBindRoot()
+	if err != nil {
+		return nil, err
+	}
 	if plan.Kind == "fallback" {
-		buildDir, mkErr := os.MkdirTemp("", "shipyard-fallback-build-")
+		buildDir, mkErr := os.MkdirTemp(bindRoot, "fallback-build-")
 		if mkErr != nil {
 			return nil, mkErr
 		}
 		session.closeFns = append(session.closeFns, func() error { return os.RemoveAll(buildDir) })
+		if err := requireDurableBind(buildDir); err != nil {
+			return nil, err
+		}
 		if err := container.MaterializeFallback(buildDir); err != nil {
 			return nil, err
 		}
@@ -161,42 +174,31 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 		return nil, err
 	}
 	auth := resolveHostCLIAuth(req.Provider.Provider, worktree)
-	homeHost, err := os.MkdirTemp("", "shipyard-agent-home-")
+	homeHost, err := os.MkdirTemp(bindRoot, "agent-home-")
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(homeHost, 0o700); err != nil {
-		_ = os.RemoveAll(homeHost)
-		return nil, err
-	}
 	session.closeFns = append(session.closeFns, func() error { return os.RemoveAll(homeHost) })
-	for _, dir := range auth.DestDirs {
-		rel, relErr := filepath.Rel(containerAgentHome, dir)
-		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			return nil, errors.New("Host-CLI-Login liegt außerhalb des Container-Home")
-		}
-		if err := os.MkdirAll(filepath.Join(homeHost, rel), 0o700); err != nil {
-			return nil, err
-		}
-	}
-	if err := os.MkdirAll(filepath.Join(homeHost, ".config"), 0o700); err != nil {
+	if err := ensureAgentHomeLayout(homeHost, auth); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Join(homeHost, ".cache"), 0o700); err != nil {
+	if err := requireDurableBind(homeHost); err != nil {
 		return nil, err
 	}
 	hostMounts, hostEnv := cliSandboxHostMounts(worktree)
 	var relaySocket, relayScript string
 	if req.Policy.NetworkMode == "none" {
-		proxy, proxyErr := startModelAPIProxy(modelAPIAllowlist(req.Provider))
+		proxy, proxyErr := startModelAPIProxyIn(bindRoot, modelAPIAllowlist(req.Provider))
 		if proxyErr != nil {
 			return nil, fmt.Errorf("Modell-API-Proxy konnte nicht gestartet werden: %w", proxyErr)
 		}
 		session.closeFns = append(session.closeFns, proxy.Close)
-		relay, relayErr := os.CreateTemp("", "shipyard-model-api-relay-*.py")
+		relay, relayErr := os.CreateTemp(bindRoot, "shipyard-model-api-relay-*.py")
 		if relayErr != nil {
 			return nil, relayErr
 		}
+		relayScript = relay.Name()
+		session.closeFns = append(session.closeFns, func() error { return os.Remove(relayScript) })
 		if _, err := relay.Write(modelAPIRelayScript); err != nil {
 			_ = relay.Close()
 			return nil, err
@@ -208,9 +210,13 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 		if err := relay.Close(); err != nil {
 			return nil, err
 		}
-		relayScript = relay.Name()
 		relaySocket = proxy.path
-		session.closeFns = append(session.closeFns, func() error { return os.Remove(relayScript) })
+		if err := requireDurableBind(relayScript); err != nil {
+			return nil, err
+		}
+		if err := requireDurableBind(relaySocket); err != nil {
+			return nil, err
+		}
 		session.ModelAPIProxy = true
 	}
 	user := containerUser()
@@ -233,6 +239,22 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 			"shipyard.role": "agent",
 		},
 		Command: []string{"sleep", "infinity"},
+	}
+	spec.BeforeCreate = func() error {
+		if err := ensureAgentHomeLayout(homeHost, auth); err != nil {
+			return err
+		}
+		if relayScript != "" {
+			if err := ensureRelayScript(relayScript); err != nil {
+				return err
+			}
+		}
+		if relaySocket != "" {
+			if _, err := os.Stat(relaySocket); err != nil {
+				return fmt.Errorf("Modell-API-Proxy-Socket fehlt vor dem Container-Start: %w", err)
+			}
+		}
+		return nil
 	}
 	id, err := runtime.Create(ctx, spec)
 	if err != nil {
@@ -257,6 +279,9 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 		}
 	}
 	envFile := homeHost + ".env"
+	if err := requireDurableBind(envFile); err != nil {
+		return nil, err
+	}
 	entries := containerExecEnv(auth, req.Secrets, hostEnv, extraPath, relaySocket != "")
 	if err := writeContainerEnvFile(envFile, entries); err != nil {
 		return nil, err
@@ -290,6 +315,75 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 		session.SourceLog += "; Worktree nur lesend eingehängt"
 	}
 	return session, nil
+}
+
+// agentContainerBindRoot is the directory both this process and the container
+// runtime can see. It is the workspace runtime root, never the service-private
+// temporary directory created by systemd PrivateTmp=true.
+func agentContainerBindRoot() (string, error) {
+	dir := filepath.Join(workspace.RuntimeRoot(), "container")
+	if !filepath.IsAbs(dir) || filepath.Clean(dir) == string(filepath.Separator) {
+		return "", errors.New("Container-Bind-Verzeichnis ist ungültig")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("Container-Bind-Verzeichnis ist nicht verfügbar: %w", err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", fmt.Errorf("Container-Bind-Verzeichnis ist nicht verfügbar: %w", err)
+	}
+	return dir, nil
+}
+
+func requireDurableBind(path string) error {
+	path = filepath.Clean(path)
+	root := filepath.Clean(filepath.Join(workspace.RuntimeRoot(), "container"))
+	if path != root && !strings.HasPrefix(path, root+string(filepath.Separator)) {
+		return fmt.Errorf("container bind source %s liegt außerhalb des Runtime-Verzeichnisses", path)
+	}
+	parent := filepath.Dir(path)
+	for _, private := range []string{"/tmp", "/var/tmp", filepath.Clean(os.TempDir())} {
+		if path == private || parent == private {
+			return fmt.Errorf("container bind source %s ist für die Container-Runtime nicht sichtbar (PrivateTmp)", path)
+		}
+	}
+	return nil
+}
+
+func ensureAgentHomeLayout(homeHost string, auth hostCLIAuthPlan) error {
+	if err := os.MkdirAll(homeHost, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(homeHost, 0o700); err != nil {
+		return err
+	}
+	for _, dir := range auth.DestDirs {
+		rel, relErr := filepath.Rel(containerAgentHome, dir)
+		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return errors.New("Host-CLI-Login liegt außerhalb des Container-Home")
+		}
+		if err := os.MkdirAll(filepath.Join(homeHost, rel), 0o700); err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(homeHost, ".config"), 0o700); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(homeHost, ".cache"), 0o700); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureRelayScript(path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return os.Chmod(path, 0o500)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.WriteFile(path, modelAPIRelayScript, 0o500); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o500)
 }
 
 func containerNetwork(mode string) (string, error) {

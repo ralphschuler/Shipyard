@@ -68,6 +68,17 @@ func (p *cliProvider) Create(ctx context.Context, spec Spec) (string, error) {
 		}
 		image = tag
 	}
+	// The image build can take long enough for a directory bind to disappear.
+	// BeforeCreate puts it back. A path that still does not exist is refused
+	// here, before dockerd reports an invalid mount.
+	if spec.BeforeCreate != nil {
+		if err := spec.BeforeCreate(); err != nil {
+			return "", fmt.Errorf("container bind source is not ready: %w", err)
+		}
+	}
+	if err := bindSourcesReady(spec.Mounts); err != nil {
+		return "", err
+	}
 	args := []string{"create", "--network", spec.Network, "--security-opt", "no-new-privileges"}
 	if spec.Name != "" {
 		args = append(args, "--name", spec.Name)
@@ -314,6 +325,26 @@ func renderMount(mount Mount) (string, error) {
 		rendered += ",readonly"
 	}
 	return rendered, nil
+}
+
+func bindSourcesReady(mounts []Mount) error {
+	for _, mount := range mounts {
+		kind := mount.Type
+		if kind == "" {
+			kind = "bind"
+		}
+		if kind != "bind" {
+			continue
+		}
+		source := filepath.Clean(strings.TrimSpace(mount.Source))
+		if _, err := os.Lstat(source); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("bind source path does not exist: %s", source)
+			}
+			return fmt.Errorf("bind source path is not available: %s", source)
+		}
+	}
+	return nil
 }
 
 func missingContainer(err error) bool {

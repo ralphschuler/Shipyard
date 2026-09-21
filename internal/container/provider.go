@@ -6,8 +6,8 @@ package container
 import "context"
 
 // Mount is a container filesystem mount. Bind sources must be absolute,
-// non-root host paths. The provider rejects the Docker socket and a source
-// of "/".
+// non-root host paths that already exist where the runtime daemon can see
+// them. The provider rejects the Docker socket and a source of "/".
 type Mount struct {
 	// Type is "bind" or "tmpfs". Empty means bind.
 	Type     string
@@ -38,6 +38,10 @@ type Spec struct {
 	Network    string
 	Labels     map[string]string
 	Command    []string
+	// BeforeCreate runs after an image build and immediately before the
+	// runtime create call. Callers recreate directory bind sources here so a
+	// long build cannot outlive the directory the daemon has to mount.
+	BeforeCreate func() error
 }
 
 // ExecRequest runs a process inside an existing container. EnvFile, when set,
@@ -53,6 +57,8 @@ type ExecRequest struct {
 
 // Provider creates and executes agent containers. Docker is the first
 // implementation. Podman uses the same Docker-compatible CLI subset.
+// Create builds when Spec.Dockerfile is set, runs Spec.BeforeCreate, then
+// refuses to continue if a bind source is missing.
 type Provider interface {
 	Name() string
 	Available(ctx context.Context) error

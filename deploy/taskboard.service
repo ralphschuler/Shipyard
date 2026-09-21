@@ -22,6 +22,9 @@ RestartSec=3
 # child. Stop all descendants on an administrative service stop.
 KillMode=mixed
 NoNewPrivileges=true
+# PrivateTmp hides /tmp and /var/tmp from the rest of the host, including
+# rootless dockerd. Agent-container bind sources belong under the workspace
+# runtime directory, not in this private temporary directory.
 PrivateTmp=true
 # The worker needs network access (Postgres, Git hosts and model providers)
 # and user/mount namespaces for Codex' workspace sandbox, so those are not
