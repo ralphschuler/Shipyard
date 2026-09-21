@@ -179,6 +179,24 @@ type AgentRun struct {
 	StartedAt, FinishedAt                                                                                                 *time.Time
 	CreatedAt                                                                                                             time.Time
 }
+
+// RunSelection is the durable snapshot of the model/effort decision, including
+// the budget ceiling, comparison cost, and whether execution was allowed.
+type RunSelection struct {
+	Model, Effort, Stage, PolicyVersion, DiscoverySource, Fallback, BudgetDecision string
+	BudgetLimitMicrousd, EstimatedCostMicrousd                                     int64
+}
+
+// ReworkPolicyState is the persisted singleton budget and tariff source used
+// when an agent policy omits those fields.
+type ReworkPolicyState struct {
+	Version               string
+	Policy                string
+	HumanEscalationAfter  int
+	BudgetLimitMicrousd   int64
+	EstimatedCostMicrousd map[string]int64
+	UpdatedAt             time.Time
+}
 type RunQueueStatus struct {
 	Position      int
 	WaitingReason string

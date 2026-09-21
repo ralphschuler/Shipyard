@@ -52,6 +52,19 @@ func TestSandboxEffectivePolicyMigrationBackfillsLegacyRuns(t *testing.T) {
 	}
 }
 
+func TestReworkBudgetSnapshotMigrationDocumentsLimitAndCost(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/052_rework_budget_snapshot.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{"budget_limit_microusd", "selection_cost_microusd", "task_rework_policies", "estimated_cost_microusd"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("rework budget snapshot migration is missing %q", required)
+		}
+	}
+}
+
 func TestRunStartSHAMigrationPersistsDiffBase(t *testing.T) {
 	body, err := migrationFiles.ReadFile("migrations/051_run_start_sha.sql")
 	if err != nil {

@@ -1590,18 +1590,21 @@ func runTmuxProviderRunner(t *testing.T, command string, args []string, stdinPat
 	argsPath := filepath.Join(dir, "args")
 	exitPath := filepath.Join(dir, "exit")
 	runnerPath := filepath.Join(dir, "runner")
-	argv := make([]byte, 0, len(command)+1)
-	for _, value := range append([]string{command}, args...) {
-		argv = append(argv, value...)
-		argv = append(argv, 0)
+	envPath := filepath.Join(dir, "env")
+	bashPath, lookErr := exec.LookPath("bash")
+	if lookErr != nil {
+		bashPath = "bash"
 	}
-	if err := os.WriteFile(argsPath, argv, 0o600); err != nil {
+	if err := os.WriteFile(argsPath, nulTerminated(append([]string{command}, args...)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(runnerPath, []byte(tmuxProviderRunnerScript()), 0o700); err != nil {
+	if err := os.WriteFile(envPath, nulTerminated(nil), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("bash", runnerPath, argsPath, exitPath, stdinPath, outputPath)
+	if err := os.WriteFile(runnerPath, []byte(tmuxRunnerScript(bashPath)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bashPath, runnerPath, argsPath, exitPath, stdinPath, outputPath, envPath)
 	cmd.Dir = dir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("tmux provider runner failed: %v: %s", err, out)

@@ -977,6 +977,10 @@ func (a *App) createAgent(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, e.Error(), 400)
 		return
 	}
+	if _, e := automation.ReworkPolicyFromJSON(r.FormValue("escalation_policy")); e != nil {
+		http.Error(w, e.Error(), 400)
+		return
+	}
 	max, _ := strconv.Atoi(r.FormValue("max_parallel_runs"))
 	agent, e := a.store.CreateAgent(r.Context(), r.FormValue("name"), r.FormValue("description"), r.FormValue("prompt_prefix"), r.FormValue("prompt"), r.FormValue("prompt_suffix"), max)
 	if e != nil {
@@ -1019,6 +1023,10 @@ func (a *App) updateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	max, _ := strconv.Atoi(r.FormValue("max_parallel_runs"))
 	if e := a.store.UpdateAgent(r.Context(), r.PathValue("id"), r.FormValue("name"), r.FormValue("description"), r.FormValue("prompt_prefix"), r.FormValue("prompt"), r.FormValue("prompt_suffix"), max, r.FormValue("enabled") == "true"); e != nil {
+		http.Error(w, e.Error(), 400)
+		return
+	}
+	if _, e := automation.ReworkPolicyFromJSON(r.FormValue("escalation_policy")); e != nil {
 		http.Error(w, e.Error(), 400)
 		return
 	}
@@ -2530,7 +2538,12 @@ func (a *App) runAPI(w http.ResponseWriter, r *http.Request) {
 		writeAPI(w, nil, queueErr)
 		return
 	}
-	writeAPI(w, map[string]any{"run": safeRunView(run), "queue": queue, "task": task, "delivery": delivery, "usage": usage, "logs": logs, "logsTruncated": truncated}, err)
+	selection, selectionErr := a.store.RunSelection(r.Context(), run.ID)
+	if selectionErr != nil {
+		writeAPI(w, nil, selectionErr)
+		return
+	}
+	writeAPI(w, map[string]any{"run": safeRunView(run), "queue": queue, "task": task, "delivery": delivery, "usage": usage, "selection": selection, "logs": logs, "logsTruncated": truncated}, err)
 }
 func safeRunView(run domain.AgentRun) map[string]any {
 	return map[string]any{"ID": run.ID, "TaskID": run.TaskID, "AgentID": run.AgentID, "RuleID": run.RuleID, "BatchID": run.BatchID, "Status": run.Status, "TargetProject": run.TargetProject, "Summary": automation.RedactSensitiveText(run.Summary), "ErrorMessage": automation.RedactSensitiveText(run.ErrorMessage), "StartedAt": run.StartedAt, "FinishedAt": run.FinishedAt, "CreatedAt": run.CreatedAt}

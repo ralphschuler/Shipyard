@@ -8,17 +8,58 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"taskboard/internal/domain"
 	"time"
 )
 
 // CapabilityDiscovery is deliberately ephemeral: it is a read-only probe of
 // the configured Codex executable and contains no credentials.
 type CapabilityDiscovery struct {
-	Models  []string  `json:"models"`
-	Efforts []string  `json:"efforts"`
-	Source  string    `json:"source"`
-	At      time.Time `json:"at"`
-	Error   string    `json:"error,omitempty"`
+	Models       []string            `json:"models"`
+	Efforts      []string            `json:"efforts"`
+	ModelEfforts map[string][]string `json:"model_efforts,omitempty"`
+	Source       string              `json:"source"`
+	At           time.Time           `json:"at"`
+	Error        string              `json:"error,omitempty"`
+}
+
+// Confirmed is true only when discovery returned at least one model without
+// an error. Empty or failed probes must pause the agent instead of guessing.
+func (d CapabilityDiscovery) Confirmed() bool {
+	return strings.TrimSpace(d.Error) == "" && len(d.Models) > 0
+}
+
+// Supports reports whether the live provider catalogue confirmed this
+// model/effort pair. Uncertainty, including a missing catalogue, is a deny.
+func (d CapabilityDiscovery) Supports(model, effort string) bool {
+	if !d.Confirmed() || strings.TrimSpace(model) == "" || !validEffort(effort) {
+		return false
+	}
+	if !contains(d.Models, model) {
+		return false
+	}
+	if efforts, ok := d.ModelEfforts[model]; ok && len(efforts) > 0 {
+		return contains(efforts, effort)
+	}
+	return len(d.Efforts) > 0 && contains(d.Efforts, effort)
+}
+
+// DiscoverProviderCapabilities probes the selected adapter. Callers must treat
+// an unconfirmed result as a hard stop before any provider execution.
+func DiscoverProviderCapabilities(ctx context.Context, provider domain.ProviderSetting) CapabilityDiscovery {
+	switch provider.Provider {
+	case "codex":
+		return DiscoverCodex(ctx, provider.Command)
+	case "grokbot":
+		return GrokbotCapabilities(provider.Options)
+	default:
+		return CapabilityDiscovery{
+			Efforts: []string{"low", "medium", "high", "xhigh"},
+			Source:  "standard effort catalog",
+			At:      time.Now(),
+			Error:   "Provider-Discovery hat keine bestätigten Modelle gemeldet",
+		}
+	}
 }
 
 // DiscoverCodex runs the provider command's machine-readable discovery
@@ -90,13 +131,21 @@ func discoverCodexCache() (CapabilityDiscovery, bool) {
 	}
 	models, efforts := make([]string, 0, len(cache.Models)), make([]string, 0, 6)
 	seenModels, seenEfforts := map[string]bool{}, map[string]bool{}
+	modelEfforts := map[string][]string{}
 	for _, model := range cache.Models {
-		if model.Slug != "" && !seenModels[model.Slug] {
-			seenModels[model.Slug] = true
-			models = append(models, model.Slug)
+		if model.Slug == "" || seenModels[model.Slug] {
+			continue
 		}
+		seenModels[model.Slug] = true
+		models = append(models, model.Slug)
 		for _, level := range model.SupportedReasoningLevels {
-			if level.Effort != "" && !seenEfforts[level.Effort] {
+			if level.Effort == "" {
+				continue
+			}
+			if !contains(modelEfforts[model.Slug], level.Effort) {
+				modelEfforts[model.Slug] = append(modelEfforts[model.Slug], level.Effort)
+			}
+			if !seenEfforts[level.Effort] {
 				seenEfforts[level.Effort] = true
 				efforts = append(efforts, level.Effort)
 			}
@@ -108,5 +157,5 @@ func discoverCodexCache() (CapabilityDiscovery, bool) {
 	if len(efforts) == 0 {
 		efforts = []string{"low", "medium", "high", "xhigh"}
 	}
-	return CapabilityDiscovery{Models: models, Efforts: efforts, Source: "Codex local model cache"}, true
+	return CapabilityDiscovery{Models: models, Efforts: efforts, ModelEfforts: modelEfforts, Source: "Codex local model cache"}, true
 }
