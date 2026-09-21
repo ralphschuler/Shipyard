@@ -96,7 +96,7 @@ func TestReleaseWorkflowPinsArtifactsAndTagToRunSHA(t *testing.T) {
 	for _, required := range []string{
 		"RELEASE_COMMIT: ${{ github.sha }}",
 		"TASKBOARD_COMMIT_SHA: ${{ env.RELEASE_COMMIT }}",
-		"-X main.commit=${RELEASE_COMMIT}",
+		"./scripts/build-taskboard.sh",
 		"./scripts/publish-github-release.sh",
 		"needs: gate",
 		"RELEASE_APPROVED_REF: refs/heads/master",
@@ -105,6 +105,9 @@ func TestReleaseWorkflowPinsArtifactsAndTagToRunSHA(t *testing.T) {
 			t.Fatalf("release workflow missing %q", required)
 		}
 	}
+	if strings.Count(text, "TASKBOARD_COMMIT_SHA: ${{ env.RELEASE_COMMIT }}") < 2 {
+		t.Fatal("frontend and backend builds must both pin TASKBOARD_COMMIT_SHA to RELEASE_COMMIT")
+	}
 	if strings.Contains(text, "--target master") || strings.Contains(text, "--target ${{ env.RELEASE_APPROVED_BRANCH }}") {
 		t.Fatal("workflow must not create tags at a moving branch HEAD")
 	}
@@ -112,7 +115,20 @@ func TestReleaseWorkflowPinsArtifactsAndTagToRunSHA(t *testing.T) {
 		t.Fatal("backend metadata must use the pinned RELEASE_COMMIT")
 	}
 	if strings.Contains(text, "TASKBOARD_COMMIT_SHA: ${{ github.sha }}") {
-		t.Fatal("frontend metadata must use the pinned RELEASE_COMMIT")
+		t.Fatal("frontend and backend metadata must use the pinned RELEASE_COMMIT")
+	}
+	buildScript, err := os.ReadFile("build-taskboard.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	buildText := string(buildScript)
+	for _, required := range []string{
+		`build_commit="${TASKBOARD_COMMIT_SHA:-$(git rev-parse HEAD)}"`,
+		"-X main.commit=${build_commit}",
+	} {
+		if !strings.Contains(buildText, required) {
+			t.Fatalf("build-taskboard.sh missing %q", required)
+		}
 	}
 	script, err := os.ReadFile("publish-github-release.sh")
 	if err != nil {
