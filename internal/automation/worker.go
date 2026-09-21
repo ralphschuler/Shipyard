@@ -187,6 +187,42 @@ type selfReviewItem struct {
 	Details string `json:"details,omitempty"`
 }
 
+// selfReviewCheckSpec is the single source of truth for the worker prompt and
+// the completion-gate validator. PromptLabel is what agents are instructed to
+// emit; Aliases keep previously accepted German values working during migration.
+type selfReviewCheckSpec struct {
+	ID             string
+	PromptLabel    string
+	Aliases        []string
+	ExampleDetails string
+}
+
+var selfReviewChecklist = []selfReviewCheckSpec{
+	{ID: "scope_acceptance", PromptLabel: "Scope/Acceptance", Aliases: []string{"Scope/Akzeptanz"}, ExampleDetails: "Scope implemented and acceptance criteria verified."},
+	{ID: "diff_secrets", PromptLabel: "Diff/Secrets", ExampleDetails: "Diff reviewed; no secrets exposed."},
+	{ID: "tests_failures", PromptLabel: "Tests/Failures", Aliases: []string{"Tests/Fehler"}, ExampleDetails: "Relevant tests passed."},
+	{ID: "security_operational_risks", PromptLabel: "Security/Operational risks", Aliases: []string{"Sicherheits-/Betriebsrisiken"}, ExampleDetails: "Risks reviewed."},
+	{ID: "backward_compatibility", PromptLabel: "Backward compatibility", Aliases: []string{"Rückwärtskompatibilität"}, ExampleDetails: "Compatibility reviewed."},
+}
+
+var selfReviewCheckByAlias = func() map[string]selfReviewCheckSpec {
+	aliases := make(map[string]selfReviewCheckSpec, len(selfReviewChecklist)*2)
+	register := func(name string, check selfReviewCheckSpec) {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" {
+			return
+		}
+		aliases[key] = check
+	}
+	for _, check := range selfReviewChecklist {
+		register(check.PromptLabel, check)
+		for _, alias := range check.Aliases {
+			register(alias, check)
+		}
+	}
+	return aliases
+}()
+
 // selfReviewResultValues is deliberately kept as a stable, ordered list. The
 // result field is a machine-readable gate, while human-readable evidence
 // belongs in the optional details field. Keeping the allowlist explicit avoids
@@ -226,12 +262,9 @@ func validateRequestedSelfReview(review taskboardSelfReview) error {
 	if strings.ToLower(strings.TrimSpace(review.Status)) != "passed" {
 		return errors.New("taskboard-self-review muss status=passed enthalten")
 	}
-	requiredChecks := map[string]bool{
-		"scope/akzeptanz":              false,
-		"diff/secrets":                 false,
-		"tests/fehler":                 false,
-		"sicherheits-/betriebsrisiken": false,
-		"rückwärtskompatibilität":      false,
+	requiredChecks := make(map[string]bool, len(selfReviewChecklist))
+	for _, check := range selfReviewChecklist {
+		requiredChecks[check.ID] = false
 	}
 	if len(review.Checklist) != len(requiredChecks) {
 		return errors.New("taskboard-self-review benötigt genau die fünf Pflicht-Checklistenpunkte")
@@ -255,7 +288,7 @@ func validateRequestedSelfReview(review taskboardSelfReview) error {
 	}
 	for check, present := range requiredChecks {
 		if !present {
-			return fmt.Errorf("taskboard-self-review fehlt die Pflichtkategorie %q", check)
+			return fmt.Errorf("taskboard-self-review fehlt die Pflichtkategorie %q", selfReviewPromptLabel(check))
 		}
 	}
 	if len(review.Tests) == 0 || string(review.Tests) == "null" || len(review.OpenRisks) == 0 || string(review.OpenRisks) == "null" {
@@ -266,17 +299,66 @@ func validateRequestedSelfReview(review taskboardSelfReview) error {
 
 func canonicalSelfReviewCheck(raw string) string {
 	value := strings.ToLower(strings.TrimSpace(raw))
-	switch value {
-	case "scope/acceptance":
-		return "scope/akzeptanz"
-	case "tests/failures":
-		return "tests/fehler"
-	case "security/operational risks":
-		return "sicherheits-/betriebsrisiken"
-	case "backward compatibility":
-		return "rückwärtskompatibilität"
+	if check, ok := selfReviewCheckByAlias[value]; ok {
+		return check.ID
+	}
+	return value
+}
+
+func selfReviewPromptLabel(id string) string {
+	for _, check := range selfReviewChecklist {
+		if check.ID == id {
+			return check.PromptLabel
+		}
+	}
+	return id
+}
+
+func selfReviewExample() taskboardSelfReview {
+	checklist := make([]selfReviewItem, 0, len(selfReviewChecklist))
+	for _, check := range selfReviewChecklist {
+		checklist = append(checklist, selfReviewItem{Check: check.PromptLabel, Result: "passed", Details: check.ExampleDetails})
+	}
+	return taskboardSelfReview{
+		Status:    "passed",
+		Checklist: checklist,
+		Tests:     json.RawMessage(`"Test commands and results."`),
+		OpenRisks: json.RawMessage(`"Known risks or none."`),
+	}
+}
+
+func selfReviewExampleJSON() string {
+	raw, err := json.Marshal(selfReviewExample())
+	if err != nil {
+		panic("self-review example must marshal: " + err.Error())
+	}
+	return string(raw)
+}
+
+func selfReviewPromptSection() string {
+	labels := make([]string, len(selfReviewChecklist))
+	for i, check := range selfReviewChecklist {
+		labels[i] = check.PromptLabel
+	}
+	return "\n\nBefore the final comment or any handoff, output exactly one valid ```taskboard-self-review block. The JSON must use status=passed and exactly these five checklist categories: " +
+		englishList(labels, "and") +
+		". Each checklist result MUST be exactly one of: " +
+		englishList(selfReviewResultValues, "or") +
+		". Put human-readable evidence in the optional details field; never put a sentence in result. Example: ```taskboard-self-review\n" +
+		selfReviewExampleJSON() +
+		"\n``` If this block is missing, invalid, or failed, nothing is applied and no transition is executed."
+}
+
+func englishList(items []string, conjunction string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	case 2:
+		return items[0] + " " + conjunction + " " + items[1]
 	default:
-		return value
+		return strings.Join(items[:len(items)-1], ", ") + ", " + conjunction + " " + items[len(items)-1]
 	}
 }
 
@@ -3550,7 +3632,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	prompt += "\n\nRun the project-specific tests for your change and document the result in the final response. Prefix every test, build, or install command with `timeout 120s <command>` (or the platform equivalent). Do not use nested `bash -lc`, extra shell quoting, or evaluate `$?`; the execution environment reports status and output. If a command hangs or reaches its limit, document it as an open risk and continue with other useful checks. Remove generated development artifacts such as __pycache__, *.pyc, coverage files, and temporary data before finishing. Stop temporary servers and browser processes before finishing; do not use interactive or indefinitely waiting commands. Do not create a push, merge, release, or deployment."
 	prompt += "\n\nAt the end, document the result, changed areas, tests, and open risks for humans in exactly one ```taskboard-comment\n…\n``` block. If a new decision is required, output exactly one taskboard-interaction block: {\"key\":\"stable_key\",\"title\":\"Short question\",\"body\":\"Context\",\"fields\":[...]}. Supported field types: text, textarea, select, buttons. Do not ask for a binding user decision again. Use reopen:true and reason only when circumstances materially changed. After an answer, exactly one follow-up run starts. If you are reviewing and require rework, also output exactly one ```taskboard-transition\n{\"target\":\"In Progress\",\"comment\":\"specific rework\"}\n``` block; it is executed only when allowed by the board. Only the triage agent may additionally output one ```taskboard-update\n{\"title\":\"…\",\"description\":\"…\"}\n``` block and one ```taskboard-targets\n{\"project_ids\":[\"uuid\"],\"group_ids\":[]}\n``` block."
 	prompt += "\n\nProject creation is an exception to existing target projects: when a task asks to create or import projects from repository URLs, a missing project_id is expected and is not a blocker. Check for duplicates by repository URL and create missing projects; their project_id is assigned during creation. Require a project_id only when the task explicitly changes an already registered individual project. Never report a run as successful without implementing the requested work. If a decision is unavoidable, output exactly one valid taskboard-interaction block; every fields item must include id, label, and type, and select/buttons fields must include at least one option."
-	prompt += "\n\nBefore the final comment or any handoff, output exactly one valid ```taskboard-self-review block. The JSON must use status=passed and exactly these five checklist categories: Scope/Acceptance, Diff/Secrets, Tests/Failures, Security/Operational risks, and Backward compatibility. Each checklist result MUST be exactly one of: ok, passed, pass, bestanden, erfüllt, erfuellt, geprüft, or geprueft. Put human-readable evidence in the optional details field; never put a sentence in result. Example: ```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"Scope/Acceptance\",\"result\":\"passed\",\"details\":\"Scope implemented and acceptance criteria verified.\"},{\"check\":\"Diff/Secrets\",\"result\":\"passed\",\"details\":\"Diff reviewed; no secrets exposed.\"},{\"check\":\"Tests/Failures\",\"result\":\"passed\",\"details\":\"Relevant tests passed.\"},{\"check\":\"Security/Operational risks\",\"result\":\"passed\",\"details\":\"Risks reviewed.\"},{\"check\":\"Backward compatibility\",\"result\":\"passed\",\"details\":\"Compatibility reviewed.\"}],\"tests\":\"Test commands and results.\",\"open_risks\":\"Known risks or none.\"}\n``` If this block is missing, invalid, or failed, nothing is applied and no transition is executed."
+	prompt += selfReviewPromptSection()
 	if skills, err := w.Store.AgentSkills(ctx, run.AgentID); err == nil && len(skills) > 0 {
 		paths := make([]string, 0, len(skills))
 		for _, skill := range skills {
