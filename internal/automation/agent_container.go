@@ -196,6 +196,15 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 	if err := ensureAgentHomeLayout(homeHost, auth); err != nil {
 		return nil, err
 	}
+	// Rootless container runtimes remap non-root container UIDs to subordinate
+	// host UIDs. Directly bind-mounting a host-owned 0600 auth file therefore
+	// makes it unreadable to the container's configured user even when the
+	// numeric UID appears to match. Stage the allowlisted files into the
+	// per-run home instead: the runtime directory is service-private on the
+	// host, while the staged files can use container-readable modes.
+	if err := stageHostCLIAuth(homeHost, auth); err != nil {
+		return nil, err
+	}
 	if err := requireDurableBind(homeHost); err != nil {
 		return nil, err
 	}
@@ -236,7 +245,9 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 		session.ModelAPIProxy = true
 	}
 	user := containerUser()
-	mounts, err := agentContainerMounts(worktree, req.Policy, homeHost, auth, cli.Binds, req.ExtraWritable, hostMounts, relaySocket, relayScript)
+	containerAuth := auth
+	containerAuth.Binds = nil
+	mounts, err := agentContainerMounts(worktree, req.Policy, homeHost, containerAuth, cli.Binds, req.ExtraWritable, hostMounts, relaySocket, relayScript)
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +390,10 @@ func ensureAgentHomeLayout(homeHost string, auth hostCLIAuthPlan) error {
 	if err := os.MkdirAll(homeHost, 0o700); err != nil {
 		return err
 	}
-	if err := os.Chmod(homeHost, 0o700); err != nil {
+	// The bind root is already mode 0700 on the host. The per-run home itself
+	// must be traversable by a non-root container UID after rootless UID
+	// remapping, where the host owner is represented as container root.
+	if err := os.Chmod(homeHost, 0o755); err != nil {
 		return err
 	}
 	for _, dir := range auth.DestDirs {
@@ -398,6 +412,66 @@ func ensureAgentHomeLayout(homeHost string, auth hostCLIAuthPlan) error {
 		return err
 	}
 	return nil
+}
+
+// stageHostCLIAuth copies only the allowlisted CLI files into the per-run
+// home. The runtime directory itself is mode 0700 on the host, so making the
+// staged files readable by the container's remapped UID does not expose them
+// to unrelated host users. It also avoids nested bind mounts whose parent
+// ownership is interpreted differently by rootless Docker/Podman.
+func stageHostCLIAuth(homeHost string, auth hostCLIAuthPlan) error {
+	for _, bind := range auth.Binds {
+		rel, err := filepath.Rel(containerAgentHome, filepath.Clean(bind.Dest))
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return errors.New("Host-CLI-Login liegt außerhalb des Container-Home")
+		}
+		if err := copyContainerAuthPath(bind.Source, filepath.Join(homeHost, rel)); err != nil {
+			return fmt.Errorf("Host-CLI-Login konnte nicht für den Container vorbereitet werden: %w", err)
+		}
+	}
+	return nil
+}
+
+func copyContainerAuthPath(source, destination string) error {
+	info, err := os.Lstat(source)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("symbolische Links in Host-CLI-Login sind nicht erlaubt")
+	}
+	if info.IsDir() {
+		if err := os.MkdirAll(destination, 0o755); err != nil {
+			return err
+		}
+		if err := os.Chmod(destination, 0o755); err != nil {
+			return err
+		}
+		entries, err := os.ReadDir(source)
+		if err != nil {
+			return err
+		}
+		for _, entry := range entries {
+			if err := copyContainerAuthPath(filepath.Join(source, entry.Name()), filepath.Join(destination, entry.Name())); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("Host-CLI-Login enthält einen nicht unterstützten Dateityp")
+	}
+	body, err := os.ReadFile(source)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(destination, body, 0o644); err != nil {
+		return err
+	}
+	return os.Chmod(destination, 0o644)
 }
 
 func ensureRelayScript(path string) error {
