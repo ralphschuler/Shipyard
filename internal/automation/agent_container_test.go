@@ -518,7 +518,7 @@ func TestContainerExecUsesImageCodexCLI(t *testing.T) {
 			t.Fatalf("missing auth dir was mounted: %s", source)
 		}
 	}
-	want := []string{"python3", "/tmp/shipyard-model-api-relay.py", "/usr/local/bin/codex", "exec"}
+	want := []string{"python3", "/tmp/shipyard-model-api-relay.py", "/usr/local/bin/codex", "exec", "--skip-git-repo-check"}
 	if !reflect.DeepEqual(provider.execs[0].Command, want) {
 		t.Fatalf("exec = %#v", provider.execs[0].Command)
 	}

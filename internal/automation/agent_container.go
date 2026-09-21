@@ -332,7 +332,9 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 	// untrusted repository even though it is the dedicated run worktree. Scope
 	// the bypass to the in-image Codex CLI and this validated container path;
 	// do not weaken checks for arbitrary provider commands.
-	if req.Provider.Provider == "codex" && filepath.Base(cli.Argv[0]) == "codex" {
+	// Only `codex exec` consults the repository trust check. Keep diagnostic
+	// commands such as `codex --version` byte-for-byte unchanged.
+	if req.Provider.Provider == "codex" && filepath.Base(cli.Argv[0]) == "codex" && len(agentArgs) > 0 && agentArgs[0] == "exec" {
 		agentArgs = withCodexManagedWorktreeTrust(agentArgs)
 	}
 	execCommand = append(execCommand, agentArgs...)
