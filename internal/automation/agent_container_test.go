@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,8 @@ type recordingProvider struct {
 	name    string
 	specs   []container.Spec
 	execs   []container.ExecRequest
+	probes  []container.ExecRequest
+	execErr error
 	started []string
 	// before runs at the start of Create, before Spec.BeforeCreate. Tests use
 	// it to delete a bind source and prove the create path puts it back.
@@ -48,9 +51,13 @@ func (p *recordingProvider) Start(_ context.Context, id string) error {
 }
 func (p *recordingProvider) ExecArgs(_ context.Context, req container.ExecRequest) (string, []string, error) {
 	p.execs = append(p.execs, req)
-	return p.name, []string{"exec", "--env-file", req.EnvFile, req.ID, "--", req.Command[0]}, nil
+	return p.name, append([]string{"exec", "--env-file", req.EnvFile, req.ID}, req.Command...), nil
 }
-func (p *recordingProvider) Exec(context.Context, container.ExecRequest) ([]byte, error) {
+func (p *recordingProvider) Exec(_ context.Context, req container.ExecRequest) ([]byte, error) {
+	p.probes = append(p.probes, req)
+	if p.execErr != nil {
+		return nil, p.execErr
+	}
 	return []byte("ok"), nil
 }
 func (p *recordingProvider) Stop(context.Context, string) error   { return nil }
@@ -174,6 +181,40 @@ func TestStartAgentContainerUsesFallbackAndBindsAuthAndSecrets(t *testing.T) {
 		case containerAgentHome, "/tmp/shipyard-model-api.sock", "/tmp/shipyard-model-api-relay.py":
 			assertDurableRuntimePath(t, mount.Source)
 		}
+	}
+}
+
+func TestStartAgentContainerPythonProbeFailureNamesTheImage(t *testing.T) {
+	useContainerRuntimeRoot(t)
+	worktree := t.TempDir()
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("GROK_HOME", t.TempDir())
+	cause := errors.New(`exec: "--": executable file not found in $PATH`)
+	provider := &recordingProvider{name: "docker", execErr: cause}
+	_, err := startAgentContainer(context.Background(), agentContainerRequest{
+		RunID:    "run-python",
+		Worktree: worktree,
+		Policy:   builtinPolicy(t, "strict"),
+		Provider: domain.ProviderSetting{Provider: "codex"},
+		Command:  "sh",
+		Runtime:  provider,
+	})
+	if err == nil {
+		t.Fatal("expected the in-image python3 probe to fail")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "Agent-Image") || !strings.Contains(msg, "nicht auf dem Host") {
+		t.Fatalf("probe error does not say python3 is required inside the agent image: %s", msg)
+	}
+	if !strings.Contains(msg, cause.Error()) {
+		t.Fatalf("probe error dropped the runtime cause: %s", msg)
+	}
+	if len(provider.probes) != 1 {
+		t.Fatalf("probes = %+v", provider.probes)
+	}
+	got := strings.Join(provider.probes[0].Command, " ")
+	if got != "python3 -c import sys" {
+		t.Fatalf("probe command = %q", got)
 	}
 }
 

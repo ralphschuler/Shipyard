@@ -6,6 +6,8 @@
 # Rebuild this image when go.mod's Go version, the Node pin below, or the
 # Playwright lockfile version changes. GOTOOLCHAIN=local keeps the shell on
 # the image toolchain.
+# python3-minimal provides /usr/bin/python3 for the model-API allowlist relay
+# when an agent run builds this image. The host interpreter is not used.
 
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
@@ -28,6 +30,7 @@ RUN apt-get update \
         curl \
         git \
         postgresql-client \
+        python3-minimal \
         sudo \
         tmux \
         xz-utils \

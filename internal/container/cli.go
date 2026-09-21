@@ -156,7 +156,11 @@ func (p *cliProvider) ExecArgs(_ context.Context, req ExecRequest) (string, []st
 	if req.EnvFile != "" {
 		args = append(args, "--env-file", req.EnvFile)
 	}
-	args = append(args, req.ID, "--")
+	// The container id ends option parsing for Docker and Podman. A "--"
+	// after the id is executed as the program ("exec: --: executable file
+	// not found"), which made the in-image python3 probe fail even when
+	// /usr/bin/python3 was installed.
+	args = append(args, req.ID)
 	args = append(args, req.Command...)
 	return p.binary, args, nil
 }
