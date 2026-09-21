@@ -1371,7 +1371,7 @@ func TestRequestedSelfReviewAcceptsEnglishCategoriesAndNewestValidBlock(t *testi
 }
 
 func TestReviewProbeEnglishPromptRejected(t *testing.T) {
-	prompt := selfReviewPromptSection()
+	prompt := selfReviewPromptSection("Delivery Agent")
 	if !strings.Contains(prompt, `"check":"Scope/Acceptance"`) {
 		t.Fatalf("prompt example is missing the English Scope/Acceptance category: %s", prompt)
 	}
@@ -1843,8 +1843,8 @@ func TestExplicitTransitionSuppressesAutomationSuccessFallback(t *testing.T) {
 }
 
 func TestFormatAllowedTransitionsUsesIDsAndDisplayLabels(t *testing.T) {
-	got := formatAllowedTransitions([]domain.Transition{{ToColumnID: "development-id"}}, []domain.Column{{ID: "development-id", Name: "Entwicklung"}})
-	if !strings.Contains(got, "target_column_id") || !strings.Contains(got, "development-id") || !strings.Contains(got, "Entwicklung") {
+	got := formatAllowedTransitions([]domain.Transition{{ToColumnID: "development-id", ActionName: "Überarbeiten"}}, []domain.Column{{ID: "development-id", Name: "Entwicklung"}})
+	if !strings.Contains(got, "target_column_id") || !strings.Contains(got, "development-id") || !strings.Contains(got, "Entwicklung") || !strings.Contains(got, "Überarbeiten") {
 		t.Fatalf("missing structured transition context: %s", got)
 	}
 }

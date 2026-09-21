@@ -966,6 +966,69 @@ func TestWorkflowIntegrationAgentReviewReturnIncrementsRework(t *testing.T) {
 	}
 }
 
+func TestWorkflowIntegrationUeberarbeitenActionIncrementsRework(t *testing.T) {
+	s := integrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "Action name rework", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlog := columnByName(t, columns, "Backlog")
+	development := columnByName(t, columns, "Entwicklung")
+	review := columnByName(t, columns, "Review")
+	task, err := s.CreateTask(ctx, board.ID, "Ueberarbeiten by action", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	moveAlong(t, s, ctx, task.ID, backlog, development, review)
+	if moved, err := s.MoveTaskToNamedColumn(ctx, task.ID, "Überarbeiten", "agent_review"); err != nil || !moved {
+		t.Fatalf("agent_review Review→Überarbeiten: moved=%t err=%v", moved, err)
+	}
+	current, err := s.GetTask(ctx, task.ID)
+	if err != nil || current.ColumnName != "Entwicklung" || current.ReworkCount != 1 {
+		t.Fatalf("action-name rework = column %q count %d err=%v, want Entwicklung/1", current.ColumnName, current.ReworkCount, err)
+	}
+}
+
+func TestWorkflowIntegrationPassedReviewDoesNotIncrementRework(t *testing.T) {
+	s := integrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "Passed review is not rework", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlog := columnByName(t, columns, "Backlog")
+	development := columnByName(t, columns, "Entwicklung")
+	review := columnByName(t, columns, "Review")
+	done := columnByName(t, columns, "Erledigt")
+	task, err := s.CreateTask(ctx, board.ID, "Passed review stay or complete", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	moveAlong(t, s, ctx, task.ID, backlog, development, review)
+	current, err := s.GetTask(ctx, task.ID)
+	if err != nil || current.ReworkCount != 0 || current.ColumnName != "Review" {
+		t.Fatalf("passed review leave-in-place = column %q count %d err=%v", current.ColumnName, current.ReworkCount, err)
+	}
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, done.ID, "agent_review"); err != nil || !moved {
+		t.Fatalf("agent_review Review→Erledigt: moved=%t err=%v", moved, err)
+	}
+	current, err = s.GetTask(ctx, task.ID)
+	if err != nil || current.ReworkCount != 0 {
+		t.Fatalf("passed Review→Erledigt rework_count = %d err=%v, want 0", current.ReworkCount, err)
+	}
+}
+
 func deliverySource(t *testing.T, s *Store, ctx context.Context, runID string) string {
 	t.Helper()
 	source, err := s.RunSource(ctx, runID)

@@ -1947,11 +1947,18 @@ func (s *Store) allowedTransitionDiagnosis(c context.Context, taskID string) str
 }
 
 func (s *Store) MoveTaskToNamedColumn(c context.Context, taskID, name, source string) (bool, error) {
+	name = strings.TrimSpace(name)
 	var target string
 	err := s.DB.QueryRow(c, `SELECT c.id FROM tasks t JOIN workflow_columns c ON c.board_id=t.board_id
-		WHERE t.id=$1 AND lower(c.name)=lower($2) ORDER BY c.id LIMIT 1`, taskID, strings.TrimSpace(name)).Scan(&target)
+		WHERE t.id=$1 AND lower(c.name)=lower($2) ORDER BY c.id LIMIT 1`, taskID, name).Scan(&target)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, fmt.Errorf("unbekannte Zielspalte %q; erlaubte Übergänge: %s", strings.TrimSpace(name), s.allowedTransitionDiagnosis(c, taskID))
+		err = s.DB.QueryRow(c, `SELECT tr.to_column_id FROM tasks t
+			JOIN transitions tr ON tr.board_id=t.board_id AND tr.from_column_id=t.column_id
+			WHERE t.id=$1 AND lower(tr.action_name)=lower($2)
+			ORDER BY tr.to_column_id LIMIT 1`, taskID, name).Scan(&target)
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, fmt.Errorf("unbekannte Zielspalte %q; erlaubte Übergänge: %s", name, s.allowedTransitionDiagnosis(c, taskID))
 	}
 	if err != nil {
 		return false, err
