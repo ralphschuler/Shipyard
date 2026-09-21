@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"taskboard/internal/domain"
@@ -73,9 +72,7 @@ func TestAccumulateOpenAIUsageKeepsMissingNativeCostUnknown(t *testing.T) {
 }
 
 func TestRunToolCommandUsesWorktree(t *testing.T) {
-	if _, err := exec.LookPath("bwrap"); err != nil {
-		t.Skip("bubblewrap is required for the real sandbox integration test")
-	}
+	requireBubblewrap(t)
 	dir := t.TempDir()
 	output := runToolCommand(context.Background(), dir, "pwd")
 	if strings.TrimSpace(output) != "/workspace" {
