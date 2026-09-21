@@ -3672,19 +3672,16 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		_ = w.finish(ctx, run, "failed")
 		return
 	}
-	selectedModel, selectedEffort := strings.TrimSpace(agent.Model), strings.TrimSpace(agent.ReasoningEffort)
-	selection := domain.RunSelection{Stage: "0", PolicyVersion: "agent-selection", DiscoverySource: "agent-selection", Fallback: "none", BudgetDecision: "not-evaluated"}
+	selectedModel, selectedEffort, selection, decision, policyErr := w.resolveAgentRunSelection(ctx, task, taskErr, agent, provider)
+	if policyErr != nil {
+		reason := "Agent pausiert: " + policyErr.Error()
+		w.persistIncompleteUsage(ctx, run, provider.Provider, "", "invalid_rework_policy")
+		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
+		_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+		_ = w.finish(ctx, run, "failed")
+		return
+	}
 	if taskErr == nil && task.ReworkCount > 0 {
-		decision, policyErr := w.evaluateReworkSelection(ctx, task, agent, provider)
-		if policyErr != nil {
-			reason := "Agent pausiert: " + policyErr.Error()
-			w.persistIncompleteUsage(ctx, run, provider.Provider, "", "invalid_rework_policy")
-			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
-			_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
-			_ = w.finish(ctx, run, "failed")
-			return
-		}
-		selection = runSelectionFromDecision(decision)
 		_ = w.Store.SetRunSelection(ctx, run.ID, selection)
 		_ = w.Store.AddRunLog(ctx, run.ID, "info", formatReworkSelectionLog(decision))
 		if decision.Status != "selected" {
@@ -3695,7 +3692,6 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			_ = w.finish(ctx, run, "failed")
 			return
 		}
-		selectedModel, selectedEffort = decision.Model, decision.Effort
 	}
 	if selectedModel == "" || selectedEffort == "" {
 		reason := "Agent pausiert: Modell und Reasoning-Effort müssen über Discovery ausgewählt werden"
@@ -4169,7 +4165,55 @@ func (w *Worker) evaluateReworkSelection(ctx context.Context, task domain.Task, 
 	if err != nil {
 		return ReworkDecision{}, err
 	}
-	return ResolveReworkSelection(policy, w.storedReworkPolicy(ctx), task.ReworkCount, w.providerCapabilities(ctx, provider)), nil
+	stored := w.storedReworkPolicy(ctx)
+	discovery := w.providerCapabilities(ctx, provider)
+	if policy.HumanEscalationAfter > 0 && task.ReworkCount >= policy.HumanEscalationAfter {
+		limit := policy.BudgetMicrousd
+		if !policy.BudgetConfigured {
+			limit = stored.BudgetLimitMicrousd
+		}
+		source := discovery.Source
+		if source == "" {
+			source = "provider-discovery"
+		}
+		d := ReworkDecision{
+			Status:              "human",
+			Reason:              "human escalation threshold reached",
+			ReworkNumber:        task.ReworkCount,
+			PolicyVersion:       policy.Version,
+			DiscoverySource:     source,
+			BudgetLimitMicrousd: limit,
+		}
+		d.BudgetDecision = formatBudgetDecision(d.Status, limit, 0)
+		return d, nil
+	}
+	decision := ResolveReworkSelection(policy, stored, policyStageIndex(task.ReworkCount), discovery)
+	decision.ReworkNumber = task.ReworkCount
+	return decision, nil
+}
+
+func policyStageIndex(reworkCount int) int {
+	if reworkCount <= 0 {
+		return 0
+	}
+	return reworkCount - 1
+}
+
+func (w *Worker) resolveAgentRunSelection(ctx context.Context, task domain.Task, taskErr error, agent domain.Agent, provider domain.ProviderSetting) (string, string, domain.RunSelection, ReworkDecision, error) {
+	selectedModel, selectedEffort := strings.TrimSpace(agent.Model), strings.TrimSpace(agent.ReasoningEffort)
+	selection := domain.RunSelection{Stage: "0", PolicyVersion: "agent-selection", DiscoverySource: "agent-selection", Fallback: "none", BudgetDecision: "not-evaluated"}
+	if taskErr != nil || task.ReworkCount <= 0 {
+		return selectedModel, selectedEffort, selection, ReworkDecision{}, nil
+	}
+	decision, err := w.evaluateReworkSelection(ctx, task, agent, provider)
+	if err != nil {
+		return selectedModel, selectedEffort, selection, decision, err
+	}
+	selection = runSelectionFromDecision(decision)
+	if decision.Status == "selected" {
+		selectedModel, selectedEffort = decision.Model, decision.Effort
+	}
+	return selectedModel, selectedEffort, selection, decision, nil
 }
 
 func (w *Worker) providerCapabilities(ctx context.Context, provider domain.ProviderSetting) CapabilityDiscovery {

@@ -186,6 +186,21 @@ func TestQAReviewReturnDistinguishesForwardMovesFromRework(t *testing.T) {
 	}
 }
 
+func TestExplicitReworkTransitionIgnoresColumnDrag(t *testing.T) {
+	if explicitReworkTransition("web", true) || explicitReworkTransition("mcp", true) || explicitReworkTransition("automation", true) {
+		t.Fatal("column drag, MCP, and automation moves must not increment rework")
+	}
+	if !explicitReworkTransition("qa_rework", false) {
+		t.Fatal("QA rework decisions must increment even if the board graph is unusual")
+	}
+	if !explicitReworkTransition("agent_review", true) {
+		t.Fatal("agent review returns to Entwicklung must increment")
+	}
+	if explicitReworkTransition("agent_review", false) {
+		t.Fatal("agent review forward moves such as Review→QA must not increment")
+	}
+}
+
 func TestRunTargetSelectionRejectsMissingTargets(t *testing.T) {
 	if err := requireRunTargets(nil); !errors.Is(err, ErrTargetSelectionRequired) {
 		t.Fatalf("missing targets error = %v, want ErrTargetSelectionRequired", err)

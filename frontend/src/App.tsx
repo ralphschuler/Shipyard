@@ -5326,7 +5326,11 @@ function RunDetail({ id }: { id: string }) {
         <Card className="mt-6">
           <CardHeader>
             <CardTitle>Usage & Kosten</CardTitle>
-            <CardDescription>{data.usage?.Provider || "unbekannter Provider"} · {data.usage?.Model || "unbekanntes Modell"}</CardDescription>
+            <CardDescription>
+              {data.usage?.Provider || "unbekannter Provider"} · {data.usage?.Model || data.selection?.Model || "unbekanntes Modell"}
+              {data.selection?.Stage ? ` · Stufe ${data.selection.Stage}` : ""}
+              {data.selection?.PolicyVersion ? ` · ${data.selection.PolicyVersion}` : ""}
+            </CardDescription>
           </CardHeader>
           <CardContent className="grid gap-2 text-sm sm:grid-cols-2">
             {([['Input', data.usage?.InputTokens], ['Output', data.usage?.OutputTokens], ['Cache-Input', data.usage?.CachedInputTokens], ['Cache-Schreiben', data.usage?.CacheWriteTokens], ['Reasoning', data.usage?.ReasoningTokens], ['Gesamt', data.usage?.TotalTokens]] as [string, number | null | undefined][]).map(([label, value]) => <p key={label}><span className="text-muted-foreground">{label}: </span>{value == null ? 'unbekannt' : value.toLocaleString('de-DE')}</p>)}

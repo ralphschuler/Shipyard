@@ -260,9 +260,11 @@ func normalizeInteractionResponse(schemaRaw []byte, legacyKey string, response m
 
 type agentView struct {
 	domain.Agent
-	Skills  []domain.InstalledSkill
-	Models  []string
-	Efforts []string
+	Skills          []domain.InstalledSkill
+	Models          []string
+	Efforts         []string
+	DiscoveryError  string
+	DiscoverySource string
 }
 type ruleView struct {
 	domain.AutomationRule
@@ -276,6 +278,7 @@ type runPage struct {
 	Task             domain.Task
 	Delivery         domain.RunDelivery
 	Usage            domain.UsageReport
+	Selection        domain.RunSelection
 	SandboxProfile   string
 	SandboxEffective string
 }
@@ -448,6 +451,8 @@ func webTemplateFunctions() template.FuncMap {
 			return "Automation"
 		case "agent_review":
 			return "Agent-Review"
+		case "qa_rework":
+			return "QA-Nacharbeit"
 		case "agent_interaction":
 			return "Agentenentscheidung"
 		case "agent_failure":
@@ -941,27 +946,51 @@ func (a *App) agents(w http.ResponseWriter, r *http.Request) {
 	for _, provider := range providers {
 		providerByName[provider.Provider] = provider
 	}
+	createModels, createEfforts := discoveredSelectionOptions(r.Context(), providerByName["codex"])
+	if len(createModels) == 0 {
+		for _, provider := range providers {
+			createModels, createEfforts = discoveredSelectionOptions(r.Context(), provider)
+			if len(createModels) > 0 {
+				break
+			}
+		}
+	}
 	for _, agent := range agents {
 		assigned, err := a.store.AgentSkills(r.Context(), agent.ID)
 		if err != nil {
 			http.Error(w, err.Error(), 500)
 			return
 		}
-		models := []string{"gpt-5", "gpt-5-mini"}
-		efforts := []string{"low", "medium", "high", "xhigh"}
-		if provider, ok := providerByName[agent.Adapter]; ok && provider.Provider == "grokbot" {
-			capabilities := automation.GrokbotCapabilities(provider.Options)
-			models, efforts = capabilities.Models, capabilities.Efforts
-			if len(models) == 0 && provider.Model != "" {
-				models = []string{provider.Model}
-			}
+		provider := providerByName[agent.Adapter]
+		if provider.Provider == "" {
+			provider = providerByName["codex"]
+		}
+		caps := automation.DiscoverProviderCapabilities(r.Context(), provider)
+		models, efforts := caps.Models, caps.Efforts
+		if len(efforts) == 0 {
+			efforts = []string{"low", "medium", "high", "xhigh"}
 		}
 		if agent.Model != "" && !containsString(models, agent.Model) {
 			models = append([]string{agent.Model}, models...)
 		}
-		views = append(views, agentView{Agent: agent, Skills: assigned, Models: models, Efforts: efforts})
+		if agent.ReasoningEffort != "" && !containsString(efforts, agent.ReasoningEffort) {
+			efforts = append([]string{agent.ReasoningEffort}, efforts...)
+		}
+		views = append(views, agentView{Agent: agent, Skills: assigned, Models: models, Efforts: efforts, DiscoveryError: caps.Error, DiscoverySource: caps.Source})
 	}
-	a.render(r, w, "agents.html", map[string]any{"Agents": views, "Skills": skills, "SandboxProfiles": profiles, "Providers": providers})
+	a.render(r, w, "agents.html", map[string]any{"Agents": views, "Skills": skills, "SandboxProfiles": profiles, "Providers": providers, "CreateModels": createModels, "CreateEfforts": createEfforts})
+}
+
+func discoveredSelectionOptions(ctx context.Context, provider domain.ProviderSetting) ([]string, []string) {
+	if provider.Provider == "" {
+		return nil, []string{"low", "medium", "high", "xhigh"}
+	}
+	caps := automation.DiscoverProviderCapabilities(ctx, provider)
+	efforts := caps.Efforts
+	if len(efforts) == 0 {
+		efforts = []string{"low", "medium", "high", "xhigh"}
+	}
+	return caps.Models, efforts
 }
 
 func containsString(values []string, target string) bool {
@@ -3091,7 +3120,8 @@ func (a *App) run(w http.ResponseWriter, r *http.Request) {
 			sandboxEffective = string(encoded)
 		}
 	}
-	a.render(r, w, "run.html", runPage{Run: run, Queue: queue, Logs: newRunLogView(logs, truncated, run.ID), Task: task, Delivery: delivery, Usage: usage, SandboxProfile: sandboxName, SandboxEffective: sandboxEffective})
+	selection, _ := a.store.RunSelection(r.Context(), run.ID)
+	a.render(r, w, "run.html", runPage{Run: run, Queue: queue, Logs: newRunLogView(logs, truncated, run.ID), Task: task, Delivery: delivery, Usage: usage, Selection: selection, SandboxProfile: sandboxName, SandboxEffective: sandboxEffective})
 }
 func (a *App) runLogs(w http.ResponseWriter, r *http.Request) {
 	run, err := a.store.Run(r.Context(), r.PathValue("id"))

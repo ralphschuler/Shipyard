@@ -73,9 +73,9 @@
                     min="1" /></label
                 ><label>Sandbox-Profil<select name="sandbox_profile" required>{{range $.SandboxProfiles}}<option value="{{.Name}}"{{if eq .Name $agent.SandboxProfile}} selected{{end}}>{{.Name}} — {{.Description}}</option>{{end}}</select></label
                 ><label>Provider<select name="adapter" required>{{range $.Providers}}<option value="{{.Provider}}"{{if eq .Provider $agent.Adapter}} selected{{end}}>{{.Provider}}</option>{{end}}</select></label
-                ><label>Modell<select name="model" required>{{range .Models}}<option value="{{.}}"{{if eq . $.Model}} selected{{end}}>{{.}}</option>{{else}}<option value="{{$.Model}}" selected>{{if $.Model}}{{$.Model}}{{else}}Aus Discovery wählen{{end}}</option>{{end}}</select></label
-                ><label>Reasoning-Effort<select name="reasoning_effort" required>{{range .Efforts}}<option value="{{.}}"{{if eq . $.ReasoningEffort}} selected{{end}}>{{.}}</option>{{end}}</select></label
-                ><label>Eskalationspolicy (JSON)<textarea name="escalation_policy">{{.EscalationPolicy}}</textarea></label
+                ><label>Modell<select name="model" required>{{range .Models}}<option value="{{.}}"{{if eq . $agent.Model}} selected{{end}}>{{.}}</option>{{else}}<option value="{{$agent.Model}}" selected>{{if $agent.Model}}{{$agent.Model}}{{else}}Aus Discovery wählen{{end}}</option>{{end}}</select>{{if .DiscoveryError}}<small>{{.DiscoveryError}} — Provider prüfen oder Discovery erneut ausführen.</small>{{end}}</label
+                ><label>Reasoning-Effort<select name="reasoning_effort" required>{{range .Efforts}}<option value="{{.}}"{{if eq . $agent.ReasoningEffort}} selected{{end}}>{{.}}</option>{{else}}<option value="{{$agent.ReasoningEffort}}" selected>{{if $agent.ReasoningEffort}}{{$agent.ReasoningEffort}}{{else}}Effort wählen{{end}}</option>{{end}}</select></label
+                ><label>Eskalationspolicy (JSON)<textarea name="escalation_policy" required spellcheck="false">{{.EscalationPolicy}}</textarea><small>Normale Runs verwenden Modell und Effort oben. Jede explizite Review-/QA-Rückgabe nach Entwicklung wählt die nächste Stufe aus stages, bis human_escalation_after oder budget_microusd greift.</small></label
                 ><label
                   ><input
                     type="checkbox"
@@ -176,9 +176,9 @@
           /></label>
           <label>Sandbox-Profil<select name="sandbox_profile" required>{{range .SandboxProfiles}}<option value="{{.Name}}"{{if eq .Name "strict"}} selected{{end}}>{{.Name}} — {{.Description}}</option>{{end}}</select></label>
           <label>Provider<select name="adapter" required>{{range $.Providers}}<option value="{{.Provider}}">{{.Provider}}</option>{{end}}</select></label>
-          <label>Modell<select name="model" required><option value="gpt-5">gpt-5</option><option value="gpt-5-mini">gpt-5-mini</option></select></label>
-          <label>Reasoning-Effort<select name="reasoning_effort" required><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option></select></label>
-          <label>Eskalationspolicy (JSON)<textarea name="escalation_policy">{}</textarea></label>
+          <label>Modell<select name="model" required><option value="">Modell aus Discovery wählen</option>{{range $.CreateModels}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
+          <label>Reasoning-Effort<select name="reasoning_effort" required><option value="">Effort wählen</option>{{range $.CreateEfforts}}<option value="{{.}}">{{.}}</option>{{end}}</select></label>
+          <label>Eskalationspolicy (JSON)<textarea name="escalation_policy" required spellcheck="false">{}</textarea><small>{} verwendet die getestete Standard-Eskalation. stages müssen mindestens eine Modell-/Effort-Stufe enthalten, sobald der Task aus dem Review zurückkommt.</small></label>
           <fieldset>
             <legend>Erlaubte Skills</legend>
             <div class="skill-chips">

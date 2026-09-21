@@ -879,6 +879,93 @@ func TestWorkflowIntegrationExplicitRejectionIncrementsReworkOnce(t *testing.T) 
 	}
 }
 
+func TestWorkflowIntegrationColumnDragDoesNotIncrementRework(t *testing.T) {
+	s := integrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "Drag is not rework", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlog := columnByName(t, columns, "Backlog")
+	development := columnByName(t, columns, "Entwicklung")
+	review := columnByName(t, columns, "Review")
+	task, err := s.CreateTask(ctx, board.ID, "Drag return", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	moveAlong(t, s, ctx, task.ID, backlog, development, review)
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, development.ID, "web"); err != nil || !moved {
+		t.Fatalf("web drag Review→Entwicklung: moved=%t err=%v", moved, err)
+	}
+	current, err := s.GetTask(ctx, task.ID)
+	if err != nil || current.ReworkCount != 0 {
+		t.Fatalf("web drag rework_count = %d err=%v, want 0", current.ReworkCount, err)
+	}
+	eventType, payload := latestTaskEvent(t, s, ctx, task.ID)
+	if eventType != "task.entered_column" {
+		t.Fatalf("drag event type = %q, want task.entered_column", eventType)
+	}
+	var flags struct {
+		QAReturn        bool `json:"qa_return"`
+		ReworkRequested bool `json:"rework_requested"`
+	}
+	if err = json.Unmarshal(payload, &flags); err != nil || !flags.QAReturn || flags.ReworkRequested {
+		t.Fatalf("drag payload = %s, want qa_return without rework_requested", payload)
+	}
+}
+
+func TestWorkflowIntegrationAgentReviewReturnIncrementsRework(t *testing.T) {
+	s := integrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "Agent review rework", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlog := columnByName(t, columns, "Backlog")
+	development := columnByName(t, columns, "Entwicklung")
+	review := columnByName(t, columns, "Review")
+	task, err := s.CreateTask(ctx, board.ID, "Agent review return", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	moveAlong(t, s, ctx, task.ID, backlog, development, review)
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, development.ID, "agent_review"); err != nil || !moved {
+		t.Fatalf("agent_review Review→Entwicklung: moved=%t err=%v", moved, err)
+	}
+	current, err := s.GetTask(ctx, task.ID)
+	if err != nil || current.ReworkCount != 1 {
+		t.Fatalf("agent_review rework_count = %d err=%v, want 1", current.ReworkCount, err)
+	}
+	_, payload := latestTaskEvent(t, s, ctx, task.ID)
+	var flags struct {
+		QAReturn        bool `json:"qa_return"`
+		ReworkRequested bool `json:"rework_requested"`
+	}
+	if err = json.Unmarshal(payload, &flags); err != nil || !flags.QAReturn || !flags.ReworkRequested {
+		t.Fatalf("agent_review payload = %s, want qa_return and rework_requested", payload)
+	}
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, review.ID, "mcp"); err != nil {
+		t.Fatal(err)
+	}
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, development.ID, "agent_review"); err != nil || !moved {
+		t.Fatalf("second agent_review return: moved=%t err=%v", moved, err)
+	}
+	current, err = s.GetTask(ctx, task.ID)
+	if err != nil || current.ReworkCount != 2 {
+		t.Fatalf("second agent_review rework_count = %d err=%v, want 2", current.ReworkCount, err)
+	}
+}
+
 func deliverySource(t *testing.T, s *Store, ctx context.Context, runID string) string {
 	t.Helper()
 	source, err := s.RunSource(ctx, runID)

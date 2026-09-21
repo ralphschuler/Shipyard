@@ -208,6 +208,79 @@ func TestWorkerEvaluateReworkSelectionLifecycle(t *testing.T) {
 	}
 }
 
+func TestWorkerEvaluateReworkSelectionAdvancesConfiguredStagesUntilCap(t *testing.T) {
+	w := &Worker{discoverCapabilities: func(context.Context, domain.ProviderSetting) CapabilityDiscovery {
+		return CapabilityDiscovery{
+			Models:  []string{"gpt-a", "gpt-b"},
+			Efforts: []string{"medium", "high", "xhigh"},
+			Source:  "test discovery",
+		}
+	}}
+	provider := domain.ProviderSetting{Provider: "codex"}
+	policy := `{"version":"ladder-v1","stages":[{"model":"gpt-a","effort":"medium"},{"model":"gpt-a","effort":"high"},{"model":"gpt-b","effort":"xhigh"}],"human_escalation_after":4,"budget_microusd":100,"estimated_cost_microusd":{"gpt-a/medium":10,"gpt-a/high":20,"gpt-b/xhigh":40}}`
+	agent := domain.Agent{EscalationPolicy: policy}
+	want := []struct {
+		count                 int
+		status, model, effort string
+	}{
+		{1, "selected", "gpt-a", "medium"},
+		{2, "selected", "gpt-a", "high"},
+		{3, "selected", "gpt-b", "xhigh"},
+		{4, "human", "", ""},
+	}
+	for _, test := range want {
+		decision, err := w.evaluateReworkSelection(context.Background(), domain.Task{ReworkCount: test.count}, agent, provider)
+		if err != nil {
+			t.Fatalf("rework %d: %v", test.count, err)
+		}
+		if decision.Status != test.status || decision.ReworkNumber != test.count {
+			t.Fatalf("rework %d = %#v, want status=%s number=%d", test.count, decision, test.status, test.count)
+		}
+		if test.status == "selected" && (decision.Model != test.model || decision.Effort != test.effort) {
+			t.Fatalf("rework %d selected %#v, want %s/%s", test.count, decision, test.model, test.effort)
+		}
+	}
+	capped, err := w.evaluateReworkSelection(context.Background(), domain.Task{ReworkCount: 2}, domain.Agent{
+		EscalationPolicy: `{"version":"cap-v1","stages":[{"model":"gpt-a","effort":"medium"},{"model":"gpt-a","effort":"high"}],"human_escalation_after":7,"budget_microusd":100,"estimated_cost_microusd":{"gpt-a/medium":10,"gpt-a/high":20}}`,
+	}, provider)
+	if err != nil || capped.Status != "selected" || capped.Model != "gpt-a" || capped.Effort != "high" {
+		t.Fatalf("further rework must stay on last stage: %#v err=%v", capped, err)
+	}
+	overBudget, err := w.evaluateReworkSelection(context.Background(), domain.Task{ReworkCount: 2}, domain.Agent{
+		EscalationPolicy: `{"version":"budget-v1","stages":[{"model":"gpt-a","effort":"medium"},{"model":"gpt-a","effort":"high"}],"budget_microusd":15,"estimated_cost_microusd":{"gpt-a/medium":10,"gpt-a/high":20}}`,
+	}, provider)
+	if err != nil || overBudget.Status != "budget" {
+		t.Fatalf("over-budget later stage = %#v err=%v, want budget stop", overBudget, err)
+	}
+}
+
+func TestResolveAgentRunSelectionUsesPolicyStageNotHardcodedZero(t *testing.T) {
+	w := &Worker{discoverCapabilities: func(context.Context, domain.ProviderSetting) CapabilityDiscovery {
+		return CapabilityDiscovery{Models: []string{"gpt-a", "gpt-b"}, Efforts: []string{"medium", "high"}, Source: "test discovery"}
+	}}
+	provider := domain.ProviderSetting{Provider: "codex"}
+	agent := domain.Agent{
+		Model:            "gpt-a",
+		ReasoningEffort:  "medium",
+		EscalationPolicy: `{"version":"delivery-v1","stages":[{"model":"gpt-a","effort":"medium"},{"model":"gpt-b","effort":"high"}],"budget_microusd":100,"estimated_cost_microusd":{"gpt-a/medium":10,"gpt-b/high":40}}`,
+	}
+	model, effort, selection, _, err := w.resolveAgentRunSelection(context.Background(), domain.Task{}, nil, agent, provider)
+	if err != nil || model != "gpt-a" || effort != "medium" || selection.Stage != "0" || selection.PolicyVersion != "agent-selection" {
+		t.Fatalf("initial run selection = %s/%s %#v err=%v", model, effort, selection, err)
+	}
+	model, effort, selection, decision, err := w.resolveAgentRunSelection(context.Background(), domain.Task{ReworkCount: 1}, nil, agent, provider)
+	if err != nil || decision.Status != "selected" || model != "gpt-a" || effort != "medium" {
+		t.Fatalf("first rework selection = %s/%s %#v err=%v", model, effort, decision, err)
+	}
+	if selection.Stage != "1" || selection.PolicyVersion != "delivery-v1" {
+		t.Fatalf("first rework snapshot = %#v, want stage 1 from delivery-v1", selection)
+	}
+	model, effort, selection, decision, err = w.resolveAgentRunSelection(context.Background(), domain.Task{ReworkCount: 2}, nil, agent, provider)
+	if err != nil || decision.Status != "selected" || model != "gpt-b" || effort != "high" || selection.Stage != "2" {
+		t.Fatalf("second rework selection = %s/%s %#v stage=%s err=%v", model, effort, decision, selection.Stage, err)
+	}
+}
+
 func TestOverlayProbeUnknownModelAndZeroBudgetDoesNotSelect(t *testing.T) {
 	policy, err := ReworkPolicyFromJSON(`{"stages":[{"model":"not-in-provider-discovery","effort":"high"}],"budget_microusd":0}`)
 	if err != nil {
