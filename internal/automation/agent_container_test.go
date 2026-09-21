@@ -530,6 +530,44 @@ func TestContainerExecUsesImageCodexCLI(t *testing.T) {
 	}
 }
 
+func TestPrepareContainerMountAccessForRootlessAgent(t *testing.T) {
+	root := t.TempDir()
+	executable := filepath.Join(root, "run.sh")
+	plain := filepath.Join(root, "plain.txt")
+	nested := filepath.Join(root, "nested")
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plain, []byte("data\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareContainerMountAccess(root, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{root, nested} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat directory %s: %v", path, err)
+		}
+		if info.Mode().Perm() != 0o777 {
+			t.Fatalf("directory %s mode = %o", path, info.Mode().Perm())
+		}
+	}
+	if info, err := os.Stat(executable); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0o777 {
+		t.Fatalf("executable mode = %o", info.Mode().Perm())
+	}
+	if info, err := os.Stat(plain); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0o666 {
+		t.Fatalf("plain file mode = %o", info.Mode().Perm())
+	}
+}
+
 func TestContainerStartSkipsMissingAuthDirs(t *testing.T) {
 	useContainerRuntimeRoot(t)
 	home := t.TempDir()
