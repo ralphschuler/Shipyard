@@ -405,6 +405,9 @@ func startCLISandbox(ctx context.Context, req cliSandboxRequest) (*cliSandbox, e
 	return session, nil
 }
 
+// resolveCLICommand is the bubblewrap lookup. A path under /usr is left
+// unbound because bubblewrap mounts the host /usr tree. Agent containers
+// have a separate root filesystem and must use resolveContainerCLI.
 func resolveCLICommand(command string) (string, []string, string, error) {
 	command = strings.TrimSpace(command)
 	if command == "" {

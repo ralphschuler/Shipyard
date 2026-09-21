@@ -10,6 +10,9 @@
 # by the service account. This image intentionally has no baked-in login.
 # python3-minimal provides /usr/bin/python3 for the model-API allowlist relay.
 # The host interpreter is not used.
+# Provider CLIs (Codex and the other host logins) are not installed in this
+# image. The runner bind-mounts the host install read-only and starts Node
+# entrypoints with this image's node. Login files stay off the image.
 
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 

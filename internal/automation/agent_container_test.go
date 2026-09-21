@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"syscall"
@@ -18,14 +19,15 @@ import (
 )
 
 type recordingProvider struct {
-	name    string
-	specs   []container.Spec
-	execs   []container.ExecRequest
-	probes  []container.ExecRequest
-	pulls   []string
-	pullErr func(image string) error
-	execErr error
-	started []string
+	name     string
+	specs    []container.Spec
+	execs    []container.ExecRequest
+	probes   []container.ExecRequest
+	pulls    []string
+	pullErr  func(image string) error
+	execErr  error
+	probeErr func(command []string) error
+	started  []string
 	// before runs at the start of Create, before Spec.BeforeCreate. Tests use
 	// it to delete a bind source and prove the create path puts it back.
 	before func(*container.Spec) error
@@ -66,6 +68,11 @@ func (p *recordingProvider) ExecArgs(_ context.Context, req container.ExecReques
 }
 func (p *recordingProvider) Exec(_ context.Context, req container.ExecRequest) ([]byte, error) {
 	p.probes = append(p.probes, req)
+	if p.probeErr != nil {
+		if err := p.probeErr(req.Command); err != nil {
+			return nil, err
+		}
+	}
 	if p.execErr != nil {
 		return nil, p.execErr
 	}
@@ -458,6 +465,102 @@ func assertOwnedByContainerExecUser(t *testing.T, info os.FileInfo) {
 	}
 }
 
+func TestContainerExecResolvesHostCodexCLI(t *testing.T) {
+	useContainerRuntimeRoot(t)
+	install := writeHostCodexInstall(t)
+	useHostCodexOnPATH(t, install)
+	worktree := t.TempDir()
+	codexHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte("{\"token\":\"login\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("GROK_HOME", t.TempDir())
+	provider := &recordingProvider{name: "docker"}
+	session, err := startAgentContainer(context.Background(), agentContainerRequest{
+		RunID:    "run-codex-cli",
+		Worktree: worktree,
+		Policy:   builtinPolicy(t, "strict"),
+		Provider: domain.ProviderSetting{Provider: "codex"},
+		Command:  "codex",
+		Args:     []string{"exec"},
+		Runtime:  provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if len(provider.specs) != 1 || len(provider.execs) != 1 {
+		t.Fatalf("creates=%d execs=%d", len(provider.specs), len(provider.execs))
+	}
+	assertSamePathMount(t, provider.specs[0].Mounts, install.scope)
+	assertSamePathMount(t, provider.specs[0].Mounts, install.cache)
+	assertMount(t, provider.specs[0].Mounts, filepath.Join(codexHome, "auth.json"), true)
+	for _, mount := range provider.specs[0].Mounts {
+		source := filepath.Clean(mount.Source)
+		for _, blocked := range []string{install.bin, install.link, install.npmDir, filepath.Dir(install.scope), install.root, codexHome} {
+			if source == filepath.Clean(blocked) {
+				t.Fatalf("container mount replaced %s", source)
+			}
+		}
+	}
+	want := []string{"python3", "/tmp/shipyard-model-api-relay.py", "node", install.script, "exec"}
+	if !reflect.DeepEqual(provider.execs[0].Command, want) {
+		t.Fatalf("exec = %#v", provider.execs[0].Command)
+	}
+	if len(provider.probes) != 2 {
+		t.Fatalf("probes = %+v", provider.probes)
+	}
+	if got := strings.Join(provider.probes[0].Command, " "); got != "python3 -c import sys" {
+		t.Fatalf("python probe = %q", got)
+	}
+	if got := strings.Join(provider.probes[1].Command, " "); got != "node -e process.exit(0)" {
+		t.Fatalf("node probe = %q", got)
+	}
+}
+
+func TestContainerExecNodeProbeFailureNamesTheImage(t *testing.T) {
+	useContainerRuntimeRoot(t)
+	install := writeHostCodexInstall(t)
+	useHostCodexOnPATH(t, install)
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("GROK_HOME", t.TempDir())
+	cause := errors.New("executable file not found in $PATH")
+	provider := &recordingProvider{
+		name: "docker",
+		probeErr: func(command []string) error {
+			if len(command) > 0 && command[0] == "node" {
+				return cause
+			}
+			return nil
+		},
+	}
+	_, err := startAgentContainer(context.Background(), agentContainerRequest{
+		RunID:    "run-codex-node",
+		Worktree: t.TempDir(),
+		Policy:   builtinPolicy(t, "strict"),
+		Provider: domain.ProviderSetting{Provider: "codex"},
+		Command:  "codex",
+		Runtime:  provider,
+	})
+	if err == nil {
+		t.Fatal("expected the in-image node probe to fail")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "Agent-Image") || !strings.Contains(msg, "nicht das Host-Node") || !strings.Contains(msg, "codex") {
+		t.Fatalf("probe error = %s", msg)
+	}
+	if !strings.Contains(msg, cause.Error()) {
+		t.Fatalf("probe error dropped the runtime cause: %s", msg)
+	}
+	if len(provider.probes) != 2 || provider.probes[1].Command[0] != "node" {
+		t.Fatalf("probes = %+v", provider.probes)
+	}
+	if len(provider.execs) != 0 {
+		t.Fatalf("exec continued after the node probe failed: %+v", provider.execs)
+	}
+}
+
 func TestStartAgentContainerPythonProbeFailureNamesTheImage(t *testing.T) {
 	useContainerRuntimeRoot(t)
 	worktree := t.TempDir()
@@ -825,6 +928,24 @@ func assertDurableRuntimePath(t *testing.T, path string) {
 	if strings.Contains(filepath.Base(path), "shipyard-agent-home-") && parent == filepath.Clean(os.TempDir()) {
 		t.Fatalf("bind source %s still uses a service-private temp home", path)
 	}
+}
+
+func assertSamePathMount(t *testing.T, mounts []container.Mount, source string) {
+	t.Helper()
+	source = filepath.Clean(source)
+	for _, mount := range mounts {
+		if filepath.Clean(mount.Source) != source {
+			continue
+		}
+		if !mount.ReadOnly {
+			t.Fatalf("mount %s is writable", source)
+		}
+		if filepath.Clean(mount.Target) != source {
+			t.Fatalf("mount target = %s, want %s", mount.Target, source)
+		}
+		return
+	}
+	t.Fatalf("mount %s missing in %+v", source, mounts)
 }
 
 func assertMount(t *testing.T, mounts []container.Mount, source string, readOnly bool) {
