@@ -141,12 +141,22 @@ func samePath(left, right string) bool {
 	return leftErr == nil && rightErr == nil && filepath.Clean(leftResolved) == filepath.Clean(rightResolved)
 }
 
-// reviewAttachmentSandbox keeps the operator's network policy and forces the
-// shared Delivery tree to be read-only for the Review process.
+// reviewAttachmentSandbox makes the shared Delivery worktree read-only for
+// Review. Writable built-in profiles cannot change WriteMode (ValidateProfile
+// rejects that), so they are replaced by the built-in qa-readonly profile.
+// An already-readonly profile is left unchanged, including a custom network
+// policy. A custom writable profile keeps its network mode and only switches
+// WriteMode.
 func reviewAttachmentSandbox(policy sandbox.Profile) sandbox.Profile {
-	if policy.WriteMode != "readonly" {
-		policy.WriteMode = "readonly"
+	if policy.WriteMode == "readonly" {
+		return policy
 	}
+	if builtin, err := sandbox.Get(policy.Name); err == nil && builtin.WriteMode != "readonly" {
+		if readonly, getErr := sandbox.Get("qa-readonly"); getErr == nil {
+			return readonly
+		}
+	}
+	policy.WriteMode = "readonly"
 	return policy
 }
 
