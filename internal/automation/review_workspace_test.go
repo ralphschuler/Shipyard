@@ -128,14 +128,41 @@ func TestAttachReviewRejectsForeignRepository(t *testing.T) {
 }
 
 func TestReviewAttachmentSandboxIsReadOnly(t *testing.T) {
-	writable := sandbox.Profile{Name: "strict", Mounts: []string{"worktree"}, NetworkMode: "none", WriteMode: "worktree", Active: true}
-	got := reviewAttachmentSandbox(writable)
-	if got.WriteMode != "readonly" || got.NetworkMode != "none" || got.Name != "strict" {
-		t.Fatalf("writable profile was not constrained: %#v", got)
+	strict := sandbox.Profile{Name: "strict", Mounts: []string{"worktree"}, NetworkMode: "none", WriteMode: "worktree", Active: true}
+	got := reviewAttachmentSandbox(strict)
+	if got.Name != "qa-readonly" || got.WriteMode != "readonly" || got.NetworkMode != "none" || !got.Active {
+		t.Fatalf("strict profile was not switched to qa-readonly: %#v", got)
 	}
+	worktree := t.TempDir()
+	if _, err := sandbox.EffectiveProfile(got, worktree); err != nil {
+		t.Fatalf("qa-readonly review attachment failed sandbox validation: %v", err)
+	}
+	args, err := cliSandboxArgs(worktree, got, "sh", []string{"-c", "true"}, nil)
+	if err != nil {
+		t.Fatalf("sandbox start rejected the review attachment profile: %v", err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--ro-bind "+worktree) {
+		t.Fatalf("review attachment did not ro-bind the delivery worktree: %s", joined)
+	}
+
+	development := sandbox.Profile{Name: "development", Mounts: []string{"worktree"}, NetworkMode: "none", WriteMode: "worktree", Active: true}
+	if switched := reviewAttachmentSandbox(development); switched.Name != "qa-readonly" || switched.WriteMode != "readonly" {
+		t.Fatalf("development profile was not switched to qa-readonly: %#v", switched)
+	}
+
 	already := reviewAttachmentSandbox(sandbox.Profile{Name: "qa-readonly", NetworkMode: "qa-network", WriteMode: "readonly"})
-	if already.WriteMode != "readonly" || already.NetworkMode != "qa-network" {
+	if already.Name != "qa-readonly" || already.WriteMode != "readonly" || already.NetworkMode != "qa-network" {
 		t.Fatalf("readonly profile changed: %#v", already)
+	}
+
+	custom := sandbox.Profile{Name: "qa-network", Mounts: []string{"worktree"}, NetworkMode: "qa-network", WriteMode: "worktree", Active: true}
+	kept := reviewAttachmentSandbox(custom)
+	if kept.Name != "qa-network" || kept.WriteMode != "readonly" || kept.NetworkMode != "qa-network" {
+		t.Fatalf("custom writable profile lost its network policy: %#v", kept)
+	}
+	if err := sandbox.ValidateProfile(kept); err != nil {
+		t.Fatalf("custom readonly profile is invalid: %v", err)
 	}
 }
 
