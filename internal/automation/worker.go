@@ -1958,6 +1958,13 @@ func applyRunPatch(ctx context.Context, source, worktree, runID string, startSHA
 	return commitSHA, nil
 }
 
+// tmuxProviderRunnerScript isolates authentic CLI completion from the live
+// terminal. Stdout is redirected whenever a trusted output path is supplied,
+// including Claude's argv-only prompt transport which has no stdin.
+func tmuxProviderRunnerScript() string {
+	return "#!/usr/bin/env bash\nset +e\nsleep 0.1\nmapfile -d '' -t argv < \"$1\"\nif [[ -n \"$4\" ]]; then\n  if [[ -n \"$3\" ]]; then\n    \"${argv[@]}\" < \"$3\" > \"$4\"\n  else\n    \"${argv[@]}\" > \"$4\"\n  fi\nelif [[ -n \"$3\" ]]; then\n  \"${argv[@]}\" < \"$3\"\nelse\n  \"${argv[@]}\"\nfi\ncode=$?\nprintf '%s' \"$code\" > \"$2\"\nexit \"$code\"\n"
+}
+
 // runInTmux keeps a real interactive terminal for each CLI provider while
 // mirroring every pane byte into the durable run log. The separate logfile
 // avoids tmux's finite scrollback being the source of truth.
@@ -1989,8 +1996,7 @@ func (w *Worker) runInTmux(ctx context.Context, runID, directory, command string
 			return 0, err
 		}
 	}
-	const runner = "#!/usr/bin/env bash\nset +e\nsleep 0.1\nmapfile -d '' -t argv < \"$1\"\nif [[ -n \"$3\" && -n \"$4\" ]]; then\n  \"${argv[@]}\" < \"$3\" > \"$4\"\nelif [[ -n \"$3\" ]]; then\n  \"${argv[@]}\" < \"$3\"\nelse\n  \"${argv[@]}\"\nfi\ncode=$?\nprintf '%s' \"$code\" > \"$2\"\nexit \"$code\"\n"
-	if err := os.WriteFile(runnerPath, []byte(runner), 0o700); err != nil {
+	if err := os.WriteFile(runnerPath, []byte(tmuxProviderRunnerScript()), 0o700); err != nil {
 		return 0, err
 	}
 	defer os.Remove(argsPath)
@@ -3518,18 +3524,18 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			w.failSecretAudit(ctx, run, provider.Provider, provider.Model)
 			return
 		}
-		var text string
-		var usage openAIUsage
+		var response responsesRunResult
 		var responseErr error
 		if provider.Provider == "grokbot" {
-			text, usage, responseErr = runGrokbotResponsesWithPolicy(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot, runSandbox)
+			response, responseErr = runGrokbotResponsesWithPolicy(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot, runSandbox)
 		} else {
-			text, usage, responseErr = runOpenAIResponsesWithPolicy(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot, runSandbox)
+			response, responseErr = runOpenAIResponsesWithPolicy(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot, runSandbox)
 		}
-		out, tokenUsage, inputTokens, outputTokens, estimatedCostMicrousd, err = []byte(text), usage.TotalTokens, usage.InputTokens, usage.OutputTokens, usage.EstimatedCostMicrousd, responseErr
-		cachedInputTokens, cacheWriteTokens, reasoningTokens = usage.CachedInputTokens, usage.CacheWriteTokens, usage.ReasoningTokens
-		apiCalls, nativeCostMicrousd = usage.APICalls, usage.NativeCostMicrousd
-		serviceTier = usage.ServiceTier
+		out, tokenUsage, inputTokens, outputTokens, estimatedCostMicrousd, err = []byte(response.Transcript), response.Usage.TotalTokens, response.Usage.InputTokens, response.Usage.OutputTokens, response.Usage.EstimatedCostMicrousd, responseErr
+		cachedInputTokens, cacheWriteTokens, reasoningTokens = response.Usage.CachedInputTokens, response.Usage.CacheWriteTokens, response.Usage.ReasoningTokens
+		apiCalls, nativeCostMicrousd = response.Usage.APICalls, response.Usage.NativeCostMicrousd
+		serviceTier = response.Usage.ServiceTier
+		structuredOutput = response.Completion
 	} else {
 		if runSandbox.NetworkMode == "bridge-only" {
 			reason := "release-bridge blockiert direkte Provider-Kommandos"

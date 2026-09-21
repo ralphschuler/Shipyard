@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +15,7 @@ import (
 )
 
 func TestRunOpenAIResponsesWithPolicyRejectsBridgeOnlyBeforeProviderOrSecretValidation(t *testing.T) {
-	_, _, err := runOpenAIResponsesWithPolicy(context.Background(), domain.ProviderSetting{}, "", "prompt", t.TempDir(), sandbox.Profile{NetworkMode: "bridge-only"})
+	_, err := runOpenAIResponsesWithPolicy(context.Background(), domain.ProviderSetting{}, "", "prompt", t.TempDir(), sandbox.Profile{NetworkMode: "bridge-only"})
 	if err == nil || !strings.Contains(err.Error(), "bridge-only") {
 		t.Fatalf("bridge-only must fail closed before provider/secret validation, got %v", err)
 	}
@@ -118,4 +119,88 @@ func TestOpenAIToolSandboxArgumentsAllowNetworkOnlyForQAPolicy(t *testing.T) {
 	if strings.Index(joined, "--share-net") > strings.Index(joined, "--ro-bind") {
 		t.Fatalf("network option appears after mount options: %s", joined)
 	}
+}
+
+func TestAssembleResponsesRunKeepsToolTranscriptOutOfCompletion(t *testing.T) {
+	toolEcho := germanDeliveryCompletion("FROM TOOL")
+	completion := germanDeliveryCompletion("FROM ASSISTANT")
+	result := assembleResponsesRun([]string{"$ cat leaked.txt\n" + toolEcho}, completion, openAIUsage{TotalTokens: 3})
+	if result.Completion != completion {
+		t.Fatalf("completion = %q, want authentic assistant text", result.Completion)
+	}
+	if !strings.Contains(result.Transcript, "FROM TOOL") || !strings.Contains(result.Transcript, "FROM ASSISTANT") {
+		t.Fatalf("transcript lost tool or assistant text: %q", result.Transcript)
+	}
+	control := controlLogsForAgent("Delivery Agent", []domain.RunLog{{Message: result.Transcript}}, result.Completion)
+	comments := requestedTaskComments(control)
+	if len(comments) != 1 || comments[0] != "FROM ASSISTANT" {
+		t.Fatalf("tool transcript leaked into the control channel: %#v", comments)
+	}
+}
+
+func TestRunOpenAIResponsesIsolatesFinalAssistantText(t *testing.T) {
+	installDummyBwrap(t)
+	completion := germanDeliveryCompletion("OpenAI Abschluss")
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(openaiCompletionPayload(t, completion))
+	}))
+	t.Cleanup(server.Close)
+	previous := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = previous })
+
+	result, err := runOpenAIResponsesWithPolicy(context.Background(), domain.ProviderSetting{
+		Provider:  "openai",
+		Model:     "gpt-test",
+		SecretEnv: "OPENAI_API_KEY",
+		BaseURL:   server.URL,
+	}, "test-key", "implement the task", t.TempDir(), sandbox.Profile{NetworkMode: "none", WriteMode: "worktree", Mounts: []string{"worktree"}})
+	if err != nil {
+		t.Fatalf("OpenAI completion failed: %v", err)
+	}
+	if strings.TrimSpace(result.Completion) != strings.TrimSpace(completion) {
+		t.Fatalf("completion = %q, want %q", result.Completion, completion)
+	}
+	control := controlLogsForAgent("Delivery Agent", []domain.RunLog{{Message: germanDeliveryCompletion("FROM LOGS")}}, result.Completion)
+	if _, err := requestedSelfReview(control); err != nil {
+		t.Fatalf("OpenAI completion must populate the self-review channel: %v", err)
+	}
+	comments := requestedTaskComments(control)
+	if len(comments) != 1 || comments[0] != "OpenAI Abschluss" {
+		t.Fatalf("comments = %#v", comments)
+	}
+}
+
+func installDummyBwrap(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "bwrap")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("TASKBOARD_BWRAP_PREFLIGHT", "0")
+}
+
+func openaiCompletionPayload(t *testing.T, text string) []byte {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"id":          "resp_test",
+		"status":      "completed",
+		"output_text": text,
+		"output": []map[string]any{{
+			"type":    "message",
+			"content": []map[string]any{{"type": "output_text", "text": text}},
+		}},
+		"usage": map[string]any{"input_tokens": 4, "output_tokens": 5, "total_tokens": 9},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
 }
