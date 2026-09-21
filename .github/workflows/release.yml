@@ -167,6 +167,11 @@ jobs:
       contents: read
       packages: write
     steps:
+      - name: Check out built commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_COMMIT }}
+          fetch-depth: 1
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
@@ -228,21 +233,7 @@ jobs:
       - name: Make the package public
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # Agent hosts pull this image without a registry login. A package
-          # published by GITHUB_TOKEN starts private until visibility is set.
-          for attempt in 1 2 3 4 5; do
-            if gh api --method PUT \
-              -H "Accept: application/vnd.github+json" \
-              "/users/${GITHUB_REPOSITORY_OWNER}/packages/container/shipyard-agent-base/visibility" \
-              -f visibility=public; then
-              exit 0
-            fi
-            sleep "$attempt"
-          done
-          echo "could not make ghcr.io/${GITHUB_REPOSITORY_OWNER}/shipyard-agent-base public" >&2
-          exit 1
+        run: ./scripts/publish-agent-base-visibility.sh
 
   publish:
     name: Publish GitHub release
