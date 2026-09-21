@@ -286,6 +286,21 @@ func TestLoginThrottleExpiredWindowResetsState(t *testing.T) {
 	}
 }
 
+func TestLoginThrottleSuccessDoesNotAllowStaleFailureToRestoreState(t *testing.T) {
+	throttle := newLoginThrottle()
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	client := "192.0.2.13"
+
+	if throttle.blocked(client, at) {
+		t.Fatal("request was unexpectedly blocked")
+	}
+	throttle.succeeded(client)
+	throttle.failed(client, at)
+	if _, ok := throttle.attempts[client]; ok {
+		t.Fatal("a stale failure restored state after a successful login")
+	}
+}
+
 func TestLoginThrottleParallelRequestsReserveLimit(t *testing.T) {
 	throttle := newLoginThrottle()
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)

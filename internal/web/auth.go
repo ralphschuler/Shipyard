@@ -130,18 +130,13 @@ func (l *loginThrottle) failed(client string, at time.Time) {
 
 	l.pruneExpired(at)
 	a, ok := l.attempts[client]
-	if ok && a.until.After(at) {
+	// A failure only belongs to a request that was admitted by blocked. In
+	// particular, do not recreate state that a concurrent successful login has
+	// just removed.
+	if !ok || a.until.After(at) || a.pending == 0 {
 		return
 	}
-	if !ok && len(l.attempts) >= loginMaxClients {
-		return
-	}
-	if a.windowUntil.IsZero() {
-		a.windowUntil = at.Add(loginWindow)
-	}
-	if a.pending > 0 {
-		a.pending--
-	}
+	a.pending--
 	a.failures++
 	if a.failures >= loginMaxFailures {
 		a.until = at.Add(loginWindow)
