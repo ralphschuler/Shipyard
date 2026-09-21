@@ -139,8 +139,9 @@ func TestStartAgentContainerUsesFallbackAndBindsAuthAndSecrets(t *testing.T) {
 	}
 	assertMount(t, spec.Mounts, worktree, false)
 	assertMount(t, spec.Mounts, outDir, false)
-	assertMount(t, spec.Mounts, filepath.Join(codexHome, "auth.json"), true)
-	assertMount(t, spec.Mounts, filepath.Join(codexHome, "config.toml"), true)
+	assertContainerHomeMount(t, spec.Mounts)
+	assertContainerHomeFile(t, spec.Mounts, filepath.Join(containerAgentHome, ".codex", "auth.json"))
+	assertContainerHomeFile(t, spec.Mounts, filepath.Join(containerAgentHome, ".codex", "config.toml"))
 	for _, mount := range spec.Mounts {
 		if mount.Source == codexHome {
 			t.Fatal("host CLI home was mounted as a whole")
@@ -494,7 +495,7 @@ func TestContainerExecUsesImageCodexCLI(t *testing.T) {
 	if len(provider.specs) != 1 || len(provider.execs) != 1 {
 		t.Fatalf("creates=%d execs=%d", len(provider.specs), len(provider.execs))
 	}
-	assertMount(t, provider.specs[0].Mounts, filepath.Join(codexHome, "auth.json"), true)
+	assertContainerHomeFile(t, provider.specs[0].Mounts, filepath.Join(containerAgentHome, ".codex", "auth.json"))
 	for _, mount := range provider.specs[0].Mounts {
 		source := filepath.Clean(mount.Source)
 		for _, blocked := range []string{install.bin, install.link, install.script, install.scope, install.cache, install.npmDir, install.root, codexHome} {
@@ -608,10 +609,9 @@ func TestContainerMountsClaudeLoginFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	assertMount(t, provider.specs[0].Mounts, cred, true)
-	assertMount(t, provider.specs[0].Mounts, dot, true)
-	assertMountTarget(t, provider.specs[0].Mounts, cred, filepath.Join(containerAgentHome, ".claude", ".credentials.json"))
-	assertMountTarget(t, provider.specs[0].Mounts, dot, filepath.Join(containerAgentHome, ".claude.json"))
+	assertContainerHomeMount(t, provider.specs[0].Mounts)
+	assertContainerHomeFile(t, provider.specs[0].Mounts, filepath.Join(containerAgentHome, ".claude", ".credentials.json"))
+	assertContainerHomeFile(t, provider.specs[0].Mounts, filepath.Join(containerAgentHome, ".claude.json"))
 	for _, mount := range provider.specs[0].Mounts {
 		if mount.Source == claudeDir || strings.HasSuffix(mount.Source, "sessions.json") {
 			t.Fatalf("claude home or session file was mounted: %+v", mount)
@@ -917,7 +917,7 @@ func TestAgentHomeIsRecreatedImmediatelyBeforeCreate(t *testing.T) {
 	if err != nil || !info.IsDir() {
 		t.Fatalf("agent home was not recreated before create: %v", err)
 	}
-	if info.Mode().Perm() != 0o700 {
+	if info.Mode().Perm() != 0o755 {
 		t.Fatalf("agent home mode = %o", info.Mode().Perm())
 	}
 	for _, dir := range []string{".config", ".cache", ".codex"} {
@@ -1026,6 +1026,54 @@ func assertMount(t *testing.T, mounts []container.Mount, source string, readOnly
 		}
 	}
 	t.Fatalf("mount %s missing in %+v", source, mounts)
+}
+
+func assertContainerHomeMount(t *testing.T, mounts []container.Mount) {
+	t.Helper()
+	for _, mount := range mounts {
+		if filepath.Clean(mount.Target) == filepath.Clean(containerAgentHome) {
+			if mount.ReadOnly {
+				t.Fatalf("container home is read-only: %+v", mount)
+			}
+			info, err := os.Stat(mount.Source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != 0o755 {
+				t.Fatalf("container home source mode = %o, want 755", info.Mode().Perm())
+			}
+			return
+		}
+	}
+	t.Fatalf("container home mount missing in %+v", mounts)
+}
+
+func assertContainerHomeFile(t *testing.T, mounts []container.Mount, target string) {
+	t.Helper()
+	for _, mount := range mounts {
+		if filepath.Clean(mount.Target) == filepath.Clean(target) {
+			t.Fatalf("auth file unexpectedly uses a nested bind mount: %+v", mount)
+		}
+	}
+	for _, mount := range mounts {
+		if filepath.Clean(mount.Target) != filepath.Clean(containerAgentHome) {
+			continue
+		}
+		rel, err := filepath.Rel(containerAgentHome, target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		staged := filepath.Join(mount.Source, rel)
+		info, err := os.Stat(staged)
+		if err != nil {
+			t.Fatalf("staged auth file missing: %s: %v", staged, err)
+		}
+		if info.Mode().Perm() != 0o644 {
+			t.Fatalf("staged auth mode = %o, want 644", info.Mode().Perm())
+		}
+		return
+	}
+	t.Fatalf("container auth target missing: %s", target)
 }
 
 func readTestFile(t *testing.T, path string) []byte {
