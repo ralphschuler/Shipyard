@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"syscall"
@@ -18,14 +19,15 @@ import (
 )
 
 type recordingProvider struct {
-	name    string
-	specs   []container.Spec
-	execs   []container.ExecRequest
-	probes  []container.ExecRequest
-	pulls   []string
-	pullErr func(image string) error
-	execErr error
-	started []string
+	name     string
+	specs    []container.Spec
+	execs    []container.ExecRequest
+	probes   []container.ExecRequest
+	pulls    []string
+	pullErr  func(image string) error
+	execErr  error
+	probeErr func(command []string) error
+	started  []string
 	// before runs at the start of Create, before Spec.BeforeCreate. Tests use
 	// it to delete a bind source and prove the create path puts it back.
 	before func(*container.Spec) error
@@ -66,6 +68,11 @@ func (p *recordingProvider) ExecArgs(_ context.Context, req container.ExecReques
 }
 func (p *recordingProvider) Exec(_ context.Context, req container.ExecRequest) ([]byte, error) {
 	p.probes = append(p.probes, req)
+	if p.probeErr != nil {
+		if err := p.probeErr(req.Command); err != nil {
+			return nil, err
+		}
+	}
 	if p.execErr != nil {
 		return nil, p.execErr
 	}
@@ -458,6 +465,171 @@ func assertOwnedByContainerExecUser(t *testing.T, info os.FileInfo) {
 	}
 }
 
+func TestContainerExecUsesImageCodexCLI(t *testing.T) {
+	useContainerRuntimeRoot(t)
+	install := writeHostCodexInstall(t)
+	useHostCodexOnPATH(t, install)
+	worktree := t.TempDir()
+	codexHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(codexHome, "auth.json"), []byte("{\"token\":\"login\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", codexHome)
+	t.Setenv("GROK_HOME", filepath.Join(t.TempDir(), "missing-grok"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), "missing-claude"))
+	provider := &recordingProvider{name: "docker"}
+	session, err := startAgentContainer(context.Background(), agentContainerRequest{
+		RunID:    "run-codex-cli",
+		Worktree: worktree,
+		Policy:   builtinPolicy(t, "strict"),
+		Provider: domain.ProviderSetting{Provider: "codex"},
+		Command:  "codex",
+		Args:     []string{"exec"},
+		Runtime:  provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if len(provider.specs) != 1 || len(provider.execs) != 1 {
+		t.Fatalf("creates=%d execs=%d", len(provider.specs), len(provider.execs))
+	}
+	assertMount(t, provider.specs[0].Mounts, filepath.Join(codexHome, "auth.json"), true)
+	for _, mount := range provider.specs[0].Mounts {
+		source := filepath.Clean(mount.Source)
+		for _, blocked := range []string{install.bin, install.link, install.script, install.scope, install.cache, install.npmDir, install.root, codexHome} {
+			if source == filepath.Clean(blocked) {
+				t.Fatalf("container mount replaced %s", source)
+			}
+		}
+		if strings.Contains(source, "missing-grok") || strings.Contains(source, "missing-claude") {
+			t.Fatalf("missing auth dir was mounted: %s", source)
+		}
+	}
+	want := []string{"python3", "/tmp/shipyard-model-api-relay.py", "/usr/local/bin/codex", "exec"}
+	if !reflect.DeepEqual(provider.execs[0].Command, want) {
+		t.Fatalf("exec = %#v", provider.execs[0].Command)
+	}
+	if len(provider.probes) != 1 || strings.Join(provider.probes[0].Command, " ") != "python3 -c import sys" {
+		t.Fatalf("probes = %+v", provider.probes)
+	}
+}
+
+func TestContainerStartSkipsMissingAuthDirs(t *testing.T) {
+	useContainerRuntimeRoot(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	missing := map[string]string{
+		"CODEX_HOME":        filepath.Join(home, "no-codex"),
+		"GROK_HOME":         filepath.Join(home, "no-grok"),
+		"CLAUDE_CONFIG_DIR": filepath.Join(home, "no-claude"),
+	}
+	for key, path := range missing {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s unexpectedly exists: %v", path, err)
+		}
+		t.Setenv(key, path)
+	}
+	cases := []struct {
+		provider string
+		command  string
+	}{
+		{provider: "codex", command: "codex"},
+		{provider: "claude", command: "claude"},
+		{provider: "grokbot", command: "grok"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.provider, func(t *testing.T) {
+			provider := &recordingProvider{name: "docker"}
+			session, err := startAgentContainer(context.Background(), agentContainerRequest{
+				RunID:    "run-missing-auth-" + tc.provider,
+				Worktree: t.TempDir(),
+				Policy:   builtinPolicy(t, "strict"),
+				Provider: domain.ProviderSetting{Provider: tc.provider},
+				Command:  tc.command,
+				Args:     []string{"--version"},
+				Runtime:  provider,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+			want := []string{"python3", "/tmp/shipyard-model-api-relay.py", "/usr/local/bin/" + tc.command, "--version"}
+			if !reflect.DeepEqual(provider.execs[0].Command, want) {
+				t.Fatalf("exec = %#v", provider.execs[0].Command)
+			}
+			if session.HostAuthLog != "" {
+				t.Fatalf("auth log = %q", session.HostAuthLog)
+			}
+			for _, mount := range provider.specs[0].Mounts {
+				for _, path := range missing {
+					if filepath.Clean(mount.Source) == path || strings.HasPrefix(filepath.Clean(mount.Source), path+string(filepath.Separator)) {
+						t.Fatalf("missing dir %s was mounted", path)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestContainerMountsClaudeLoginFiles(t *testing.T) {
+	useContainerRuntimeRoot(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	t.Setenv("CODEX_HOME", filepath.Join(home, "missing-codex"))
+	t.Setenv("GROK_HOME", filepath.Join(home, "missing-grok"))
+	claudeDir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(claudeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cred := filepath.Join(claudeDir, ".credentials.json")
+	if err := os.WriteFile(cred, []byte("{\"token\":\"login\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "sessions.json"), []byte("skip"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dot := filepath.Join(home, ".claude.json")
+	if err := os.WriteFile(dot, []byte("{\"user\":\"a\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provider := &recordingProvider{name: "docker"}
+	session, err := startAgentContainer(context.Background(), agentContainerRequest{
+		RunID:    "run-claude-auth",
+		Worktree: t.TempDir(),
+		Policy:   builtinPolicy(t, "strict"),
+		Provider: domain.ProviderSetting{Provider: "claude"},
+		Command:  "claude",
+		Args:     []string{"--print"},
+		Runtime:  provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	assertMount(t, provider.specs[0].Mounts, cred, true)
+	assertMount(t, provider.specs[0].Mounts, dot, true)
+	assertMountTarget(t, provider.specs[0].Mounts, cred, filepath.Join(containerAgentHome, ".claude", ".credentials.json"))
+	assertMountTarget(t, provider.specs[0].Mounts, dot, filepath.Join(containerAgentHome, ".claude.json"))
+	for _, mount := range provider.specs[0].Mounts {
+		if mount.Source == claudeDir || strings.HasSuffix(mount.Source, "sessions.json") {
+			t.Fatalf("claude home or session file was mounted: %+v", mount)
+		}
+		if !mount.ReadOnly && (mount.Source == cred || mount.Source == dot) {
+			t.Fatalf("login mount is writable: %+v", mount)
+		}
+	}
+	wantExec := []string{"python3", "/tmp/shipyard-model-api-relay.py", "/usr/local/bin/claude", "--print"}
+	if !reflect.DeepEqual(provider.execs[0].Command, wantExec) {
+		t.Fatalf("exec = %#v", provider.execs[0].Command)
+	}
+	envText := string(readTestFile(t, provider.execs[0].EnvFile))
+	if !strings.Contains(envText, "CLAUDE_CONFIG_DIR="+containerAgentHome+"/.claude") {
+		t.Fatalf("claude config dir was not redirected: %s", envText)
+	}
+}
+
 func TestStartAgentContainerPythonProbeFailureNamesTheImage(t *testing.T) {
 	useContainerRuntimeRoot(t)
 	worktree := t.TempDir()
@@ -825,6 +997,21 @@ func assertDurableRuntimePath(t *testing.T, path string) {
 	if strings.Contains(filepath.Base(path), "shipyard-agent-home-") && parent == filepath.Clean(os.TempDir()) {
 		t.Fatalf("bind source %s still uses a service-private temp home", path)
 	}
+}
+
+func assertMountTarget(t *testing.T, mounts []container.Mount, source, target string) {
+	t.Helper()
+	source = filepath.Clean(source)
+	target = filepath.Clean(target)
+	for _, mount := range mounts {
+		if filepath.Clean(mount.Source) == source {
+			if filepath.Clean(mount.Target) != target {
+				t.Fatalf("mount %s target = %s, want %s", source, mount.Target, target)
+			}
+			return
+		}
+	}
+	t.Fatalf("mount %s missing", source)
 }
 
 func assertMount(t *testing.T, mounts []container.Mount, source string, readOnly bool) {

@@ -118,6 +118,9 @@ func cliContainerRuntimeAvailable(ctx context.Context) error {
 //     outside the worktree.
 //   - Allowlisted host CLI login files are mounted read-only under the
 //     container home. The host home directory itself is never mounted.
+//     Codex, Claude, and Grok config directories that do not exist are
+//     skipped. Codex, Claude Code, and the Grok CLI themselves come from
+//     the agent image (/usr/local/bin), not from a host binary mount.
 //   - Task-assigned secrets are injected through an exec env-file. The
 //     container does not receive the Shipyard service environment.
 //   - Bind sources Shipyard creates (agent home, secret env-file, model-API
@@ -180,7 +183,7 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 		plan.Image = image
 		plan.Detail = detail
 	}
-	resolved, cliBinds, extraPath, err := resolveCLICommand(req.Command)
+	cli, err := resolveContainerCLI(req.Command)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +236,7 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 		session.ModelAPIProxy = true
 	}
 	user := containerUser()
-	mounts, err := agentContainerMounts(worktree, req.Policy, homeHost, auth, cliBinds, req.ExtraWritable, hostMounts, relaySocket, relayScript)
+	mounts, err := agentContainerMounts(worktree, req.Policy, homeHost, auth, cli.Binds, req.ExtraWritable, hostMounts, relaySocket, relayScript)
 	if err != nil {
 		return nil, err
 	}
@@ -291,16 +294,26 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 			return nil, fmt.Errorf("Container-Lauf braucht python3 im Agent-Image für den Modell-API-Allowlist-Proxy (nicht auf dem Host): %w", err)
 		}
 	}
+	if cli.NeedsNode {
+		if _, err := runtime.Exec(ctx, container.ExecRequest{
+			ID:      id,
+			Command: []string{"node", "-e", "process.exit(0)"},
+			Workdir: "/",
+			User:    user,
+		}); err != nil {
+			return nil, fmt.Errorf("Container-Lauf braucht node im Agent-Image, um den Host-CLI-Launcher %q zu starten (nicht das Host-Node): %w", req.Command, err)
+		}
+	}
 	envFile := homeHost + ".env"
 	if err := requireDurableBind(envFile); err != nil {
 		return nil, err
 	}
-	entries := containerExecEnv(auth, req.Secrets, hostEnv, extraPath, relaySocket != "")
+	entries := containerExecEnv(auth, req.Secrets, hostEnv, cli.ExtraPATH, relaySocket != "")
 	if err := writeContainerEnvFile(envFile, entries); err != nil {
 		return nil, err
 	}
 	session.closeFns = append(session.closeFns, func() error { return os.Remove(envFile) })
-	execCommand := []string{resolved}
+	execCommand := append([]string{}, cli.Argv...)
 	execCommand = append(execCommand, req.Args...)
 	if relayScript != "" {
 		execCommand = append([]string{"python3", "/tmp/shipyard-model-api-relay.py"}, execCommand...)

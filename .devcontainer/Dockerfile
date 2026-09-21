@@ -6,6 +6,8 @@
 # Rebuild when the base tag below changes, or when the Playwright lockfile
 # version changes. GOTOOLCHAIN=local keeps the shell on the image toolchain.
 # python3 for the model-API allowlist relay is already in the base image.
+# Codex, Claude Code, and the Grok CLI are installed in the base image.
+# Do not npm-install a second copy here.
 
 ARG SHIPYARD_AGENT_BASE=ghcr.io/ralphschuler/shipyard-agent-base:v0.1
 FROM ${SHIPYARD_AGENT_BASE}

@@ -363,6 +363,7 @@ func isolateHostCLIAuth(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("CODEX_HOME", "")
 	t.Setenv("GROK_HOME", "")
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 }
 
 func hasArgSeq(args []string, seq ...string) bool {
@@ -524,6 +525,65 @@ func TestCLISandboxIgnoresMissingHostCLIAuth(t *testing.T) {
 	}
 	if strings.Contains(joined, "CODEX_HOME") || strings.Contains(joined, "GROK_HOME") {
 		t.Fatalf("missing host login still set CLI home env: %s", joined)
+	}
+}
+
+func TestCLISandboxMountsHostClaudeAuthReadOnly(t *testing.T) {
+	isolateHostCLIAuth(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	claudeDir := filepath.Join(home, ".claude")
+	cred := writeHostCLIAuthFile(t, claudeDir, ".credentials.json", `{"token":"redacted"}`)
+	settings := writeHostCLIAuthFile(t, claudeDir, "settings.json", "{}\n")
+	writeHostCLIAuthFile(t, claudeDir, "sessions.json", "not-auth")
+	dot := writeHostCLIAuthFile(t, home, ".claude.json", `{"user":"a"}`)
+
+	args, err := buildSandboxArgs(sandboxExec{
+		Worktree: t.TempDir(),
+		Policy:   builtinPolicy(t, "strict"),
+		Layout:   sandboxLayoutCLI,
+		Provider: "claude",
+		Command:  "sh",
+		Args:     []string{"-c", "true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArgSeq(args, "--ro-bind", cred, filepath.Join(sandboxCLIHome, ".claude", ".credentials.json")) {
+		t.Fatalf("Claude credentials were not ro-bound: %s", strings.Join(args, " "))
+	}
+	if !hasArgSeq(args, "--ro-bind", settings, filepath.Join(sandboxCLIHome, ".claude", "settings.json")) {
+		t.Fatalf("Claude settings were not ro-bound: %s", strings.Join(args, " "))
+	}
+	if !hasArgSeq(args, "--ro-bind", dot, filepath.Join(sandboxCLIHome, ".claude.json")) {
+		t.Fatalf("Claude ~/.claude.json was not ro-bound: %s", strings.Join(args, " "))
+	}
+	if !hasArgSeq(args, "--setenv", "CLAUDE_CONFIG_DIR", filepath.Join(sandboxCLIHome, ".claude")) {
+		t.Fatalf("CLAUDE_CONFIG_DIR was not set: %s", strings.Join(args, " "))
+	}
+	if strings.Contains(strings.Join(args, " "), filepath.Join(claudeDir, "sessions.json")) {
+		t.Fatal("Claude session file was mounted")
+	}
+}
+
+func TestCLISandboxSkipsMissingClaudeConfigDir(t *testing.T) {
+	isolateHostCLIAuth(t)
+	missing := filepath.Join(t.TempDir(), "no-claude")
+	t.Setenv("CLAUDE_CONFIG_DIR", missing)
+	args, err := buildSandboxArgs(sandboxExec{
+		Worktree: t.TempDir(),
+		Policy:   builtinPolicy(t, "strict"),
+		Layout:   sandboxLayoutCLI,
+		Provider: "claude",
+		Command:  "sh",
+		Args:     []string{"-c", "true"},
+	})
+	if err != nil {
+		t.Fatalf("missing Claude config dir failed sandbox planning: %v", err)
+	}
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, missing) || strings.Contains(joined, "CLAUDE_CONFIG_DIR") || strings.Contains(joined, filepath.Join(sandboxCLIHome, ".claude")) {
+		t.Fatalf("missing Claude dir produced a bind: %s", joined)
 	}
 }
 
