@@ -98,9 +98,70 @@ jobs:
           path: dist/shipyard-${{ matrix.goos }}-${{ matrix.goarch }}
           if-no-files-found: error
 
+  # Native runners build each platform at the same time. One buildx job
+  # would emulate arm64 with QEMU and publish both platforms in series.
   image:
-    name: Publish agent base image
+    name: Build agent base ${{ matrix.platform }}
     needs: gate
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            artifact: linux-amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            artifact: linux-arm64
+    steps:
+      - name: Check out built commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_COMMIT }}
+          fetch-depth: 1
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push agent base image by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: deploy/agent-base
+          file: deploy/agent-base/Dockerfile
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          outputs: "type=image,name=ghcr.io/ralphschuler/shipyard-agent-base,push-by-digest=true,name-canonical=true,push=true"
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            printf 'build did not return a platform digest: %s\n' "$DIGEST" >&2
+            exit 1
+          fi
+          mkdir -p "${RUNNER_TEMP}/digests"
+          printf '%s\n' "$DIGEST" > "${RUNNER_TEMP}/digests/${DIGEST#sha256:}"
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-base-digest-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  image-manifest:
+    name: Publish agent base manifest
+    needs: image
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -111,8 +172,12 @@ jobs:
         with:
           ref: ${{ env.RELEASE_COMMIT }}
           fetch-depth: 1
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: agent-base-digest-*
+          merge-multiple: true
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
       - name: Log in to GHCR
@@ -124,40 +189,55 @@ jobs:
       - name: Resolve floating minor tag
         id: image
         run: echo "minor=${RELEASE_VERSION%.*}" >> "$GITHUB_OUTPUT"
-      - name: Build and push agent base image
-        uses: docker/build-push-action@v6
-        with:
-          context: deploy/agent-base
-          file: deploy/agent-base/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          provenance: false
-          tags: |
-            ghcr.io/ralphschuler/shipyard-agent-base:${{ env.RELEASE_VERSION }}
-            ghcr.io/ralphschuler/shipyard-agent-base:${{ steps.image.outputs.minor }}
-            ghcr.io/ralphschuler/shipyard-agent-base:latest
+      - name: Create and push multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          digests=(*)
+          if (( ${#digests[@]} != 2 )); then
+            printf 'expected 2 platform digests, found %s\n' "${#digests[@]}" >&2
+            exit 1
+          fi
+          args=()
+          for digest in "${digests[@]}"; do
+            if [[ ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then
+              printf 'unexpected digest file: %s\n' "$digest" >&2
+              exit 1
+            fi
+            args+=("ghcr.io/ralphschuler/shipyard-agent-base@sha256:${digest}")
+          done
+          docker buildx imagetools create \
+            -t "ghcr.io/ralphschuler/shipyard-agent-base:${{ env.RELEASE_VERSION }}" \
+            -t "ghcr.io/ralphschuler/shipyard-agent-base:${{ steps.image.outputs.minor }}" \
+            -t "ghcr.io/ralphschuler/shipyard-agent-base:latest" \
+            "${args[@]}"
+      - name: Verify multi-arch tags
+        run: |
+          set -euo pipefail
+          image=ghcr.io/ralphschuler/shipyard-agent-base
+          for tag in \
+            "${image}:${{ env.RELEASE_VERSION }}" \
+            "${image}:${{ steps.image.outputs.minor }}" \
+            "${image}:latest"
+          do
+            report="$(docker buildx imagetools inspect "$tag")"
+            printf '%s\n' "$report"
+            for platform in linux/amd64 linux/arm64; do
+              if ! grep -Fq "$platform" <<<"$report"; then
+                printf 'tag %s is missing %s\n' "$tag" "$platform" >&2
+                exit 1
+              fi
+            done
+          done
       - name: Make the package public
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          # Agent hosts pull this image without a registry login. A package
-          # published by GITHUB_TOKEN starts private until visibility is set.
-          for attempt in 1 2 3 4 5; do
-            if gh api --method PUT \
-              -H "Accept: application/vnd.github+json" \
-              "/users/${GITHUB_REPOSITORY_OWNER}/packages/container/shipyard-agent-base/visibility" \
-              -f visibility=public; then
-              exit 0
-            fi
-            sleep "$attempt"
-          done
-          echo "could not make ghcr.io/${GITHUB_REPOSITORY_OWNER}/shipyard-agent-base public" >&2
-          exit 1
+        run: ./scripts/publish-agent-base-visibility.sh
 
   publish:
     name: Publish GitHub release
-    needs: [build, image]
+    needs: [build, image-manifest]
     runs-on: ubuntu-24.04
     steps:
       - name: Check out built commit
@@ -168,7 +248,10 @@ jobs:
       - name: Download release binaries
         uses: actions/download-artifact@v4
         with:
+          # Image jobs upload digest artifacts into the same run. Only the
+          # release binaries belong on the GitHub release.
           path: dist
+          pattern: shipyard-*
           merge-multiple: true
       - name: Bind tag and publish release
         env:

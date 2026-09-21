@@ -102,16 +102,28 @@ func TestReleaseWorkflowPinsArtifactsAndTagToRunSHA(t *testing.T) {
 		"RELEASE_APPROVED_REF: refs/heads/master",
 		"packages: write",
 		"deploy/agent-base/Dockerfile",
-		"platforms: linux/amd64,linux/arm64",
+		"runner: ubuntu-24.04-arm",
+		"push-by-digest=true",
+		"docker buildx imagetools create",
+		"needs: [build, image-manifest]",
+		"pattern: shipyard-*",
 		"ghcr.io/ralphschuler/shipyard-agent-base:${{ env.RELEASE_VERSION }}",
 		"ghcr.io/ralphschuler/shipyard-agent-base:${{ steps.image.outputs.minor }}",
 		"ghcr.io/ralphschuler/shipyard-agent-base:latest",
 		`minor=${RELEASE_VERSION%.*}`,
-		"/users/${GITHUB_REPOSITORY_OWNER}/packages/container/shipyard-agent-base/visibility",
+		"./scripts/publish-agent-base-visibility.sh",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("release workflow missing %q", required)
 		}
+	}
+	for _, platform := range []string{"linux/amd64", "linux/arm64"} {
+		if !strings.Contains(text, "platform: "+platform) {
+			t.Fatalf("release workflow missing native agent-base platform %q", platform)
+		}
+	}
+	if strings.Contains(text, "docker/setup-qemu-action") || strings.Contains(text, "platforms: linux/amd64,linux/arm64") {
+		t.Fatal("agent base platforms must build in parallel on native runners, not one emulated buildx job")
 	}
 	if strings.Contains(text, "./scripts/build-taskboard.sh") {
 		t.Fatal("release workflow must call the shared release-artifact script, not build-taskboard.sh directly")
