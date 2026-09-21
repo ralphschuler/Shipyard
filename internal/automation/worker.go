@@ -47,6 +47,10 @@ type Worker struct {
 	// executeRun is injectable only for orchestration tests. Production workers
 	// leave it nil and use the real provider execution path below.
 	executeRun func(context.Context, domain.AgentRun)
+
+	// discoverCapabilities is injectable for selection tests. Production
+	// workers leave it nil and probe the configured provider.
+	discoverCapabilities func(context.Context, domain.ProviderSetting) CapabilityDiscovery
 }
 
 func (w *Worker) memoryScope(ctx context.Context, run domain.AgentRun) (memory.Scope, error) {
@@ -3440,9 +3444,9 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		return
 	}
 	selectedModel, selectedEffort := strings.TrimSpace(agent.Model), strings.TrimSpace(agent.ReasoningEffort)
-	selectionStage, selectionPolicy, selectionFallback, selectionBudget := "0", "agent-selection", "none", "not-evaluated"
+	selection := domain.RunSelection{Stage: "0", PolicyVersion: "agent-selection", DiscoverySource: "agent-selection", Fallback: "none", BudgetDecision: "not-evaluated"}
 	if taskErr == nil && task.ReworkCount > 0 {
-		policy, policyErr := ReworkPolicyFromJSON(agent.EscalationPolicy)
+		decision, policyErr := w.evaluateReworkSelection(ctx, task, agent, provider)
 		if policyErr != nil {
 			reason := "Agent pausiert: " + policyErr.Error()
 			w.persistIncompleteUsage(ctx, run, provider.Provider, "", "invalid_rework_policy")
@@ -3451,7 +3455,9 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			_ = w.finish(ctx, run, "failed")
 			return
 		}
-		decision := policy.Select(task.ReworkCount, -1)
+		selection = runSelectionFromDecision(decision)
+		_ = w.Store.SetRunSelection(ctx, run.ID, selection)
+		_ = w.Store.AddRunLog(ctx, run.ID, "info", formatReworkSelectionLog(decision))
 		if decision.Status != "selected" {
 			reason := fmt.Sprintf("Agent pausiert: Rework-Stufe %d nicht ausführbar (%s)", task.ReworkCount, decision.Reason)
 			w.persistIncompleteUsage(ctx, run, provider.Provider, "", "rework_selection_failed")
@@ -3461,13 +3467,6 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			return
 		}
 		selectedModel, selectedEffort = decision.Model, decision.Effort
-		selectionStage = strconv.Itoa(decision.ReworkNumber)
-		selectionPolicy = decision.PolicyVersion
-		selectionFallback = decision.Fallback
-		if selectionFallback == "" {
-			selectionFallback = "none"
-		}
-		selectionBudget = decision.Status
 	}
 	if selectedModel == "" || selectedEffort == "" {
 		reason := "Agent pausiert: Modell und Reasoning-Effort müssen über Discovery ausgewählt werden"
@@ -3479,8 +3478,9 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	}
 	provider.Model = selectedModel
 	provider.Options = providerOptionsWithEffort(provider.Options, selectedEffort)
-	_ = w.Store.SetRunSelection(ctx, run.ID, selectedModel, selectedEffort, selectionStage, selectionPolicy, "agent-selection", selectionFallback, selectionBudget)
-	_ = w.Store.AddRunLog(ctx, run.ID, "info", fmt.Sprintf("Agent-Auswahl: Modell=%s Effort=%s Eskalationsstufe=%s Policy=%s Discovery=agent-selection Fallback=%s Budget=%s", selectedModel, selectedEffort, selectionStage, selectionPolicy, selectionFallback, selectionBudget))
+	selection.Model, selection.Effort = selectedModel, selectedEffort
+	_ = w.Store.SetRunSelection(ctx, run.ID, selection)
+	_ = w.Store.AddRunLog(ctx, run.ID, "info", fmt.Sprintf("Agent-Auswahl: Modell=%s Effort=%s Eskalationsstufe=%s Policy=%s Discovery=%s Fallback=%s Budget=%s Limit=%d Cost=%d", selectedModel, selectedEffort, selection.Stage, selection.PolicyVersion, selection.DiscoverySource, selection.Fallback, selection.BudgetDecision, selection.BudgetLimitMicrousd, selection.EstimatedCostMicrousd))
 	runSandbox, sandboxErr := w.Store.RunSandboxPolicy(ctx, run.ID)
 	if sandboxErr != nil {
 		reason := "Sandbox-Profil des Runs ist ungültig oder nicht verfügbar"
@@ -3943,6 +3943,66 @@ func providerOptionsWithEffort(raw, effort string) string {
 		return raw
 	}
 	return string(encoded)
+}
+
+func (w *Worker) evaluateReworkSelection(ctx context.Context, task domain.Task, agent domain.Agent, provider domain.ProviderSetting) (ReworkDecision, error) {
+	policy, err := ReworkPolicyFromJSON(agent.EscalationPolicy)
+	if err != nil {
+		return ReworkDecision{}, err
+	}
+	return ResolveReworkSelection(policy, w.storedReworkPolicy(ctx), task.ReworkCount, w.providerCapabilities(ctx, provider)), nil
+}
+
+func (w *Worker) providerCapabilities(ctx context.Context, provider domain.ProviderSetting) CapabilityDiscovery {
+	if w != nil && w.discoverCapabilities != nil {
+		return w.discoverCapabilities(ctx, provider)
+	}
+	return DiscoverProviderCapabilities(ctx, provider)
+}
+
+func (w *Worker) storedReworkPolicy(ctx context.Context) domain.ReworkPolicyState {
+	if w == nil || w.Store == nil {
+		return domain.ReworkPolicyState{}
+	}
+	state, err := w.Store.ReworkPolicyState(ctx)
+	if err != nil {
+		return domain.ReworkPolicyState{}
+	}
+	return state
+}
+
+func runSelectionFromDecision(decision ReworkDecision) domain.RunSelection {
+	fallback := decision.Fallback
+	if fallback == "" {
+		fallback = "none"
+	}
+	source := decision.DiscoverySource
+	if source == "" {
+		source = "provider-discovery"
+	}
+	return domain.RunSelection{
+		Model:                 decision.Model,
+		Effort:                decision.Effort,
+		Stage:                 strconv.Itoa(decision.ReworkNumber),
+		PolicyVersion:         decision.PolicyVersion,
+		DiscoverySource:       source,
+		Fallback:              fallback,
+		BudgetDecision:        decision.BudgetDecision,
+		BudgetLimitMicrousd:   decision.BudgetLimitMicrousd,
+		EstimatedCostMicrousd: decision.EstimatedCostMicrousd,
+	}
+}
+
+func formatReworkSelectionLog(decision ReworkDecision) string {
+	fallback := decision.Fallback
+	if fallback == "" {
+		fallback = "none"
+	}
+	source := decision.DiscoverySource
+	if source == "" {
+		source = "provider-discovery"
+	}
+	return fmt.Sprintf("Rework-Auswahl: Modell=%s Effort=%s Eskalationsstufe=%d Policy=%s Discovery=%s Fallback=%s Budget=%s Limit=%d Cost=%d", decision.Model, decision.Effort, decision.ReworkNumber, decision.PolicyVersion, source, fallback, decision.BudgetDecision, decision.BudgetLimitMicrousd, decision.EstimatedCostMicrousd)
 }
 
 func policyVersion(agent domain.Agent) string {

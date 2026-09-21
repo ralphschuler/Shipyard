@@ -164,3 +164,13 @@ func TestRunTargetSelectionRejectsMissingTargets(t *testing.T) {
 		t.Fatalf("missing targets error = %v, want ErrTargetSelectionRequired", err)
 	}
 }
+
+func TestParseEscalationPolicyFieldsRejectsNegativeBudget(t *testing.T) {
+	if _, err := parseEscalationPolicyFields(`{"budget_microusd":-1}`); err == nil {
+		t.Fatal("negative budget must be rejected")
+	}
+	parsed, err := parseEscalationPolicyFields(`{"budget_microusd":0,"estimated_cost_microusd":{"gpt-test/high":25}}`)
+	if err != nil || !parsed.hasBudget || parsed.budget != 0 || !parsed.persistState {
+		t.Fatalf("zero budget parse = %#v err=%v", parsed, err)
+	}
+}

@@ -953,6 +953,97 @@ func TestProcessIntegrationQueueEndToEndRebasesPushesCreatesPRAndSyncsMerge(t *t
 	}
 }
 
+func TestReworkWorkerSelectionUsesStoredBudgetAndPersistsSnapshot(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	if err := s.SaveReworkPolicyState(ctx, "tariff-v2", `{"estimated_cost_microusd":{"gpt-test/high":25}}`, 7, 0); err != nil {
+		t.Fatal(err)
+	}
+	discovery := CapabilityDiscovery{Models: []string{"gpt-test"}, Efforts: []string{"high"}, Source: "integration discovery"}
+	w := &Worker{Store: s, discoverCapabilities: func(context.Context, domain.ProviderSetting) CapabilityDiscovery {
+		return discovery
+	}}
+	provider := domain.ProviderSetting{Provider: "codex"}
+
+	budgetDecision, err := w.evaluateReworkSelection(ctx, domain.Task{ReworkCount: 1}, domain.Agent{
+		EscalationPolicy: `{"stages":[{"model":"gpt-test","effort":"high"}]}`,
+	}, provider)
+	if err != nil || budgetDecision.Status != "budget" || budgetDecision.BudgetLimitMicrousd != 0 || budgetDecision.EstimatedCostMicrousd != 25 {
+		t.Fatalf("stored zero budget = %#v err=%v", budgetDecision, err)
+	}
+	if strings.Contains(budgetDecision.BudgetDecision, "-1") {
+		t.Fatalf("stored budget was replaced by unlimited sentinel: %q", budgetDecision.BudgetDecision)
+	}
+
+	capabilityDecision, err := w.evaluateReworkSelection(ctx, domain.Task{ReworkCount: 1}, domain.Agent{
+		EscalationPolicy: `{"stages":[{"model":"not-in-provider-discovery","effort":"high"}],"budget_microusd":100,"estimated_cost_microusd":{"not-in-provider-discovery/high":10}}`,
+	}, provider)
+	if err != nil || capabilityDecision.Status != "paused" {
+		t.Fatalf("unconfirmed capability = %#v err=%v", capabilityDecision, err)
+	}
+
+	allowed, err := w.evaluateReworkSelection(ctx, domain.Task{ReworkCount: 1}, domain.Agent{
+		EscalationPolicy: `{"version":"delivery-v1","stages":[{"model":"gpt-test","effort":"high"}],"budget_microusd":100,"estimated_cost_microusd":{"gpt-test/high":25}}`,
+	}, provider)
+	if err != nil || allowed.Status != "selected" {
+		t.Fatalf("allowed selection = %#v err=%v", allowed, err)
+	}
+
+	board, err := s.CreateBoardWithTemplate(ctx, "Rework selection snapshot", "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "README.md"), []byte("rework\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Integration Test")
+	runGit(t, source, "config", "user.email", "integration@example.invalid")
+	runGit(t, source, "add", "README.md")
+	runGit(t, source, "commit", "-m", "initial")
+	project, err := s.CreateProject(ctx, "Rework selection project", "https://example.invalid/rework.git", "master", source, []string{board.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask(ctx, board.ID, "Rework snapshot", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetTaskTargets(ctx, task.ID, []string{project.ID}, nil); err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "Rework snapshot agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.UpdateAgentSelection(ctx, agent.ID, "gpt-test", "high", `{"stages":[{"model":"gpt-test","effort":"high"}],"budget_microusd":0,"estimated_cost_microusd":{"gpt-test/high":25}}`); err != nil {
+		t.Fatal(err)
+	}
+	state, err := s.ReworkPolicyState(ctx)
+	if err != nil || state.BudgetLimitMicrousd != 0 || state.EstimatedCostMicrousd["gpt-test/high"] != 25 {
+		t.Fatalf("persisted rework policy state = %#v err=%v", state, err)
+	}
+	run, err := s.CreateRun(ctx, task.ID, agent.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetRunSelection(ctx, run.ID, runSelectionFromDecision(budgetDecision)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := s.RunSelection(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.BudgetDecision != budgetDecision.BudgetDecision || snapshot.BudgetLimitMicrousd != 0 || snapshot.EstimatedCostMicrousd != 25 {
+		t.Fatalf("run snapshot = %#v", snapshot)
+	}
+	if !strings.Contains(snapshot.BudgetDecision, "limit_microusd=0") || !strings.Contains(snapshot.BudgetDecision, "estimated_cost_microusd=25") {
+		t.Fatalf("run snapshot missing limit/cost: %#v", snapshot)
+	}
+}
+
 func fakeProviderScript(t *testing.T, countPath, transition string, target ...string) string {
 	t.Helper()
 	script := filepath.Join(t.TempDir(), "provider.sh")

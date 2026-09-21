@@ -2570,12 +2570,133 @@ func (s *Store) UpdateAgentSelection(c context.Context, id, model, effort, polic
 	if strings.TrimSpace(model) == "" || !validReasoningEffort(effort) {
 		return errors.New("Agent benötigt eine gültige Modell- und Effort-Auswahl")
 	}
-	var parsed map[string]any
-	if err := json.Unmarshal([]byte(defaultString(strings.TrimSpace(policy), "{}")), &parsed); err != nil {
-		return errors.New("Eskalationspolicy muss gültiges JSON sein")
+	raw := defaultString(strings.TrimSpace(policy), "{}")
+	parsed, err := parseEscalationPolicyFields(raw)
+	if err != nil {
+		return err
 	}
-	_, err := s.DB.Exec(c, "UPDATE agents SET model=$2,reasoning_effort=$3,escalation_policy=$4::jsonb WHERE id=$1 AND retired_at IS NULL", id, strings.TrimSpace(model), strings.TrimSpace(effort), defaultString(strings.TrimSpace(policy), "{}"))
-	return err
+	tx, err := s.DB.Begin(c)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(c)
+	if _, err = tx.Exec(c, "UPDATE agents SET model=$2,reasoning_effort=$3,escalation_policy=$4::jsonb WHERE id=$1 AND retired_at IS NULL", id, strings.TrimSpace(model), strings.TrimSpace(effort), raw); err != nil {
+		return err
+	}
+	if parsed.persistState {
+		var currentBudget int64
+		var currentHuman int
+		var currentVersion string
+		scanErr := tx.QueryRow(c, `SELECT version,human_escalation_after,budget_limit_microusd FROM task_rework_policies WHERE id=TRUE`).
+			Scan(&currentVersion, &currentHuman, &currentBudget)
+		if scanErr != nil && !errors.Is(scanErr, pgx.ErrNoRows) {
+			return scanErr
+		}
+		if !parsed.hasBudget {
+			parsed.budget = currentBudget
+		}
+		if !parsed.hasHuman {
+			parsed.humanEscalationAfter = currentHuman
+		}
+		if parsed.version == "rework-v1" && strings.TrimSpace(currentVersion) != "" && fieldsVersionUnspecified(raw) {
+			parsed.version = currentVersion
+		}
+		if _, err = tx.Exec(c, `INSERT INTO task_rework_policies(id,version,policy,human_escalation_after,budget_limit_microusd,updated_at)
+			VALUES(TRUE,$1,$2::jsonb,$3,$4,now())
+			ON CONFLICT (id) DO UPDATE SET version=EXCLUDED.version, policy=EXCLUDED.policy, human_escalation_after=EXCLUDED.human_escalation_after, budget_limit_microusd=EXCLUDED.budget_limit_microusd, updated_at=now()`,
+			parsed.version, raw, parsed.humanEscalationAfter, parsed.budget); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(c)
+}
+
+type parsedEscalationPolicy struct {
+	version              string
+	humanEscalationAfter int
+	budget               int64
+	hasBudget            bool
+	hasHuman             bool
+	persistState         bool
+}
+
+func fieldsVersionUnspecified(raw string) bool {
+	var fields map[string]any
+	if json.Unmarshal([]byte(raw), &fields) != nil {
+		return true
+	}
+	_, ok := fields["version"]
+	return !ok
+}
+
+func parseEscalationPolicyFields(raw string) (parsedEscalationPolicy, error) {
+	parsed := parsedEscalationPolicy{version: "rework-v1", humanEscalationAfter: 7}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+		return parsed, errors.New("Eskalationspolicy muss gültiges JSON sein")
+	}
+	if version, ok := fields["version"].(string); ok && strings.TrimSpace(version) != "" {
+		parsed.version = strings.TrimSpace(version)
+	}
+	if _, exists := fields["human_escalation_after"]; exists {
+		human, ok := jsonNonNegativeInt(fields["human_escalation_after"])
+		if !ok {
+			return parsed, errors.New("human_escalation_after muss eine nicht-negative ganze Zahl sein")
+		}
+		parsed.humanEscalationAfter = int(human)
+		parsed.hasHuman = true
+	}
+	if _, exists := fields["budget_microusd"]; exists {
+		budget, ok := jsonNonNegativeInt(fields["budget_microusd"])
+		if !ok {
+			return parsed, errors.New("budget_microusd muss eine nicht-negative ganze Zahl sein")
+		}
+		parsed.budget = budget
+		parsed.hasBudget = true
+		parsed.persistState = true
+	}
+	if rawTariffs, exists := fields["estimated_cost_microusd"]; exists {
+		tariffs, ok := rawTariffs.(map[string]any)
+		if !ok {
+			return parsed, errors.New("estimated_cost_microusd muss ein Objekt mit nicht-negativen Kosten sein")
+		}
+		for choice, rawCost := range tariffs {
+			_, valid := jsonNonNegativeInt(rawCost)
+			if strings.TrimSpace(choice) == "" || !valid {
+				return parsed, fmt.Errorf("ungültiger Kostentarif %q", choice)
+			}
+		}
+		parsed.persistState = true
+	}
+	return parsed, nil
+}
+
+func jsonNonNegativeInt(value any) (int64, bool) {
+	switch n := value.(type) {
+	case float64:
+		if n < 0 || n != float64(int64(n)) {
+			return 0, false
+		}
+		return int64(n), true
+	case int:
+		if n < 0 {
+			return 0, false
+		}
+		return int64(n), true
+	case int64:
+		if n < 0 {
+			return 0, false
+		}
+		return n, true
+	case json.Number:
+		parsed, err := n.Int64()
+		if err != nil || parsed < 0 {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		return 0, false
+	}
 }
 
 func validReasoningEffort(value string) bool {
@@ -3916,8 +4037,49 @@ func (s *Store) AddRunLog(c context.Context, id, level, message string) error {
 	return e
 }
 
-func (s *Store) SetRunSelection(c context.Context, id, model, effort, stage, policyVersion, discoverySource, fallback, budgetDecision string) error {
-	_, err := s.DB.Exec(c, `UPDATE agent_runs SET effective_model=$2,effective_effort=$3,escalation_stage=$4,policy_version=$5,discovery_source=$6,fallback=$7,budget_decision=$8 WHERE id=$1`, id, model, effort, stage, policyVersion, discoverySource, fallback, budgetDecision)
+func (s *Store) SetRunSelection(c context.Context, id string, sel domain.RunSelection) error {
+	_, err := s.DB.Exec(c, `UPDATE agent_runs SET effective_model=$2,effective_effort=$3,escalation_stage=$4,policy_version=$5,discovery_source=$6,fallback=$7,budget_decision=$8,budget_limit_microusd=$9,selection_cost_microusd=$10 WHERE id=$1`,
+		id, sel.Model, sel.Effort, sel.Stage, sel.PolicyVersion, sel.DiscoverySource, sel.Fallback, sel.BudgetDecision, sel.BudgetLimitMicrousd, sel.EstimatedCostMicrousd)
+	return err
+}
+
+func (s *Store) RunSelection(c context.Context, id string) (domain.RunSelection, error) {
+	var sel domain.RunSelection
+	err := s.DB.QueryRow(c, `SELECT effective_model,effective_effort,escalation_stage,policy_version,discovery_source,fallback,budget_decision,budget_limit_microusd,selection_cost_microusd FROM agent_runs WHERE id=$1`, id).
+		Scan(&sel.Model, &sel.Effort, &sel.Stage, &sel.PolicyVersion, &sel.DiscoverySource, &sel.Fallback, &sel.BudgetDecision, &sel.BudgetLimitMicrousd, &sel.EstimatedCostMicrousd)
+	return sel, err
+}
+
+func (s *Store) ReworkPolicyState(c context.Context) (domain.ReworkPolicyState, error) {
+	var state domain.ReworkPolicyState
+	var policy []byte
+	err := s.DB.QueryRow(c, `SELECT version,policy,human_escalation_after,budget_limit_microusd,updated_at FROM task_rework_policies WHERE id=TRUE`).
+		Scan(&state.Version, &policy, &state.HumanEscalationAfter, &state.BudgetLimitMicrousd, &state.UpdatedAt)
+	if err != nil {
+		return state, err
+	}
+	state.Policy = string(policy)
+	var parsed struct {
+		EstimatedCostMicrousd map[string]int64 `json:"estimated_cost_microusd"`
+	}
+	if json.Unmarshal(policy, &parsed) == nil {
+		state.EstimatedCostMicrousd = parsed.EstimatedCostMicrousd
+	}
+	return state, nil
+}
+
+func (s *Store) SaveReworkPolicyState(c context.Context, version, policyJSON string, humanAfter int, budget int64) error {
+	if humanAfter < 0 || budget < 0 {
+		return errors.New("rework policy budget and human threshold must be non-negative")
+	}
+	raw := defaultString(strings.TrimSpace(policyJSON), "{}")
+	if !json.Valid([]byte(raw)) {
+		return errors.New("rework policy must be valid JSON")
+	}
+	_, err := s.DB.Exec(c, `INSERT INTO task_rework_policies(id,version,policy,human_escalation_after,budget_limit_microusd,updated_at)
+		VALUES(TRUE,$1,$2::jsonb,$3,$4,now())
+		ON CONFLICT (id) DO UPDATE SET version=EXCLUDED.version, policy=EXCLUDED.policy, human_escalation_after=EXCLUDED.human_escalation_after, budget_limit_microusd=EXCLUDED.budget_limit_microusd, updated_at=now()`,
+		defaultString(strings.TrimSpace(version), "rework-v1"), raw, humanAfter, budget)
 	return err
 }
 
