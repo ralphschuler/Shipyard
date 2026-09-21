@@ -377,6 +377,8 @@ func startCLISandbox(ctx context.Context, req cliSandboxRequest) (*cliSandbox, e
 			_ = session.Close()
 			return nil, err
 		}
+		// Owner-only is enough for bubblewrap: it keeps the caller's uid.
+		// Container runs publish a separate copy; see modelAPIRelayScriptMode.
 		if err := relay.Chmod(0o500); err != nil {
 			_ = relay.Close()
 			_ = os.Remove(relay.Name())
