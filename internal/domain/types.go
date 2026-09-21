@@ -180,12 +180,15 @@ type AgentRun struct {
 	CreatedAt                                                                                                             time.Time
 }
 
-// ReworkLeagueRun is the compact prior-attempt row shown to a later agent.
-// Logs, diffs, and gate output are intentionally absent.
+// ReworkLeagueRun is one prior attempt for the rework prompt. Logs are only
+// the bounded candidate rows for that attempt. Diffs and raw gate output are
+// not loaded.
 type ReworkLeagueRun struct {
+	ID                                                                  string
 	AgentName, Model, Effort, Status, GateStatus, Summary, ErrorMessage string
 	Applied                                                             bool
 	OccurredAt                                                          time.Time
+	Logs                                                                []RunLog
 }
 
 // RunSelection is the durable snapshot of the model/effort decision, including

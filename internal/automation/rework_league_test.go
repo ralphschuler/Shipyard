@@ -204,6 +204,132 @@ func TestInsertReworkLeagueFollowsTaskContext(t *testing.T) {
 	}
 }
 
+func TestFormatReworkLeagueIncludesDenseRunLogs(t *testing.T) {
+	base := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	reviewID := "11111111-1111-4111-8111-111111111111"
+	deliveryID := "22222222-2222-4222-8222-222222222222"
+	runs := []domain.ReworkLeagueRun{
+		{
+			ID: reviewID, AgentName: "Review Agent", Model: "luna", Effort: "high", Status: "succeeded",
+			Summary: "Codex-Agent erfolgreich beendet", OccurredAt: base,
+			Logs: []domain.RunLog{
+				{Sequence: 1, Level: "info", Message: "Codex-Agent gestartet"},
+				{Sequence: 2, Level: "info", Message: "Sandbox-Profil: strict"},
+				{Sequence: 3, Level: "info", Message: "TOKEN_SPAM_SHOULD_DROP " + strings.Repeat("tok ", 800)},
+				{Sequence: 4, Level: "error", Message: "Review nicht bestanden.\nBefunde:\n- Cache-Header fehlen im Response\n- Negativtest fehlt"},
+				{Sequence: 5, Level: "error", Message: "FAIL cache_test.go: TestCacheHeader expected no-store"},
+			},
+		},
+		{
+			ID: deliveryID, AgentName: "Delivery Agent", Model: "terra", Effort: "high", Status: "failed",
+			GateStatus: "failed", Summary: "Qualitäts-Gate fehlgeschlagen", OccurredAt: base.Add(time.Hour),
+			Logs: []domain.RunLog{
+				{Sequence: 1, Level: "info", Message: "Isolierter Git-Worktree: /tmp/run"},
+				{Sequence: 2, Level: "error", Message: "Qualitäts-Gate fehlgeschlagen: whitespace error in cache.go"},
+			},
+		},
+		{
+			ID: "33333333-3333-4333-8333-333333333333", AgentName: "Delivery Agent", Model: "luna", Effort: "medium", Status: "succeeded",
+			Applied: true, Summary: "zweiter Versuch", OccurredAt: base.Add(-time.Hour),
+		},
+		{
+			ID: "44444444-4444-4444-8444-444444444444", AgentName: "Delivery Agent", Model: "luna", Effort: "low", Status: "failed",
+			Summary: "erster Versuch", OccurredAt: base.Add(-2 * time.Hour),
+			Logs: []domain.RunLog{{Sequence: 1, Level: "error", Message: "OLDER_DELIVERY_SHOULD_SKIP gate failed"}},
+		},
+	}
+	got := formatReworkLeague(2, "terra/high (Stufe 2)", runs, nil)
+	for _, want := range []string{
+		"ReworkCount: 2",
+		"Eskalationsstufe: terra/high (Stufe 2)",
+		"Protokoll Review | luna/high | succeeded | 2026-09-21T12:00:00Z | run 11111111",
+		"[error] - Cache-Header fehlen im Response",
+		"[error] - Negativtest fehlt",
+		"[error] FAIL cache_test.go: TestCacheHeader expected no-store",
+		"Protokoll Delivery | terra/high | failed | 2026-09-21T13:00:00Z | run 22222222",
+		"[error] Qualitäts-Gate fehlgeschlagen: whitespace error in cache.go",
+		"Bisherige Versuche",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in:\n%s", want, got)
+		}
+	}
+	reviewAt := strings.Index(got, "Protokoll Review")
+	deliveryAt := strings.Index(got, "Protokoll Delivery | terra/high")
+	if reviewAt < 0 || deliveryAt < 0 || reviewAt > deliveryAt {
+		t.Fatalf("review protocol should precede the delivery protocol:\n%s", got)
+	}
+	for _, hidden := range []string{"TOKEN_SPAM_SHOULD_DROP", "Codex-Agent gestartet", "Sandbox-Profil", "Isolierter Git-Worktree", "OLDER_DELIVERY_SHOULD_SKIP"} {
+		if strings.Contains(got, hidden) {
+			t.Fatalf("log excerpt leaked %q:\n%s", hidden, got)
+		}
+	}
+	if strings.Count(got, "--- ENDE REWORK-LIGA ---") != 1 {
+		t.Fatalf("log text broke the section delimiter:\n%s", got)
+	}
+}
+
+func TestFormatReworkLeagueTruncatesRunLogs(t *testing.T) {
+	reviewLogs := make([]domain.RunLog, 0, 31)
+	for i := 1; i <= 30; i++ {
+		reviewLogs = append(reviewLogs, domain.RunLog{
+			Sequence: i, Level: "error", Message: "failed " + strings.Repeat("x", 500),
+		})
+	}
+	reviewLogs = append(reviewLogs, domain.RunLog{Sequence: 31, Level: "error", Message: "BEFUND_MUST_KEEP failed Cache-Header fehlen"})
+	deliveryLogs := make([]domain.RunLog, 0, 30)
+	for i := 1; i <= 30; i++ {
+		text := "failed " + strings.Repeat("y", 500)
+		if i == 7 {
+			text = "DELIVERY_HEAD_KEPT failed " + strings.Repeat("y", 500)
+		}
+		if i == 30 {
+			text = "DELIVERY_TAIL_DROPPED failed " + strings.Repeat("y", 500)
+		}
+		deliveryLogs = append(deliveryLogs, domain.RunLog{Sequence: i, Level: "error", Message: text})
+	}
+	runs := []domain.ReworkLeagueRun{
+		{ID: "review-1", AgentName: "Review Agent", Model: "luna", Effort: "high", Status: "failed", OccurredAt: time.Date(2026, 9, 21, 9, 0, 0, 0, time.UTC), Logs: reviewLogs},
+		{ID: "delivery-1", AgentName: "Delivery Agent", Model: "terra", Effort: "medium", Status: "failed", GateStatus: "failed", OccurredAt: time.Date(2026, 9, 21, 10, 0, 0, 0, time.UTC), Logs: deliveryLogs},
+	}
+	got := formatReworkLeague(3, "terra/medium (Stufe 3)", runs, nil)
+	if !strings.Contains(got, "BEFUND_MUST_KEEP") || !strings.Contains(got, "DELIVERY_HEAD_KEPT") {
+		t.Fatalf("dense log lines missing:\n%s", got)
+	}
+	if strings.Contains(got, "DELIVERY_TAIL_DROPPED") || strings.Contains(got, strings.Repeat("x", 400)) || strings.Contains(got, strings.Repeat("y", 400)) {
+		t.Fatalf("log excerpt was not truncated")
+	}
+	if !strings.Contains(got, "… Protokoll gekürzt …") || !strings.Contains(got, "Zeilen ausgelassen") {
+		t.Fatalf("truncation was not marked:\n%s", got)
+	}
+	protocol := got[strings.Index(got, "Run-Protokolle"):strings.Index(got, "--- ENDE REWORK-LIGA ---")]
+	if len(protocol) > reworkLeagueLogTotalBytes+len("\nRun-Protokolle (Auszug aus den Run-Logs, fehlerdichte Zeilen, begrenzt):\n")+len("… Protokoll gekürzt …\n") {
+		t.Fatalf("protocol bytes = %d, budget = %d", len(protocol), reworkLeagueLogTotalBytes)
+	}
+	if !utf8.ValidString(got) {
+		t.Fatal("truncated log excerpt is not valid UTF-8")
+	}
+}
+
+func TestLeagueLogSourcesSkipPassedReviewAndLimitDelivery(t *testing.T) {
+	base := time.Date(2026, 9, 21, 8, 0, 0, 0, time.UTC)
+	runs := []domain.ReworkLeagueRun{
+		{ID: "d1", AgentName: "Delivery Agent", Status: "failed", OccurredAt: base},
+		{ID: "d2", AgentName: "Delivery Agent", Status: "failed", OccurredAt: base.Add(time.Hour)},
+		{ID: "d3", AgentName: "Delivery Agent", Status: "failed", OccurredAt: base.Add(2 * time.Hour)},
+		{ID: "r-old", AgentName: "Review Agent", Status: "failed", Summary: "nicht bestanden", OccurredAt: base.Add(30 * time.Minute), Logs: []domain.RunLog{{Sequence: 1, Level: "error", Message: "OLD_REVIEW_BEFUND failed"}}},
+		{ID: "r-new", AgentName: "Review Agent", Status: "succeeded", Summary: "Review bestanden", OccurredAt: base.Add(3 * time.Hour), Logs: []domain.RunLog{{Sequence: 1, Level: "error", Message: "PASSED_REVIEW_LOG failed"}}},
+	}
+	got := formatReworkLeague(1, "1", runs, nil)
+	if strings.Contains(got, "OLD_REVIEW_BEFUND") || strings.Contains(got, "PASSED_REVIEW_LOG") {
+		t.Fatalf("passed review should suppress review logs:\n%s", got)
+	}
+	ids := reworkLeagueLogIDs(runs)
+	if strings.Join(ids, ",") != "d3,d2" {
+		t.Fatalf("log run ids = %v, want d3,d2", ids)
+	}
+}
+
 func TestReworkLeagueStageLabelUsesSelectionOnlyWhenEscalated(t *testing.T) {
 	if got := reworkLeagueStageLabel(0, domain.RunSelection{Model: "luna", Effort: "medium", Stage: "0"}); got != "0" {
 		t.Fatalf("non-rework stage = %q", got)

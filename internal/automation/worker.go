@@ -3610,6 +3610,13 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		comments, _ = w.Store.Comments(ctx, task.ID)
 		if loaded, leagueErr := w.Store.RecentReworkLeagueRuns(ctx, task.ID, run.ID, reworkLeagueRunLimit); leagueErr == nil {
 			leagueRuns = loaded
+			if isDeliveryAgent(agent.Name) {
+				if ids := reworkLeagueLogIDs(leagueRuns); len(ids) > 0 {
+					if byRun, logErr := w.Store.ReworkLeagueLogs(ctx, ids); logErr == nil {
+						leagueRuns = attachReworkLeagueLogs(leagueRuns, byRun)
+					}
+				}
+			}
 		}
 		decisions, _ := w.Store.TaskDecisions(ctx, task.ID)
 		prompt += formatTaskContext(task, board, projects, groups, history, comments, decisions, started)
