@@ -64,6 +64,17 @@ func TestModuleLevelFindingIsNotBlocking(t *testing.T) {
 	}
 }
 
+func TestBinaryFunctionSymbolsRemainBlocking(t *testing.T) {
+	findings, err := ParseJSON([]byte(`{"finding":{"osv":"GO-2026-6218","trace":[{"module":"stdlib","package":"net/url","function":"URL.Parse","symbol":"URL.Parse"}]}}`), ModeBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := Summarize("go1.26.8", nil, findings)
+	if got := summary.Blocking(); len(got) != 1 || got[0].Class != ClassSymbol {
+		t.Fatalf("real binary function symbols must stay blocking: %#v", summary)
+	}
+}
+
 func TestIsPatchedRejectsUnpatchedGo126(t *testing.T) {
 	if err := IsPatched("go1.26.0", "go1.26.8"); err == nil {
 		t.Fatal("go1.26.0 must be rejected against go1.26.8")

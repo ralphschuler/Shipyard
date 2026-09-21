@@ -2,6 +2,12 @@
 # Scan a finished Shipyard artifact with the toolchain that built it.
 # Call-path hits and binary symbol hits fail the gate; they are static matches,
 # not proven exploits. Package/module-only hints are reported and do not fail.
+#
+# The classifier is built and exec'd (never `go run`). `go run` remaps any
+# non-zero program status to 1 and prints "exit status N", which used to make
+# blocking findings (os.Exit(3)) look like a classifier failure.
+# Wrapper exit codes: 0 = pass, 3 = blocking findings, anything else =
+# classifier / scanner failure.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,18 +41,17 @@ shipyard_require_patched_go "$(shipyard_repo_root)/go.mod" "$artifact_version"
 # toolchain that would hide production risk.
 export GOTOOLCHAIN="$artifact_version"
 
+work="$(mktemp -d)"
+gobin=""
+cleanup_work() { rm -rf "$work" ${gobin:+"$gobin"}; }
+trap cleanup_work EXIT
+
 govulncheck_bin="${TASKBOARD_GOVULNCHECK:-}"
 if [[ -z "$govulncheck_bin" ]]; then
   gobin="$(mktemp -d)"
-  cleanup_gobin() { rm -rf "$gobin"; }
-  trap cleanup_gobin EXIT
   GOBIN="$gobin" timeout "${TASKBOARD_GOVULNCHECK_INSTALL_TIMEOUT:-180}s" go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
   govulncheck_bin="$gobin/govulncheck"
 fi
-
-work="$(mktemp -d)"
-cleanup_work() { rm -rf "$work" ${gobin:+"$gobin"}; }
-trap cleanup_work EXIT
 
 source_json="$work/source.json"
 binary_json="$work/binary.json"
@@ -73,8 +78,14 @@ run_govulncheck_json() {
 run_govulncheck_json "$binary_json" -mode=binary "$binary"
 run_govulncheck_json "$source_json" ./...
 
+gate_bin="${TASKBOARD_GOVULNGATE:-}"
+if [[ -z "$gate_bin" ]]; then
+  gate_bin="$work/govulngate"
+  timeout "${TASKBOARD_GOVULNGATE_BUILD_TIMEOUT:-60}s" go build -trimpath -o "$gate_bin" ./cmd/govulngate
+fi
+
 set +e
-timeout "${TASKBOARD_GOVULNCHECK_TIMEOUT:-60}s" go run ./cmd/govulngate \
+timeout "${TASKBOARD_GOVULNCHECK_TIMEOUT:-60}s" "$gate_bin" \
   -go-version "$artifact_version" \
   -source-json "$source_json" \
   -binary-json "$binary_json"
@@ -83,11 +94,11 @@ set -e
 
 if [[ "$status" -eq 3 ]]; then
   printf 'vulnerability gate failed: call-path or symbol hits were found in the scanned artifact/toolchain. These are static advisory matches, not proven exploits.\n' >&2
-  exit 1
+  exit 3
 fi
 if [[ "$status" -ne 0 ]]; then
   printf 'vulnerability gate could not classify govulncheck results (exit %s)\n' "$status" >&2
-  exit 1
+  exit "$status"
 fi
 
 printf 'vulnerability gate passed for %s (%s)\n' "$binary" "$artifact_version"
