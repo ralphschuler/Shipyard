@@ -3236,6 +3236,43 @@ func (s *Store) ConsumeBatchDelivery(c context.Context, id string) (bool, error)
 		AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.batch_id=b.id AND (r.status<>'succeeded' OR r.applied_at IS NULL))`, id)
 	return tag.RowsAffected() == 1, err
 }
+
+// RecentReworkLeagueRuns lists finished attempts for one task, newest first.
+// The current run is omitted. The result is a prompt summary: model, effort,
+// status, gate, whether the diff was applied, and the short summary or error.
+// Prompt snapshots, logs, diffs, and gate output are not loaded.
+func (s *Store) RecentReworkLeagueRuns(c context.Context, taskID, excludeRunID string, limit int) ([]domain.ReworkLeagueRun, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 12 {
+		limit = 12
+	}
+	rows, err := s.DB.Query(c, `SELECT a.name, r.effective_model, r.effective_effort, r.status, r.gate_status,
+		(r.applied_at IS NOT NULL), r.summary, r.error_message,
+		COALESCE(r.finished_at, r.started_at, r.created_at)
+		FROM agent_runs r
+		JOIN agents a ON a.id = r.agent_id
+		WHERE r.task_id = $1
+		  AND ($2 = '' OR r.id::text <> $2)
+		  AND r.status IN ('succeeded', 'failed', 'cancelled')
+		ORDER BY r.created_at DESC
+		LIMIT $3`, taskID, strings.TrimSpace(excludeRunID), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []domain.ReworkLeagueRun
+	for rows.Next() {
+		var run domain.ReworkLeagueRun
+		if err := rows.Scan(&run.AgentName, &run.Model, &run.Effort, &run.Status, &run.GateStatus, &run.Applied, &run.Summary, &run.ErrorMessage, &run.OccurredAt); err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
 func (s *Store) RunsForTask(c context.Context, task string) ([]domain.AgentRun, error) {
 	r, e := s.DB.Query(c, "SELECT id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at FROM agent_runs WHERE task_id=$1 ORDER BY created_at DESC", task)
 	if e != nil {
