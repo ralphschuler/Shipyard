@@ -2,6 +2,7 @@ package container
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,16 +123,16 @@ func TestFallbackDockerfileMatchesDeployCopy(t *testing.T) {
 func writeFakeRuntime(t *testing.T, dir, name string) {
 	t.Helper()
 	path := filepath.Join(dir, name)
-	script := `#!/bin/sh
+	logPath := filepath.Join(dir, "calls.log")
+	script := fmt.Sprintf(`#!/bin/sh
 set -eu
-dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 {
-  printf '%s\n' "$0"
-  printf '%s\n' "$@"
+  printf '%%s\n' "$0"
+  printf '%%s\n' "$@"
   echo '--- env ---'
   env | sort
   echo '--- end ---'
-} >> "$dir/calls.log"
+} >> %q`, logPath) + `
 case "${1:-}" in
   version) echo fake; exit 0 ;;
   create) echo cid-test; exit 0 ;;

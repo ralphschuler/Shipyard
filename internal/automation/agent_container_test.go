@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -419,15 +420,15 @@ func readTestFile(t *testing.T, path string) []byte {
 
 func writeFakeContainerCLI(t *testing.T, dir, name string) {
 	t.Helper()
-	script := `#!/bin/sh
+	logPath := filepath.Join(dir, "calls.log")
+	script := fmt.Sprintf(`#!/bin/sh
 set -eu
-dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 {
-  printf '%s\n' "$@"
+  printf '%%s\n' "$@"
   echo '--- env ---'
   env | sort
   echo '--- end ---'
-} >> "$dir/calls.log"
+} >> %q`, logPath) + `
 case "${1:-}" in
   version) echo fake; exit 0 ;;
   create) echo cid-test; exit 0 ;;
