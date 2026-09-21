@@ -8,14 +8,14 @@ Open the repository in VS Code, Cursor, or Codex and choose **Reopen in Containe
 
 | Piece | Pin | Role |
 | --- | --- | --- |
-| Ubuntu | 24.04 (`mcr.microsoft.com/devcontainers/base:ubuntu-24.04`) | Same major platform as the GitHub-hosted runners |
-| Go | 1.26.8, checksum-pinned, `GOTOOLCHAIN=local` | Matches `go.mod` |
-| Node.js | 22.23.2, checksum-pinned | Matches CI's Node.js 22 line |
+| Ubuntu | 24.04, via `ghcr.io/ralphschuler/shipyard-agent-base:v0.1` | Same major platform as the GitHub-hosted runners |
+| Go | 1.26.8, checksum-pinned in the agent base, `GOTOOLCHAIN=local` | Matches `go.mod` |
+| Node.js | 22.23.2, checksum-pinned in the agent base | Matches CI's Node.js 22 line |
 | Playwright | 1.63.0 Chromium plus system libraries | Matches `frontend/package-lock.json`; exposed as `/usr/bin/chromium` |
 | PostgreSQL | `postgres:16-alpine` | Same major image as `scripts/run-integration-tests.sh` |
 | Tools | git, build-essential, curl, bubblewrap, tmux, postgresql-client | Build, race detector, and local database checks |
 
-Rebuild the image when `go.mod`'s Go version, the Node pin in the Dockerfile, or the Playwright lockfile version changes.
+The Dev Container Dockerfile is a thin layer on the published agent base. Rebuild it when that base tag changes or when the Playwright lockfile version changes. Go and Node pins live only in [`deploy/agent-base/Dockerfile`](../deploy/agent-base/Dockerfile). The Release workflow publishes that file to `ghcr.io/ralphschuler/shipyard-agent-base` with the release semver, the floating minor (`v0.1`), and `latest`.
 
 The development container does not receive a container runtime socket, extra capabilities, or an `initializeCommand`. Closing the IDE stops the Compose project (`shutdownAction: stopCompose`).
 
@@ -78,7 +78,7 @@ CLI agent runs (Delivery, Review, and the other CLI adapters) execute inside a c
 
 When the checkout contains a policy-approved `.devcontainer`, that definition supplies the image or Dockerfile. This repository's Compose service `dev` is built from [`.devcontainer/Dockerfile`](../.devcontainer/Dockerfile) and tagged `shipyard-dev:local`. The runner does not start the IDE Compose project, does not run `postCreateCommand`, and does not install Dev Container features. Sibling services such as PostgreSQL stay part of the local IDE environment. `initializeCommand`, privileged mode, extra capabilities, and host binds outside the workspace are still rejected before any container is created.
 
-When a project has no `.devcontainer`, the runner builds the generic fallback image [`deploy/agent-container/Dockerfile`](../deploy/agent-container/Dockerfile) (`shipyard/agent-fallback:1`). Its Ubuntu, Go, and Node.js pins match this Dev Container. Playwright and PostgreSQL are not included.
+When a project has no `.devcontainer`, the runner pulls `ghcr.io/ralphschuler/shipyard-agent-base` instead of building a local image. A release binary pins the tag to its own version (`TASKBOARD_VERSION`, for example `v0.1.45`). `development` and any other non-release value use `latest`, and `latest` is also the last resort when the pinned tag cannot be pulled. Project Dev Containers should `FROM` the same image. This repository's [`.devcontainer/Dockerfile`](../.devcontainer/Dockerfile) does that and only adds IDE tools. Playwright and PostgreSQL are not in the base image.
 
 Mounts:
 
@@ -90,8 +90,8 @@ Mounts:
 | Allowlisted host CLI login files (`auth.json` and the small companion files) | Read-only, under the container home. The host home directory is not mounted. |
 | Task-assigned secrets | Process environment inside the container, via an env-file. They are not arguments and not the host process environment. The Shipyard service environment is not copied in. |
 
-Shipyard-created bind sources (agent home, secret env-file, model-API proxy socket, relay script, and the fallback build context) are created under the workspace runtime directory: `$TASKBOARD_WORKSPACE_ROOT/runtime/container`, or `/home/agent/.taskboard-runtime/container` when the workspace root is unset. They are not placed in `/tmp` or `/var/tmp`. The taskboard unit sets `PrivateTmp=true`, so those directories exist only inside the service mount namespace and rootless `dockerd` rejects the bind. The agent home is created again immediately before `docker create`, after the image build.
+Shipyard-created bind sources (agent home, secret env-file, model-API proxy socket, and relay script) are created under the workspace runtime directory: `$TASKBOARD_WORKSPACE_ROOT/runtime/container`, or `/home/agent/.taskboard-runtime/container` when the workspace root is unset. They are not placed in `/tmp` or `/var/tmp`. The taskboard unit sets `PrivateTmp=true`, so those directories exist only inside the service mount namespace and rootless `dockerd` rejects the bind. The agent home is created again immediately before `docker create`. The relay script is mode `0644` so the container exec user can read it when rootless Docker maps that user off the host owner. The allowlist socket in that private directory is mode `0666` so the same user can connect. The secret env-file stays mode `0600`.
 
-`NetworkMode=none` keeps the container off the Docker bridge and allows model-API traffic only through the existing host allowlist proxy. The relay runs `python3` inside the agent image (`python3-minimal` in the fallback image and in this repository's Dev Container). A `python3` on the host is not used. `qa-network` uses the bridge. `release-bridge` still refuses a direct provider command.
+`NetworkMode=none` keeps the container off the Docker bridge and allows model-API traffic only through the existing host allowlist proxy. The relay runs `python3` inside the agent image (`python3-minimal` in the agent base, which this Dev Container extends). A `python3` on the host is not used. `qa-network` uses the bridge. `release-bridge` still refuses a direct provider command.
 
 API adapters still run tool commands in the host bubblewrap sandbox. That path is deprecated for CLI runs and is not used once a container starts. Host `go test`, frontend commands, and GitHub Actions do not take the agent-run path.

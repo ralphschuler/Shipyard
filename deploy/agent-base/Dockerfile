@@ -1,12 +1,15 @@
-# Generic Shipyard agent fallback image.
-# Used when a project has no policy-approved .devcontainer.
-# Toolchain pins match .devcontainer/Dockerfile (Ubuntu 24.04, Go, Node.js).
-# Playwright, PostgreSQL, sudo, and the IDE Compose network stay in the local
-# Dev Container; they are not part of an agent run.
+# Canonical Shipyard agent base image.
+# The Release workflow publishes this file to
+# ghcr.io/ralphschuler/shipyard-agent-base. Agent runs without a project
+# Dev Container pull that image. .devcontainer/Dockerfile extends it with
+# IDE-only tools. Do not keep a second copy of this toolchain.
+#
+# Pins: Ubuntu 24.04, Go, Node.js. Playwright, PostgreSQL, sudo, and the IDE
+# Compose network are not part of an agent run.
 # The runner passes --user <host-uid>:<host-gid> so worktree writes stay owned
 # by the service account. This image intentionally has no baked-in login.
-# python3-minimal provides /usr/bin/python3 inside this image for the
-# model-API allowlist relay. The host interpreter is not used.
+# python3-minimal provides /usr/bin/python3 for the model-API allowlist relay.
+# The host interpreter is not used.
 
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
@@ -17,6 +20,10 @@ ARG GO_SHA256_ARM64=211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971b
 ARG NODE_VERSION=22.23.2
 ARG NODE_SHA256_AMD64=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307
 ARG NODE_SHA256_ARM64=fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8
+
+LABEL org.opencontainers.image.source="https://github.com/ralphschuler/Shipyard" \
+      org.opencontainers.image.title="shipyard-agent-base" \
+      org.opencontainers.image.description="Shipyard agent base image"
 
 USER root
 

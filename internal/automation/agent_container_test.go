@@ -22,6 +22,8 @@ type recordingProvider struct {
 	specs   []container.Spec
 	execs   []container.ExecRequest
 	probes  []container.ExecRequest
+	pulls   []string
+	pullErr func(image string) error
 	execErr error
 	started []string
 	// before runs at the start of Create, before Spec.BeforeCreate. Tests use
@@ -31,6 +33,13 @@ type recordingProvider struct {
 
 func (p *recordingProvider) Name() string { return p.name }
 func (p *recordingProvider) Available(context.Context) error {
+	return nil
+}
+func (p *recordingProvider) Pull(_ context.Context, image string) error {
+	p.pulls = append(p.pulls, image)
+	if p.pullErr != nil {
+		return p.pullErr(image)
+	}
 	return nil
 }
 func (p *recordingProvider) Create(_ context.Context, spec container.Spec) (string, error) {
@@ -71,6 +80,7 @@ func (p *recordingProvider) CopyTo(context.Context, string, string, string) erro
 
 func TestStartAgentContainerUsesFallbackAndBindsAuthAndSecrets(t *testing.T) {
 	useContainerRuntimeRoot(t)
+	t.Setenv("TASKBOARD_VERSION", "v0.1.45")
 	worktree := t.TempDir()
 	outDir := t.TempDir()
 	codexHome := t.TempDir()
@@ -110,8 +120,12 @@ func TestStartAgentContainerUsesFallbackAndBindsAuthAndSecrets(t *testing.T) {
 		t.Fatalf("creates = %d", len(provider.specs))
 	}
 	spec := provider.specs[0]
-	if spec.Image != container.FallbackImage || spec.Dockerfile == "" || spec.Network != "none" {
+	wantImage := "ghcr.io/ralphschuler/shipyard-agent-base:v0.1.45"
+	if spec.Image != wantImage || spec.Dockerfile != "" || spec.ContextDir != "" || spec.Network != "none" {
 		t.Fatalf("fallback spec = %+v", spec)
+	}
+	if len(provider.pulls) != 1 || provider.pulls[0] != wantImage {
+		t.Fatalf("pulls = %#v", provider.pulls)
 	}
 	if spec.User == "" || !strings.Contains(spec.User, ":") {
 		t.Fatalf("container user = %q", spec.User)
@@ -177,12 +191,104 @@ func TestStartAgentContainerUsesFallbackAndBindsAuthAndSecrets(t *testing.T) {
 		t.Fatalf("env-file mode = %o", info.Mode().Perm())
 	}
 	assertDurableRuntimePath(t, provider.execs[0].EnvFile)
-	assertDurableRuntimePath(t, spec.ContextDir)
 	for _, mount := range spec.Mounts {
 		switch mount.Target {
 		case containerAgentHome, "/tmp/shipyard-model-api.sock", "/tmp/shipyard-model-api-relay.py":
 			assertDurableRuntimePath(t, mount.Source)
 		}
+	}
+}
+
+func TestFallbackPullUsesLatestWhenReleaseTagIsMissing(t *testing.T) {
+	useContainerRuntimeRoot(t)
+	t.Setenv("TASKBOARD_VERSION", "v0.1.45")
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("GROK_HOME", t.TempDir())
+	pinned := "ghcr.io/ralphschuler/shipyard-agent-base:v0.1.45"
+	latest := container.AgentBaseLatestImage()
+	provider := &recordingProvider{
+		name: "docker",
+		pullErr: func(image string) error {
+			if image == pinned {
+				return errors.New("manifest unknown")
+			}
+			return nil
+		},
+	}
+	session, err := startAgentContainer(context.Background(), agentContainerRequest{
+		RunID:    "run-fallback-latest",
+		Worktree: t.TempDir(),
+		Policy:   builtinPolicy(t, "strict"),
+		Provider: domain.ProviderSetting{Provider: "codex"},
+		Command:  "sh",
+		Runtime:  provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	if len(provider.pulls) != 2 || provider.pulls[0] != pinned || provider.pulls[1] != latest {
+		t.Fatalf("pulls = %#v", provider.pulls)
+	}
+	if provider.specs[0].Image != latest || provider.specs[0].Dockerfile != "" {
+		t.Fatalf("spec = %+v", provider.specs[0])
+	}
+	if !strings.Contains(session.SourceLog, latest) || !strings.Contains(session.SourceLog, "nicht verfügbar") {
+		t.Fatalf("source = %s", session.SourceLog)
+	}
+}
+
+func TestFallbackPullStopsWhenLatestAlsoFails(t *testing.T) {
+	useContainerRuntimeRoot(t)
+	t.Setenv("TASKBOARD_VERSION", "development")
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("GROK_HOME", t.TempDir())
+	provider := &recordingProvider{
+		name: "docker",
+		pullErr: func(string) error {
+			return errors.New("denied")
+		},
+	}
+	_, err := startAgentContainer(context.Background(), agentContainerRequest{
+		RunID:    "run-fallback-denied",
+		Worktree: t.TempDir(),
+		Policy:   builtinPolicy(t, "strict"),
+		Provider: domain.ProviderSetting{Provider: "codex"},
+		Command:  "sh",
+		Runtime:  provider,
+	})
+	if err == nil || !strings.Contains(err.Error(), container.AgentBaseLatestImage()) {
+		t.Fatalf("error = %v", err)
+	}
+	if len(provider.pulls) != 1 || len(provider.specs) != 0 {
+		t.Fatalf("pulls=%#v creates=%d", provider.pulls, len(provider.specs))
+	}
+}
+
+func TestFallbackPullStopsWhenPinnedAndLatestFail(t *testing.T) {
+	useContainerRuntimeRoot(t)
+	t.Setenv("TASKBOARD_VERSION", "v0.1.45")
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("GROK_HOME", t.TempDir())
+	provider := &recordingProvider{
+		name: "docker",
+		pullErr: func(string) error {
+			return errors.New("denied")
+		},
+	}
+	_, err := startAgentContainer(context.Background(), agentContainerRequest{
+		RunID:    "run-fallback-both-denied",
+		Worktree: t.TempDir(),
+		Policy:   builtinPolicy(t, "strict"),
+		Provider: domain.ProviderSetting{Provider: "codex"},
+		Command:  "sh",
+		Runtime:  provider,
+	})
+	if err == nil || !strings.Contains(err.Error(), "v0.1.45") || !strings.Contains(err.Error(), "latest") {
+		t.Fatalf("error = %v", err)
+	}
+	if len(provider.pulls) != 2 || len(provider.specs) != 0 {
+		t.Fatalf("pulls=%#v creates=%d", provider.pulls, len(provider.specs))
 	}
 }
 
@@ -444,6 +550,9 @@ func TestStartAgentContainerUsesProjectImageAndComposeDockerfile(t *testing.T) {
 	spec := provider.specs[0]
 	if spec.Image != "mcr.microsoft.com/devcontainers/base:ubuntu" || spec.Dockerfile != "" || spec.Network != "bridge" {
 		t.Fatalf("image spec = %+v", spec)
+	}
+	if len(provider.pulls) != 0 {
+		t.Fatalf("project image pulled the agent base: %#v", provider.pulls)
 	}
 	assertMount(t, spec.Mounts, imageRoot, true)
 	if session.ModelAPIProxy {

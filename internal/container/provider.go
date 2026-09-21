@@ -58,10 +58,12 @@ type ExecRequest struct {
 // Provider creates and executes agent containers. Docker is the first
 // implementation. Podman uses the same Docker-compatible CLI subset.
 // Create builds when Spec.Dockerfile is set, runs Spec.BeforeCreate, then
-// refuses to continue if a bind source is missing.
+// refuses to continue if a bind source is missing. Pull fetches an image
+// that is not built from a project Dockerfile.
 type Provider interface {
 	Name() string
 	Available(ctx context.Context) error
+	Pull(ctx context.Context, image string) error
 	Create(ctx context.Context, spec Spec) (string, error)
 	Start(ctx context.Context, id string) error
 	ExecArgs(ctx context.Context, req ExecRequest) (string, []string, error)
