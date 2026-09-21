@@ -34,12 +34,17 @@ if [[ "$minimum" == go1.26.8 ]]; then
 fi
 
 # SIGPIPE / 141: under pipefail, an early-closing reader kills the writer.
-# The live-pipe patterns below must keep returning 141 so we do not "fix"
-# them by disabling pipefail. The helpers must return 0 after capturing first.
+# GNU coreutils on some hosts (GitHub-hosted Ubuntu) catch EPIPE and exit 1
+# with "Broken pipe" instead of dying 141. Both fail the pipeline; do not
+# "fix" this by disabling pipefail. The helpers must return 0 after capture.
+pipefail_writer_failed() {
+  [[ "$1" -eq 141 || "$1" -eq 1 ]]
+}
+
 sigpipe_status=0
-bash -c 'set -euo pipefail; yes | grep -q y' >/dev/null || sigpipe_status=$?
-if [[ "$sigpipe_status" -ne 141 ]]; then
-  fail "yes|grep -q under pipefail should exit 141 (SIGPIPE), got $sigpipe_status"
+bash -c 'set -euo pipefail; yes | grep -q y' >/dev/null 2>&1 || sigpipe_status=$?
+if ! pipefail_writer_failed "$sigpipe_status"; then
+  fail "yes|grep -q under pipefail should exit 141 or 1, got $sigpipe_status"
 fi
 
 work="$(mktemp -d)"
@@ -57,9 +62,9 @@ EOF
 chmod +x "$help_stub"
 
 help_pipe_status=0
-bash -c 'set -euo pipefail; "$1" -h 2>&1 | grep -q -- "-format"' bash "$help_stub" >/dev/null || help_pipe_status=$?
-if [[ "$help_pipe_status" -ne 141 ]]; then
-  fail "padded help | grep -q under pipefail should exit 141, got $help_pipe_status"
+bash -c 'set -euo pipefail; "$1" -h 2>&1 | grep -q -- "-format"' bash "$help_stub" >/dev/null 2>&1 || help_pipe_status=$?
+if ! pipefail_writer_failed "$help_pipe_status"; then
+  fail "padded help | grep -q under pipefail should exit 141 or 1, got $help_pipe_status"
 fi
 if ! shipyard_cmd_help_has_flag "$help_stub" '-format'; then
   fail "shipyard_cmd_help_has_flag missed -format under pipefail"
@@ -79,9 +84,9 @@ bash -c 'set -euo pipefail
     }
     exit 1
   }"
-' bash "$padded_buildinfo" >/dev/null || awk_pipe_status=$?
-if [[ "$awk_pipe_status" -ne 141 ]]; then
-  fail "awk-exit on padded go version -m output should be 141, got $awk_pipe_status"
+' bash "$padded_buildinfo" >/dev/null 2>&1 || awk_pipe_status=$?
+if ! pipefail_writer_failed "$awk_pipe_status"; then
+  fail "awk-exit on padded go version -m output should be 141 or 1, got $awk_pipe_status"
 fi
 
 go_bin="$(command -v go)"
