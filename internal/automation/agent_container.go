@@ -275,7 +275,7 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 			Workdir: "/",
 			User:    user,
 		}); err != nil {
-			return nil, errors.New("Container-Lauf braucht python3 für den Modell-API-Allowlist-Proxy")
+			return nil, fmt.Errorf("Container-Lauf braucht python3 im Agent-Image für den Modell-API-Allowlist-Proxy (nicht auf dem Host): %w", err)
 		}
 	}
 	envFile := homeHost + ".env"

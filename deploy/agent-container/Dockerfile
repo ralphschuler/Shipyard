@@ -5,6 +5,8 @@
 # Dev Container; they are not part of an agent run.
 # The runner passes --user <host-uid>:<host-gid> so worktree writes stay owned
 # by the service account. This image intentionally has no baked-in login.
+# python3-minimal provides /usr/bin/python3 inside this image for the
+# model-API allowlist relay. The host interpreter is not used.
 
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
@@ -24,7 +26,7 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
-        python3 \
+        python3-minimal \
         xz-utils \
     && rm -rf /var/lib/apt/lists/*
 

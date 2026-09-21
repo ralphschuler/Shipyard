@@ -57,8 +57,16 @@ func TestDockerAndPodmanShareTheProviderContract(t *testing.T) {
 			t.Fatalf("exec binary = %s, want %s", bin, provider.Name())
 		}
 		joined := strings.Join(args, " ")
-		if !strings.Contains(joined, "exec --interactive --user 1:1 --workdir /work --env-file "+filepath.Join(dir, "env.file")+" "+id+" -- codex exec") {
+		if !strings.Contains(joined, "exec --interactive --user 1:1 --workdir /work --env-file "+filepath.Join(dir, "env.file")+" "+id+" codex exec") {
 			t.Fatalf("exec args = %s", joined)
+		}
+		if len(args) < 2 || args[len(args)-2] != "codex" || args[len(args)-1] != "exec" {
+			t.Fatalf("exec command was not preserved: %v", args)
+		}
+		for i, arg := range args {
+			if arg == id && i+1 < len(args) && args[i+1] == "--" {
+				t.Fatal("separator after the container id is executed as the program by Docker and Podman")
+			}
 		}
 	}
 	log, err := os.ReadFile(filepath.Join(dir, "calls.log"))
@@ -170,6 +178,17 @@ func TestFallbackDockerfileMatchesDeployCopy(t *testing.T) {
 	}
 	if !strings.Contains(string(body), "GO_VERSION=1.26.8") || !strings.Contains(string(body), "NODE_VERSION=22.23.2") {
 		t.Fatal("fallback image lost the Dev Container toolchain pins")
+	}
+	if !strings.Contains(string(body), "python3-minimal") {
+		t.Fatal("fallback image must install python3-minimal so the model-API relay can run inside the agent image")
+	}
+	devcontainer := filepath.Join("..", "..", ".devcontainer", "Dockerfile")
+	devBody, err := os.ReadFile(devcontainer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(devBody), "python3-minimal") {
+		t.Fatal("project Dev Container image must install python3-minimal for the same in-image relay")
 	}
 }
 
