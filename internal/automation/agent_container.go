@@ -146,6 +146,19 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 	if req.Policy.WriteMode != "worktree" && req.Policy.WriteMode != "readonly" {
 		return nil, fmt.Errorf("Sandbox-Schreibmodus %q wird vom Container-Adapter nicht unterstützt", req.Policy.WriteMode)
 	}
+	// A rootless runtime maps the agent's container UID to a subordinate host
+	// UID. Run worktrees on NFS are created by taskboard with UMask=0077, so a
+	// plain bind mount otherwise appears as an inaccessible 0700 directory to
+	// that UID. Open only the disposable run mount to the degree its sandbox
+	// policy requires; the managed project checkout and host home stay private.
+	if err := prepareContainerMountAccess(worktree, req.Policy.WriteMode == "worktree"); err != nil {
+		return nil, fmt.Errorf("Run-Worktree konnte nicht für den Container-Agenten vorbereitet werden: %w", err)
+	}
+	for _, writable := range req.ExtraWritable {
+		if err := prepareContainerMountAccess(writable, true); err != nil {
+			return nil, fmt.Errorf("Container-Ergebnisverzeichnis konnte nicht vorbereitet werden: %w", err)
+		}
+	}
 	if req.HasDevContainer {
 		if err := reviewDevContainerPolicy(req.Definition, devContainerApproval{}); err != nil {
 			return nil, err
@@ -364,6 +377,56 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 		session.SourceLog += "; Worktree nur lesend eingehängt"
 	}
 	return session, nil
+}
+
+// prepareContainerMountAccess makes a Shipyard-owned, disposable bind source
+// accessible to the subordinate UID used by a rootless container. NFS cannot
+// reliably be chowned by that mapped UID, so modes are used instead. Callers
+// must pass only the per-run worktree or per-run output directory, never a
+// source checkout, credential directory, or arbitrary host path.
+func prepareContainerMountAccess(path string, writable bool) error {
+	root, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	root = filepath.Clean(root)
+	info, err := os.Stat(root)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s ist kein Verzeichnis", root)
+	}
+	return filepath.WalkDir(root, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if entry.IsDir() {
+			mode := os.FileMode(0o755)
+			if writable {
+				mode = 0o777
+			}
+			return os.Chmod(current, mode)
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		fileInfo, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		mode := os.FileMode(0o644)
+		if writable {
+			mode = 0o666
+		}
+		if fileInfo.Mode().Perm()&0o111 != 0 {
+			mode |= 0o111
+		}
+		return os.Chmod(current, mode)
+	})
 }
 
 func withCodexManagedWorktreeTrust(args []string) []string {
