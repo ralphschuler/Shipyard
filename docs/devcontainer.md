@@ -74,6 +74,22 @@ Workspace files are mounted at `/workspaces/Shipyard` by the Dev Container CLI. 
 
 ## Agent runs on this repository
 
-The current runner treats `.devcontainer/devcontainer.json` as an execution environment for a checkout. This definition is written so that policy check passes: no host `initializeCommand`, no privileged mode, no extra capabilities, and no host bind outside the workspace. Execution inside the container is not wired up yet. A CLI agent run that targets this repository pauses, with the run error `Dev-Container-Läufe können das gewählte Sandbox-Profil nicht technisch erzwingen`, after the runner has seen this Dev Container. If the `devcontainer` CLI or Docker is missing, the run pauses earlier because the container could not be started. Host `go test`, frontend commands, and GitHub Actions do not take that path.
+CLI agent runs (Delivery, Review, and the other CLI adapters) execute inside a container. Docker is the default runtime. `SHIPYARD_CONTAINER_RUNTIME=podman` selects Podman through the same provider interface.
 
-This file is the local test environment and the later base for agent execution. It does not switch Delivery or Review onto Docker.
+When the checkout contains a policy-approved `.devcontainer`, that definition supplies the image or Dockerfile. This repository's Compose service `dev` is built from [`.devcontainer/Dockerfile`](../.devcontainer/Dockerfile) and tagged `shipyard-dev:local`. The runner does not start the IDE Compose project, does not run `postCreateCommand`, and does not install Dev Container features. Sibling services such as PostgreSQL stay part of the local IDE environment. `initializeCommand`, privileged mode, extra capabilities, and host binds outside the workspace are still rejected before any container is created.
+
+When a project has no `.devcontainer`, the runner builds the generic fallback image [`deploy/agent-container/Dockerfile`](../deploy/agent-container/Dockerfile) (`shipyard/agent-fallback:1`). Its Ubuntu, Go, and Node.js pins match this Dev Container. Playwright and PostgreSQL are not included.
+
+Mounts:
+
+| Path | Mode |
+| --- | --- |
+| Run worktree, at the same absolute host path | Writable for Delivery. Read-only when the sandbox write mode is `readonly`. Review is switched to that mode and attached to the Delivery worktree, so Review cannot modify Delivery's files. |
+| Git metadata and module cache | Read-only |
+| Final-message directory | Writable, outside the worktree |
+| Allowlisted host CLI login files (`auth.json` and the small companion files) | Read-only, under the container home. The host home directory is not mounted. |
+| Task-assigned secrets | Process environment inside the container, via an env-file. They are not arguments and not the host process environment. The Shipyard service environment is not copied in. |
+
+`NetworkMode=none` keeps the container off the Docker bridge and allows model-API traffic only through the existing host allowlist proxy. The image needs `python3` for that proxy. `qa-network` uses the bridge. `release-bridge` still refuses a direct provider command.
+
+API adapters still run tool commands in the host bubblewrap sandbox. That path is deprecated for CLI runs and is not used once a container starts. Host `go test`, frontend commands, and GitHub Actions do not take the agent-run path.

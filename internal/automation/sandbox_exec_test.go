@@ -69,10 +69,13 @@ func TestReviewCLIInvocationAppliesSandboxProfileOnProductionPath(t *testing.T) 
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(execSrc), "func startCLISandbox(") {
-		t.Fatal("startCLISandbox must be defined as the production CLI execution boundary")
+		t.Fatal("startCLISandbox remains the deprecated bubblewrap envelope for API tool commands")
 	}
-	if strings.Count(string(workerSrc), "startCLISandbox(") < 1 {
-		t.Fatal("production execute path must invoke startCLISandbox")
+	if strings.Count(string(workerSrc), "startCLISandbox(") != 0 {
+		t.Fatal("production CLI path must not wrap agent runs in bubblewrap")
+	}
+	if strings.Count(string(workerSrc), "startAgentContainer(") < 1 {
+		t.Fatal("production execute path must start the agent container")
 	}
 	if !strings.Contains(string(workerSrc), "session.IsolationLog") {
 		t.Fatal("production execute path must log the effective sandbox isolation")
@@ -83,11 +86,14 @@ func TestReviewCLIInvocationAppliesSandboxProfileOnProductionPath(t *testing.T) 
 	if !strings.Contains(string(workerSrc), "hostCLIAuthMissingWarning") {
 		t.Fatal("production execute path must warn when neither host CLI login nor assigned secret is available")
 	}
-	if !strings.Contains(string(workerSrc), "env = append(env, secretEnv...)") {
-		t.Fatal("production execute path must still inject assigned secrets after sandbox wrap")
+	if !strings.Contains(string(workerSrc), "session.HostEnv") {
+		t.Fatal("production execute path must keep the host process environment separate from container secrets")
 	}
-	if !strings.Contains(string(workerSrc), "Dev-Container-Läufe können das gewählte Sandbox-Profil nicht technisch erzwingen") {
-		t.Fatal("unsupported devcontainer CLI combinations must fail closed")
+	if strings.Contains(string(workerSrc), "env = append(env, secretEnv...)") {
+		t.Fatal("assigned secrets must not be copied into the host process environment")
+	}
+	if strings.Contains(string(workerSrc), "Dev-Container-Läufe können das gewählte Sandbox-Profil nicht technisch erzwingen") {
+		t.Fatal("project devcontainers must execute in a container instead of pausing")
 	}
 }
 
