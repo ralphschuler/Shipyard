@@ -35,9 +35,10 @@ var (
 )
 
 type Current struct {
-	Version string `json:"version"`
-	Commit  string `json:"commit"`
-	BuiltAt string `json:"builtAt"`
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	BuiltAt   string `json:"builtAt"`
+	GoVersion string `json:"goVersion,omitempty"`
 }
 type Release struct {
 	Version           string `json:"version"`
@@ -176,6 +177,32 @@ func ValidateReleaseForBranch(r Release, repository, branch, approvedBranch, tag
 		return errors.New("release tag commit is not cryptographically verified")
 	}
 	return nil
+}
+
+// approvedReleaseTarget accepts the configured branch name or a full commit
+// SHA. The SHA form is required when the release workflow binds the tag with
+// --target <built-sha> instead of a moving branch HEAD. Other branch names
+// fail closed so an unapproved ref cannot become a stable update source.
+func approvedReleaseTarget(targetCommitish, branch string) bool {
+	target := strings.TrimSpace(targetCommitish)
+	if target == "" || strings.TrimSpace(branch) == "" {
+		return false
+	}
+	if target == branch {
+		return true
+	}
+	return shaPattern.MatchString(target)
+}
+
+// releaseTargetMatchesTag keeps branch-name targets as a compatibility path
+// for older releases and requires a SHA target to be the immutable tag
+// commit. Branch membership is still checked separately via compare.
+func releaseTargetMatchesTag(targetCommitish, branch, tagCommit string) bool {
+	target := strings.TrimSpace(targetCommitish)
+	if target == branch && strings.TrimSpace(branch) != "" {
+		return true
+	}
+	return shaPattern.MatchString(target) && shaPattern.MatchString(tagCommit) && strings.EqualFold(target, tagCommit)
 }
 
 func Compare(current, release string) string {
@@ -484,7 +511,7 @@ func Resolve(ctx context.Context, current Current, repo, branch string, client C
 		s.Reason = githubErrorReason(err, client.Token)
 		return s
 	}
-	if r.Draft || r.Prerelease || strings.TrimSpace(branch) == "" || r.TargetCommitish != branch {
+	if r.Draft || r.Prerelease || !approvedReleaseTarget(r.TargetCommitish, branch) {
 		s.Status, s.Reason = "unverified", "Release ist kein freigegebenes stabiles Release auf dem Zielbranch."
 		return s
 	}
@@ -495,6 +522,10 @@ func Resolve(ctx context.Context, current Current, repo, branch string, client C
 	commit, err := client.tagCommit(ctx, repo, r.TagName)
 	if err != nil {
 		s.Status, s.Reason = "unverified", githubErrorReason(err, client.Token)
+		return s
+	}
+	if !releaseTargetMatchesTag(r.TargetCommitish, branch, commit.SHA) {
+		s.Status, s.Reason = "unverified", "Release ist kein freigegebenes stabiles Release auf dem Zielbranch."
 		return s
 	}
 	contained, err := client.branchContains(ctx, repo, branch, commit.SHA)

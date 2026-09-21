@@ -1370,6 +1370,36 @@ func TestRequestedSelfReviewAcceptsEnglishCategoriesAndNewestValidBlock(t *testi
 	}
 }
 
+func TestReviewProbeEnglishPromptRejected(t *testing.T) {
+	prompt := selfReviewPromptSection()
+	if !strings.Contains(prompt, `"check":"Scope/Acceptance"`) {
+		t.Fatalf("prompt example is missing the English Scope/Acceptance category: %s", prompt)
+	}
+	review, err := requestedSelfReview([]domain.RunLog{{Message: prompt}})
+	if err != nil {
+		t.Fatalf("prompt example rejected by the run validator: %v", err)
+	}
+	if review.Status != "passed" || len(review.Checklist) != len(selfReviewChecklist) {
+		t.Fatalf("unexpected prompt example review: %#v", review)
+	}
+	if err := validateRequestedSelfReview(selfReviewExample()); err != nil {
+		t.Fatalf("shared schema example rejected: %v", err)
+	}
+}
+
+func TestRequestedSelfReviewAcceptsGermanAndEnglishSchemas(t *testing.T) {
+	cases := []string{
+		`{"status":"passed","checklist":[{"check":"Scope/Akzeptanz","result":"ok"},{"check":"Diff/Secrets","result":"ok"},{"check":"Tests/Fehler","result":"ok"},{"check":"Sicherheits-/Betriebsrisiken","result":"ok"},{"check":"Rückwärtskompatibilität","result":"ok"}],"tests":"go test ./...","open_risks":"none"}`,
+		`{"status":"passed","checklist":[{"check":"Scope/Acceptance","result":"passed"},{"check":"Diff/Secrets","result":"passed"},{"check":"Tests/Failures","result":"passed"},{"check":"Security/Operational risks","result":"passed"},{"check":"Backward compatibility","result":"passed"}],"tests":"go test ./...","open_risks":"none"}`,
+		`{"status":"passed","checklist":[{"check":"Scope/Acceptance","result":"ok"},{"check":"Diff/Secrets","result":"bestanden"},{"check":"Tests/Fehler","result":"pass"},{"check":"Sicherheits-/Betriebsrisiken","result":"geprüft"},{"check":"Backward compatibility","result":"erfüllt"}],"tests":"go test ./...","open_risks":"none"}`,
+	}
+	for _, raw := range cases {
+		if _, err := requestedSelfReview([]domain.RunLog{{Message: "```taskboard-self-review\n" + raw + "\n```"}}); err != nil {
+			t.Fatalf("compatible self-review schema rejected: %v\n%s", err, raw)
+		}
+	}
+}
+
 func TestSelfReviewLogsFallsBackToAssistantResponseOnly(t *testing.T) {
 	valid := "```taskboard-self-review\n{\"status\":\"passed\",\"checklist\":[{\"check\":\"Scope/Acceptance\",\"result\":\"passed\"},{\"check\":\"Diff/Secrets\",\"result\":\"passed\"},{\"check\":\"Tests/Failures\",\"result\":\"passed\"},{\"check\":\"Security/Operational risks\",\"result\":\"passed\"},{\"check\":\"Backward compatibility\",\"result\":\"passed\"}],\"tests\":\"go test\",\"open_risks\":\"none\"}\n```"
 	logs := []domain.RunLog{{Message: "exec\n" + valid}, {Message: "codex\n" + valid}}
@@ -1413,7 +1443,8 @@ func TestRequestedSelfReviewRejectsUnknownOrDuplicateCategories(t *testing.T) {
 	base := `{"status":"passed","checklist":[{"check":"Scope/Akzeptanz","result":"ok"},{"check":"Diff/Secrets","result":"ok"},{"check":"Tests/Fehler","result":"ok"},{"check":"Sicherheits-/Betriebsrisiken","result":"ok"},{"check":"Rückwärtskompatibilität","result":"ok"}],"tests":"go test ./...","open_risks":"none"}`
 	unknown := strings.Replace(base, "Rückwärtskompatibilität", "Unbekannte Kategorie", 1)
 	duplicate := strings.Replace(base, "Rückwärtskompatibilität", "Scope/Akzeptanz", 1)
-	for _, raw := range []string{unknown, duplicate} {
+	aliasDuplicate := `{"status":"passed","checklist":[{"check":"Scope/Acceptance","result":"ok"},{"check":"Diff/Secrets","result":"ok"},{"check":"Tests/Failures","result":"ok"},{"check":"Security/Operational risks","result":"ok"},{"check":"Scope/Akzeptanz","result":"ok"}],"tests":"go test ./...","open_risks":"none"}`
+	for _, raw := range []string{unknown, duplicate, aliasDuplicate} {
 		if _, err := requestedSelfReview([]domain.RunLog{{Message: "```taskboard-self-review\n" + raw + "\n```"}}); err == nil {
 			t.Fatalf("invalid checklist categories accepted: %s", raw)
 		}
@@ -1421,9 +1452,14 @@ func TestRequestedSelfReviewRejectsUnknownOrDuplicateCategories(t *testing.T) {
 }
 
 func TestRequestedSelfReviewRejectsFailedChecklistResult(t *testing.T) {
-	raw := `{"status":"passed","checklist":[{"check":"Scope/Akzeptanz","result":"ok"},{"check":"Diff/Secrets","result":"failed"},{"check":"Tests/Fehler","result":"ok"},{"check":"Sicherheits-/Betriebsrisiken","result":"ok"},{"check":"Rückwärtskompatibilität","result":"ok"}],"tests":"go test ./...","open_risks":"none"}`
-	if _, err := requestedSelfReview([]domain.RunLog{{Message: "```taskboard-self-review\n" + raw + "\n```"}}); err == nil {
-		t.Fatal("self-review with a failed checklist result must be rejected")
+	cases := []string{
+		`{"status":"passed","checklist":[{"check":"Scope/Akzeptanz","result":"ok"},{"check":"Diff/Secrets","result":"failed"},{"check":"Tests/Fehler","result":"ok"},{"check":"Sicherheits-/Betriebsrisiken","result":"ok"},{"check":"Rückwärtskompatibilität","result":"ok"}],"tests":"go test ./...","open_risks":"none"}`,
+		`{"status":"passed","checklist":[{"check":"Scope/Acceptance","result":"passed"},{"check":"Diff/Secrets","result":"failed"},{"check":"Tests/Failures","result":"passed"},{"check":"Security/Operational risks","result":"passed"},{"check":"Backward compatibility","result":"passed"}],"tests":"go test ./...","open_risks":"none"}`,
+	}
+	for _, raw := range cases {
+		if _, err := requestedSelfReview([]domain.RunLog{{Message: "```taskboard-self-review\n" + raw + "\n```"}}); err == nil {
+			t.Fatal("self-review with a failed checklist result must be rejected")
+		}
 	}
 }
 
@@ -1596,11 +1632,14 @@ func TestSelfReviewGateFailsClosedWhenRunLogsCannotBeRead(t *testing.T) {
 }
 
 func TestAutomationEventNoopOnlySuppressesUnchangedReviewReturns(t *testing.T) {
-	if !automationEventIsNoop(domain.AutomationEvent{Payload: []byte(`{"qa_return":true,"change_available":false}`)}) {
+	if !automationEventIsNoop(domain.AutomationEvent{Type: "task.entered_column", Payload: []byte(`{"qa_return":true,"change_available":false}`)}) {
 		t.Fatal("unchanged QA/review return must be a terminal no-op")
 	}
-	if automationEventIsNoop(domain.AutomationEvent{Payload: []byte(`{"qa_return":true,"change_available":false,"rework_requested":true}`)}) {
+	if automationEventIsNoop(domain.AutomationEvent{Type: "task.entered_column", Payload: []byte(`{"qa_return":true,"change_available":false,"rework_requested":true}`)}) {
 		t.Fatal("explicit QA/rework return must remain processable")
+	}
+	if automationEventIsNoop(domain.AutomationEvent{Type: "task.completed", Payload: []byte(`{"qa_return":true,"change_available":false}`)}) {
+		t.Fatal("task.completed must not be discarded as a return no-op")
 	}
 	for _, event := range []domain.AutomationEvent{
 		{Payload: []byte(`{"qa_return":true,"change_available":true}`)},

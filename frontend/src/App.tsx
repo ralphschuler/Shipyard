@@ -1485,7 +1485,7 @@ function Settings({ route, language }: { route: string; language: Language }) {
   );
 }
 type UpdateData = {
-  current: { version: string; commit: string; builtAt?: string };
+  current: { version: string; commit: string; builtAt?: string; goVersion?: string };
   source: { provider: string; repository: string; branch: string };
   status: "up_to_date" | "update_available" | "unavailable" | "unverified" | string;
   release?: { version?: string; commit?: string; publishedAt?: string; changelog?: string; changelogSource?: string; url?: string; verified?: boolean; compatible?: boolean; migrationRequired?: boolean };
@@ -1504,7 +1504,7 @@ function isUpdateData(value: unknown): value is UpdateData {
   const source = update.source;
   const release = update.release;
   if (!isRecord(current) || !isRecord(source)) return false;
-  if (!hasOptionalString(current, "builtAt") || !hasOptionalString(update, "reason") || !hasOptionalString(update, "checked_at")) return false;
+  if (!hasOptionalString(current, "builtAt") || !hasOptionalString(current, "goVersion") || !hasOptionalString(update, "reason") || !hasOptionalString(update, "checked_at")) return false;
   if ("installable" in update && typeof update.installable !== "boolean") return false;
   if (release !== undefined && !isRecord(release)) return false;
   if (release && (!hasOptionalString(release, "version") || !hasOptionalString(release, "commit") || !hasOptionalString(release, "publishedAt") || !hasOptionalString(release, "changelog") || !hasOptionalString(release, "url") || !hasOptionalBoolean(release, "verified") || !hasOptionalBoolean(release, "compatible") || !hasOptionalBoolean(release, "migrationRequired"))) return false;
@@ -1602,7 +1602,7 @@ function Updates({ language }: { language: Language }) {
             {checkFailed ? (checkError?.message || reason || t("updatesCheckFailed")) : ""}
           </p>
           <div className="grid gap-4 sm:grid-cols-2">
-            <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesCurrentVersion")}</p><p className="mt-1 text-xl font-semibold">{String(result.current.version)}</p><p className="font-mono text-xs text-muted-foreground">{String(result.current.commit)}</p><p className="mt-3 text-sm">{text("Build", "Build")}: {typeof result.current.builtAt === "string" ? result.current.builtAt : t("notAvailable")}</p></div>
+            <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesCurrentVersion")}</p><p className="mt-1 text-xl font-semibold">{String(result.current.version)}</p><p className="font-mono text-xs text-muted-foreground">{String(result.current.commit)}</p><p className="mt-3 text-sm">{text("Build", "Build")}: {typeof result.current.builtAt === "string" ? result.current.builtAt : t("notAvailable")}</p><p className="mt-1 font-mono text-xs text-muted-foreground">{t("updatesGoToolchain")}: {typeof result.current.goVersion === "string" && result.current.goVersion ? result.current.goVersion : t("notAvailable")}</p></div>
             <div className="rounded-lg border p-4"><p className="text-xs text-muted-foreground">{t("updatesStatus")}</p><p className="mt-1 text-xl font-semibold">{displayStatus === "up_to_date" ? t("updatesUpToDate") : displayStatus === "update_available" ? t("updatesAvailable") : t("updatesFailed")}</p><p className="mt-3 text-sm text-muted-foreground">{text("Quelle", "Source")}: {String(result.source.provider)} · {String(result.source.repository)}</p></div>
           </div>
         </CardContent>

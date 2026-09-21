@@ -35,8 +35,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
-          check-latest: true
+          go-version-file: go.mod
+          check-latest: false
+      - name: Pin the patched Go toolchain
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/go-toolchain.sh
+          source ./scripts/go-toolchain.sh
+          toolchain="$(shipyard_minimum_go_toolchain)"
+          echo "GOTOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+          echo "TASKBOARD_GO_VERSION=$toolchain" >> "$GITHUB_ENV"
+          GOTOOLCHAIN="$toolchain" ./scripts/require-go-toolchain.sh
+          ./scripts/go-toolchain-selftest.sh
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -61,6 +71,31 @@ jobs:
       - name: Race detector
         run: timeout 120s go test -race ./...
 
+  artifact-vuln:
+    name: Patched toolchain and artifact vulnerability gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: false
+      - name: Pin the patched Go toolchain
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/go-toolchain.sh
+          source ./scripts/go-toolchain.sh
+          toolchain="$(shipyard_minimum_go_toolchain)"
+          echo "GOTOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+          echo "TASKBOARD_GO_VERSION=$toolchain" >> "$GITHUB_ENV"
+          GOTOOLCHAIN="$toolchain" ./scripts/require-go-toolchain.sh
+      - name: Build and scan the release artifact
+        run: |
+          set -euo pipefail
+          ./scripts/build-taskboard.sh -o /tmp/shipyard-artifact --scan
+          go version -m /tmp/shipyard-artifact
+
   production-browser:
     name: Embedded production browser tests
     runs-on: ubuntu-24.04
@@ -68,15 +103,24 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
-          check-latest: true
+          go-version-file: go.mod
+          check-latest: false
+      - name: Pin the patched Go toolchain
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/go-toolchain.sh
+          source ./scripts/go-toolchain.sh
+          toolchain="$(shipyard_minimum_go_toolchain)"
+          echo "GOTOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+          echo "TASKBOARD_GO_VERSION=$toolchain" >> "$GITHUB_ENV"
+          GOTOOLCHAIN="$toolchain" ./scripts/require-go-toolchain.sh
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Build embedded production binary
-        run: timeout 120s npm ci --prefix frontend && timeout 120s npm run build --prefix frontend && timeout 120s go build -o /tmp/taskboard-embedded ./cmd/taskboard
+        run: timeout 120s npm ci --prefix frontend && timeout 120s npm run build --prefix frontend && ./scripts/build-taskboard.sh -o /tmp/taskboard-embedded
       - name: Start embedded production server
         run: TASKBOARD_ADDR=127.0.0.1:8080 /tmp/taskboard-embedded --embedded-app-http > /tmp/taskboard-embedded.log 2>&1 &
       - name: Run browser tests against embedded production server

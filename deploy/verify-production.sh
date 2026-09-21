@@ -44,7 +44,14 @@ fi
 
 systemctl is-active --quiet taskboard
 systemctl is-active --quiet nginx
-curl --fail --silent --show-error --insecure "${base_url%/}/healthz" >/dev/null
+health_payload="$(curl --fail --silent --show-error --insecure "${base_url%/}/healthz")"
+actual_go_version="$(jq -er '.goVersion | strings | select(length > 0)' <<<"$health_payload")"
+"$(dirname "$0")/../scripts/require-go-toolchain.sh" --version "$actual_go_version"
+expected_go_version="${TASKBOARD_EXPECTED_GO_VERSION:-${TASKBOARD_GO_VERSION:-}}"
+if [[ -n "$expected_go_version" && "$actual_go_version" != "$expected_go_version" ]]; then
+  printf 'running Go toolchain mismatch: healthz=%s expected=%s\n' "$actual_go_version" "$expected_go_version" >&2
+  exit 1
+fi
 
 # The running binary owns the panel assets. Verify the public smoke path and
 # its build identity together so a stale checkout directory cannot mask a bad

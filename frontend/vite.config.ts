@@ -13,6 +13,7 @@ function buildInfo(): Plugin {
         source: JSON.stringify({
           version: process.env.TASKBOARD_VERSION ?? process.env.VITE_BUILD_VERSION ?? 'development',
           commit: process.env.TASKBOARD_COMMIT_SHA ?? process.env.VITE_BUILD_COMMIT ?? 'unknown',
+          goVersion: process.env.TASKBOARD_GO_VERSION ?? process.env.VITE_BUILD_GO_VERSION ?? '',
         }) + '\n',
       })
     },
