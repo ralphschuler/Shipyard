@@ -1,0 +1,44 @@
+name: shipyard-dev
+
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: shipyard-dev:local
+    command: sleep infinity
+    user: vscode
+    init: true
+    shm_size: "2gb"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SHIPYARD_DEVCONTAINER: "1"
+      DATABASE_URL: postgres://taskboard:taskboard@postgres:5432/taskboard?sslmode=disable
+      SHIPYARD_TEST_DATABASE_URL: postgres://taskboard:taskboard@postgres:5432/taskboard_agent_tests?sslmode=disable
+      GOTOOLCHAIN: local
+      CHROMIUM_PATH: /usr/bin/chromium
+      PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+    volumes:
+      - shipyard_dev_node_modules:/workspaces/Shipyard/frontend/node_modules
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: taskboard
+      POSTGRES_PASSWORD: taskboard
+      POSTGRES_DB: taskboard
+    volumes:
+      - shipyard_dev_postgres:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready --username=taskboard --dbname=taskboard"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+volumes:
+  shipyard_dev_postgres:
+  shipyard_dev_node_modules:

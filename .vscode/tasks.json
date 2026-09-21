@@ -1,0 +1,67 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Go: test",
+      "type": "shell",
+      "command": "go test ./...",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "test",
+      "problemMatcher": ["$go"]
+    },
+    {
+      "label": "Go: vet",
+      "type": "shell",
+      "command": "go vet ./...",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": ["$go"]
+    },
+    {
+      "label": "Frontend: build",
+      "type": "shell",
+      "command": "npm run build --prefix frontend",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "build"
+    },
+    {
+      "label": "Frontend: lint",
+      "type": "shell",
+      "command": "npm run lint --prefix frontend",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "Playwright: E2E",
+      "type": "shell",
+      "command": "npm run test:e2e --prefix frontend",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "test"
+    },
+    {
+      "label": "Playwright: embedded production E2E",
+      "type": "shell",
+      "command": "bash .devcontainer/run-embedded-e2e.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": "test"
+    },
+    {
+      "label": "Dev Container: install dependencies",
+      "type": "shell",
+      "command": "bash .devcontainer/post-create.sh",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    }
+  ]
+}
