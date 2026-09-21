@@ -360,8 +360,12 @@ func isolateHostCLIAuth(t *testing.T) {
 }
 
 func hasArgSeq(args []string, seq ...string) bool {
+	return argSeqIndex(args, seq...) >= 0
+}
+
+func argSeqIndex(args []string, seq ...string) int {
 	if len(seq) == 0 || len(seq) > len(args) {
-		return false
+		return -1
 	}
 	for i := 0; i+len(seq) <= len(args); i++ {
 		match := true
@@ -372,10 +376,10 @@ func hasArgSeq(args []string, seq ...string) bool {
 			}
 		}
 		if match {
-			return true
+			return i
 		}
 	}
-	return false
+	return -1
 }
 
 func writeHostCLIAuthFile(t *testing.T, dir, name, contents string) string {
@@ -610,5 +614,287 @@ func TestAgentEnvironmentDoesNotInheritHostProviderKeys(t *testing.T) {
 	injected := append(agentEnvironment(""), "OPENAI_API_KEY=assigned-secret")
 	if !strings.Contains(strings.Join(injected, "\n"), "OPENAI_API_KEY=assigned-secret") {
 		t.Fatal("assigned secrets were not present in the CLI environment")
+	}
+}
+
+func isolateGoModuleCache(t *testing.T) {
+	t.Helper()
+	isolateHostCLIAuth(t)
+	t.Setenv("GOMODCACHE", "")
+	t.Setenv("GOTOOLCHAIN", "")
+}
+
+func initGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	runGit(t, dir, "init", "-b", "main")
+	runGit(t, dir, "config", "user.name", "Test")
+	runGit(t, dir, "config", "user.email", "test@example.invalid")
+	if err := os.WriteFile(filepath.Join(dir, "README"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, dir, "add", "README")
+	runGit(t, dir, "commit", "-m", "init")
+}
+
+func worktreeGitPaths(t *testing.T, worktree string) (gitDir, commonDir string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(worktree, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.TrimSpace(strings.Split(string(data), "\n")[0])
+	raw := strings.TrimSpace(strings.TrimPrefix(line, "gitdir:"))
+	if !filepath.IsAbs(raw) {
+		raw = filepath.Join(worktree, raw)
+	}
+	gitDir = filepath.Clean(raw)
+	commonDir = filepath.Clean(filepath.Join(gitDir, "..", ".."))
+	if commondir, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
+		rel := strings.TrimSpace(string(commondir))
+		if rel != "" {
+			if filepath.IsAbs(rel) {
+				commonDir = filepath.Clean(rel)
+			} else {
+				commonDir = filepath.Clean(filepath.Join(gitDir, rel))
+			}
+		}
+	}
+	return gitDir, commonDir
+}
+
+func TestCLISandboxBindsGoModuleCacheReadOnly(t *testing.T) {
+	cache := t.TempDir()
+	home := t.TempDir()
+	homeCache := filepath.Join(home, "go", "pkg", "mod")
+	if err := os.MkdirAll(homeCache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("GOMODCACHE", cache)
+	t.Setenv("GOTOOLCHAIN", "")
+	work := t.TempDir()
+	extra := t.TempDir()
+
+	args, err := cliSandboxArgs(work, builtinPolicy(t, "strict"), "sh", []string{"-c", "true"}, []string{extra})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArgSeq(args, "--ro-bind", cache, cache) {
+		t.Fatalf("module cache was not ro-bound at the same path: %s", strings.Join(args, " "))
+	}
+	if hasArgSeq(args, "--bind", cache, cache) {
+		t.Fatal("module cache was mounted writable")
+	}
+	if hasArgSeq(args, "--ro-bind", homeCache, homeCache) || hasArgSeq(args, "--bind", homeCache, homeCache) {
+		t.Fatal("GOMODCACHE was ignored in favor of ~/go/pkg/mod")
+	}
+	if !hasArgSeq(args, "--setenv", "GOMODCACHE", cache) {
+		t.Fatal("GOMODCACHE was not set to the bound cache")
+	}
+	if !hasArgSeq(args, "--setenv", "GOTOOLCHAIN", "local") {
+		t.Fatal("GOTOOLCHAIN default was not local")
+	}
+	if !hasArgSeq(args, "--bind", extra, extra) {
+		t.Fatal("existing extra writable path was dropped")
+	}
+	if !hasArgSeq(args, "--bind", work, work) {
+		t.Fatal("run worktree was not left writable")
+	}
+	if strings.Contains(strings.Join(args, " "), "--share-net") {
+		t.Fatal("strict network mode was widened")
+	}
+
+	t.Setenv("GOTOOLCHAIN", "go1.22.0")
+	kept, err := cliSandboxArgs(work, builtinPolicy(t, "development"), "sh", []string{"-c", "true"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArgSeq(kept, "--setenv", "GOTOOLCHAIN", "go1.22.0") || hasArgSeq(kept, "--setenv", "GOTOOLCHAIN", "local") {
+		t.Fatalf("existing GOTOOLCHAIN was not kept: %s", strings.Join(kept, " "))
+	}
+
+	qa := sandbox.Profile{Name: "qa-network", Mounts: []string{"worktree"}, NetworkMode: "qa-network", WriteMode: "readonly", Active: true}
+	netArgs, err := cliSandboxArgs(work, qa, "sh", []string{"-c", "true"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArgSeq(netArgs, "--share-net") || !hasArgSeq(netArgs, "--ro-bind", cache, cache) {
+		t.Fatalf("qa-network lost its network mode or the module cache bind: %s", strings.Join(netArgs, " "))
+	}
+}
+
+func TestCLISandboxUsesHomeModuleCacheAndSkipsMissing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GOMODCACHE", "")
+	t.Setenv("GOTOOLCHAIN", "")
+	cache := filepath.Join(home, "go", "pkg", "mod")
+	if err := os.MkdirAll(cache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	args, err := cliSandboxArgs(work, builtinPolicy(t, "strict"), "sh", []string{"-c", "true"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArgSeq(args, "--ro-bind", cache, cache) || !hasArgSeq(args, "--setenv", "GOMODCACHE", cache) {
+		t.Fatalf("~/go/pkg/mod was not bound: %s", strings.Join(args, " "))
+	}
+
+	missing := filepath.Join(t.TempDir(), "missing-mod-cache")
+	t.Setenv("GOMODCACHE", missing)
+	skipped, err := cliSandboxArgs(work, builtinPolicy(t, "strict"), "sh", []string{"-c", "true"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(skipped, " ")
+	if strings.Contains(joined, missing) || strings.Contains(joined, cache) || strings.Contains(joined, "GOMODCACHE") {
+		t.Fatalf("missing GOMODCACHE fell back or was created: %s", joined)
+	}
+	if _, statErr := os.Stat(missing); !os.IsNotExist(statErr) {
+		t.Fatalf("missing module cache was created: %v", statErr)
+	}
+}
+
+func TestToolSandboxDoesNotBindGoModuleCache(t *testing.T) {
+	cache := t.TempDir()
+	t.Setenv("GOMODCACHE", cache)
+	t.Setenv("GOTOOLCHAIN", "local")
+	args, err := openAISandboxArgs(t.TempDir(), "printf ok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, cache) || strings.Contains(joined, "GOMODCACHE") || strings.Contains(joined, "GOTOOLCHAIN") {
+		t.Fatalf("tool sandbox gained CLI module-cache mounts: %s", joined)
+	}
+}
+
+func TestCLISandboxBindsGitCommonDirReadOnly(t *testing.T) {
+	isolateGoModuleCache(t)
+	project := t.TempDir()
+	initGitRepo(t, project)
+	worktree := filepath.Join(t.TempDir(), "run")
+	runGit(t, project, "worktree", "add", worktree, "HEAD")
+	gitDir, commonDir := worktreeGitPaths(t, worktree)
+
+	args, err := cliSandboxArgs(worktree, builtinPolicy(t, "development"), "sh", []string{"-c", "true"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArgSeq(args, "--ro-bind", commonDir, commonDir) {
+		t.Fatalf("git common dir was not ro-bound: %s", strings.Join(args, " "))
+	}
+	if hasArgSeq(args, "--bind", commonDir, commonDir) || hasArgSeq(args, "--bind", gitDir, gitDir) {
+		t.Fatal("git metadata was mounted writable")
+	}
+	if hasArgSeq(args, "--ro-bind", gitDir, gitDir) {
+		t.Fatal("worktree gitdir under the common dir was bound separately")
+	}
+	projectRoot := filepath.Dir(commonDir)
+	if hasArgSeq(args, "--ro-bind", projectRoot, projectRoot) || hasArgSeq(args, "--bind", projectRoot, projectRoot) {
+		t.Fatal("absolute gitdir mounted the project checkout")
+	}
+	if !hasArgSeq(args, "--bind", worktree, worktree) {
+		t.Fatal("run worktree was not writable")
+	}
+	if strings.Contains(strings.Join(args, " "), "--share-net") {
+		t.Fatal("development network mode was widened")
+	}
+
+	roArgs, err := cliSandboxArgs(worktree, builtinPolicy(t, "qa-readonly"), "sh", []string{"-c", "true"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArgSeq(roArgs, "--ro-bind", worktree, worktree) || !hasArgSeq(roArgs, "--ro-bind", commonDir, commonDir) {
+		t.Fatalf("qa-readonly did not keep worktree and gitdir read-only: %s", strings.Join(roArgs, " "))
+	}
+	if hasArgSeq(roArgs, "--bind", worktree, worktree) || hasArgSeq(roArgs, "--bind", commonDir, commonDir) {
+		t.Fatal("qa-readonly left a writable bind")
+	}
+}
+
+func TestCLISandboxBindsProjectRootForRelativeGitdir(t *testing.T) {
+	isolateGoModuleCache(t)
+	project := t.TempDir()
+	initGitRepo(t, project)
+	worktree := filepath.Join(project, "run")
+	runGit(t, project, "worktree", "add", worktree, "HEAD")
+	var evalErr error
+	if project, evalErr = filepath.EvalSymlinks(project); evalErr != nil {
+		t.Fatal(evalErr)
+	}
+	if worktree, evalErr = filepath.EvalSymlinks(worktree); evalErr != nil {
+		t.Fatal(evalErr)
+	}
+	gitDir, commonDir := worktreeGitPaths(t, worktree)
+	rel, err := filepath.Rel(worktree, gitDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := filepath.Clean(filepath.Join(worktree, rel)); got != gitDir {
+		t.Fatalf("relative gitdir %q resolves to %s, want %s", rel, got, gitDir)
+	}
+	if !strings.HasPrefix(rel, "..") {
+		t.Fatalf("fixture gitdir is not relative: %s", rel)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+rel+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	args, err := cliSandboxArgs(worktree, builtinPolicy(t, "development"), "sh", []string{"-c", "true"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArgSeq(args, "--ro-bind", commonDir, commonDir) {
+		t.Fatalf("relative gitdir did not ro-bind the common dir: %s", strings.Join(args, " "))
+	}
+	if !hasArgSeq(args, "--ro-bind", project, project) {
+		t.Fatalf("relative gitdir did not ro-bind the project checkout: %s", strings.Join(args, " "))
+	}
+	if hasArgSeq(args, "--bind", project, project) || hasArgSeq(args, "--bind", commonDir, commonDir) {
+		t.Fatal("project checkout or git common dir was writable")
+	}
+	projectIdx := argSeqIndex(args, "--ro-bind", project, project)
+	workIdx := argSeqIndex(args, "--bind", worktree, worktree)
+	if projectIdx < 0 || workIdx < 0 || projectIdx > workIdx {
+		t.Fatalf("project ro-bind must precede the writable worktree bind: project=%d worktree=%d args=%s", projectIdx, workIdx, strings.Join(args, " "))
+	}
+}
+
+func TestCLISandboxSkipsGitBindsWithoutEscapingMetadata(t *testing.T) {
+	isolateGoModuleCache(t)
+	repo := t.TempDir()
+	initGitRepo(t, repo)
+	args, err := cliSandboxArgs(repo, builtinPolicy(t, "development"), "sh", []string{"-c", "true"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dotGit := filepath.Join(repo, ".git")
+	if hasArgSeq(args, "--ro-bind", dotGit, dotGit) || hasArgSeq(args, "--bind", dotGit, dotGit) {
+		t.Fatalf("in-worktree .git was remounted: %s", strings.Join(args, " "))
+	}
+
+	plain := t.TempDir()
+	outside := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "missing-gitdir")
+	if err := os.WriteFile(filepath.Join(plain, ".git"), []byte("gitdir: "+outside+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plainArgs, err := cliSandboxArgs(plain, builtinPolicy(t, "strict"), "sh", []string{"-c", "true"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasArgSeq(plainArgs, "--ro-bind", outside, outside) || hasArgSeq(plainArgs, "--bind", outside, outside) {
+		t.Fatal("non-git gitdir target was bound")
+	}
+	if err := os.WriteFile(filepath.Join(plain, ".git"), []byte("gitdir: "+missing+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cliSandboxArgs(plain, builtinPolicy(t, "strict"), "sh", []string{"-c", "true"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, statErr := os.Stat(missing); !os.IsNotExist(statErr) {
+		t.Fatalf("missing gitdir was created: %v", statErr)
 	}
 }
