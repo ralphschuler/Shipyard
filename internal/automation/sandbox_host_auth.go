@@ -7,7 +7,10 @@ import (
 )
 
 const (
-	sandboxCLIHome = "/tmp/shipyard-home"
+	// Codex refuses to create its app-server helpers below a temporary
+	// directory. This remains an isolated per-run filesystem in both bwrap and
+	// container adapters; only its in-sandbox location is a conventional home.
+	sandboxCLIHome = "/home/shipyard"
 
 	hostCLIAuthMountedLog     = "Host-CLI-Login eingebunden (nur lesen): "
 	hostCLIAuthMissingWarning = "Kein Host-CLI-Login und kein zugeordnetes Secret; Provider-Authentifizierung fehlt"

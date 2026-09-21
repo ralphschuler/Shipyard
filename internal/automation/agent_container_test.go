@@ -151,6 +151,9 @@ func TestStartAgentContainerUsesFallbackAndBindsAuthAndSecrets(t *testing.T) {
 	assertMount(t, spec.Mounts, worktree, false)
 	assertMount(t, spec.Mounts, outDir, false)
 	assertContainerHomeMount(t, spec.Mounts)
+	for _, dir := range []string{".codex", ".config", ".cache"} {
+		assertContainerHomeDirectoryWritable(t, spec.Mounts, dir)
+	}
 	assertContainerHomeFile(t, spec.Mounts, filepath.Join(containerAgentHome, ".codex", "auth.json"))
 	assertContainerHomeFile(t, spec.Mounts, filepath.Join(containerAgentHome, ".codex", "config.toml"))
 	for _, mount := range spec.Mounts {
@@ -928,12 +931,16 @@ func TestAgentHomeIsRecreatedImmediatelyBeforeCreate(t *testing.T) {
 	if err != nil || !info.IsDir() {
 		t.Fatalf("agent home was not recreated before create: %v", err)
 	}
-	if info.Mode().Perm() != 0o755 {
+	if info.Mode().Perm() != 0o777 {
 		t.Fatalf("agent home mode = %o", info.Mode().Perm())
 	}
 	for _, dir := range []string{".config", ".cache", ".codex"} {
-		if _, err := os.Stat(filepath.Join(home, dir)); err != nil {
+		dirInfo, err := os.Stat(filepath.Join(home, dir))
+		if err != nil {
 			t.Fatalf("recreated home missing %s: %v", dir, err)
+		}
+		if dirInfo.Mode().Perm() != 0o777 {
+			t.Fatalf("recreated home directory %s mode = %o", dir, dirInfo.Mode().Perm())
 		}
 	}
 	assertDurableRuntimePath(t, home)
@@ -1050,8 +1057,8 @@ func assertContainerHomeMount(t *testing.T, mounts []container.Mount) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if info.Mode().Perm() != 0o755 {
-				t.Fatalf("container home source mode = %o, want 755", info.Mode().Perm())
+			if info.Mode().Perm() != 0o777 {
+				t.Fatalf("container home source mode = %o, want 777", info.Mode().Perm())
 			}
 			return
 		}
@@ -1085,6 +1092,24 @@ func assertContainerHomeFile(t *testing.T, mounts []container.Mount, target stri
 		return
 	}
 	t.Fatalf("container auth target missing: %s", target)
+}
+
+func assertContainerHomeDirectoryWritable(t *testing.T, mounts []container.Mount, relative string) {
+	t.Helper()
+	for _, mount := range mounts {
+		if filepath.Clean(mount.Target) != filepath.Clean(containerAgentHome) {
+			continue
+		}
+		info, err := os.Stat(filepath.Join(mount.Source, relative))
+		if err != nil {
+			t.Fatalf("container home directory %s missing: %v", relative, err)
+		}
+		if !info.IsDir() || info.Mode().Perm() != 0o777 {
+			t.Fatalf("container home directory %s mode = %o, want writable directory 777", relative, info.Mode().Perm())
+		}
+		return
+	}
+	t.Fatalf("container home mount missing for directory %s", relative)
 }
 
 func readTestFile(t *testing.T, path string) []byte {
