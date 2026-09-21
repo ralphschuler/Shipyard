@@ -23,7 +23,9 @@ Bleibt das Kommando leer, nutzt Shipyard den HTTP-Adapter. Für den offiziellen
 `grok`-CLI (`npm i -g @xai-official/grok` oder das Installationsskript von xAI)
 trage das Kommando ein, zum Beispiel `grok --always-approve`. Shipyard ergänzt
 Modell und Effort aus dem Agent-Profil und sendet den Prompt per `-p`. Der
-API-Schlüssel kommt weiterhin nur aus der Secret-Zuordnung (`XAI_API_KEY`).
+CLI-Adapter bindet ein vorhandenes Host-Login (`$GROK_HOME` oder `~/.grok`,
+insbesondere `auth.json`) nur-lesen in die Sandbox-HOME; ein zugeordnetes
+Secret (`XAI_API_KEY`) bleibt optionaler Fallback, wenn kein Host-Login da ist.
 
 ## Einschränkungen
 

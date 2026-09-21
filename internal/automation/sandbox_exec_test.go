@@ -77,6 +77,15 @@ func TestReviewCLIInvocationAppliesSandboxProfileOnProductionPath(t *testing.T) 
 	if !strings.Contains(string(workerSrc), "session.IsolationLog") {
 		t.Fatal("production execute path must log the effective sandbox isolation")
 	}
+	if !strings.Contains(string(workerSrc), "session.HostAuthLog") {
+		t.Fatal("production execute path must log when host CLI auth is mounted")
+	}
+	if !strings.Contains(string(workerSrc), "hostCLIAuthMissingWarning") {
+		t.Fatal("production execute path must warn when neither host CLI login nor assigned secret is available")
+	}
+	if !strings.Contains(string(workerSrc), "env = append(env, secretEnv...)") {
+		t.Fatal("production execute path must still inject assigned secrets after sandbox wrap")
+	}
 	if !strings.Contains(string(workerSrc), "Dev-Container-Läufe können das gewählte Sandbox-Profil nicht technisch erzwingen") {
 		t.Fatal("unsupported devcontainer CLI combinations must fail closed")
 	}
@@ -340,4 +349,266 @@ func connectViaUnixProxy(t *testing.T, socket, target string) string {
 		t.Fatal(err)
 	}
 	return strings.TrimSpace(status)
+}
+
+func isolateHostCLIAuth(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("GROK_HOME", "")
+}
+
+func hasArgSeq(args []string, seq ...string) bool {
+	if len(seq) == 0 || len(seq) > len(args) {
+		return false
+	}
+	for i := 0; i+len(seq) <= len(args); i++ {
+		match := true
+		for j := range seq {
+			if args[i+j] != seq[j] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
+}
+
+func writeHostCLIAuthFile(t *testing.T, dir, name, contents string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return abs
+}
+
+func TestCLISandboxMountsHostCodexAuthReadOnly(t *testing.T) {
+	isolateHostCLIAuth(t)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	auth := writeHostCLIAuthFile(t, codexHome, "auth.json", `{"tokens":{"access_token":"redacted"}}`)
+	config := writeHostCLIAuthFile(t, codexHome, "config.toml", "model = \"gpt-test\"\n")
+	cache := writeHostCLIAuthFile(t, codexHome, "cache.bin", "not-auth")
+	if err := os.Mkdir(filepath.Join(codexHome, "log"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(codexHome, "log", "codex.log"), []byte("noise"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	args, err := buildSandboxArgs(sandboxExec{
+		Worktree: t.TempDir(),
+		Policy:   builtinPolicy(t, "strict"),
+		Layout:   sandboxLayoutCLI,
+		Provider: "codex",
+		Command:  "sh",
+		Args:     []string{"-c", "true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArgSeq(args, "--ro-bind", auth, filepath.Join(sandboxCLIHome, ".codex", "auth.json")) {
+		t.Fatalf("Codex auth.json was not ro-bound into sandbox HOME: %s", strings.Join(args, " "))
+	}
+	if !hasArgSeq(args, "--ro-bind", config, filepath.Join(sandboxCLIHome, ".codex", "config.toml")) {
+		t.Fatalf("Codex config.toml was not ro-bound: %s", strings.Join(args, " "))
+	}
+	if !hasArgSeq(args, "--dir", filepath.Join(sandboxCLIHome, ".codex")) {
+		t.Fatalf("sandbox HOME layout missing writable .codex dir: %s", strings.Join(args, " "))
+	}
+	if !hasArgSeq(args, "--setenv", "CODEX_HOME", filepath.Join(sandboxCLIHome, ".codex")) {
+		t.Fatalf("CODEX_HOME was not set to the sandbox auth home: %s", strings.Join(args, " "))
+	}
+	if !hasArgSeq(args, "--setenv", "HOME", sandboxCLIHome) {
+		t.Fatalf("HOME was not the CLI sandbox home: %s", strings.Join(args, " "))
+	}
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, cache) || strings.Contains(joined, filepath.Join(codexHome, "log")) {
+		t.Fatalf("Codex cache/log tree was mounted: %s", joined)
+	}
+}
+
+func TestCLISandboxHonorsHostCODEXHome(t *testing.T) {
+	isolateHostCLIAuth(t)
+	ignored := t.TempDir()
+	if err := os.Mkdir(filepath.Join(ignored, ".codex"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeHostCLIAuthFile(t, filepath.Join(ignored, ".codex"), "auth.json", `{"from":"home"}`)
+	t.Setenv("HOME", ignored)
+
+	custom := t.TempDir()
+	auth := writeHostCLIAuthFile(t, custom, "auth.json", `{"from":"CODEX_HOME"}`)
+	t.Setenv("CODEX_HOME", custom)
+
+	args, err := cliSandboxArgs(t.TempDir(), builtinPolicy(t, "strict"), "sh", []string{"-c", "true"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArgSeq(args, "--ro-bind", auth, filepath.Join(sandboxCLIHome, ".codex", "auth.json")) {
+		t.Fatalf("CODEX_HOME auth was not used: %s", strings.Join(args, " "))
+	}
+	if strings.Contains(strings.Join(args, " "), filepath.Join(ignored, ".codex", "auth.json")) {
+		t.Fatal("default ~/.codex was mounted despite CODEX_HOME")
+	}
+}
+
+func TestCLISandboxMountsHostGrokAuthReadOnly(t *testing.T) {
+	isolateHostCLIAuth(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	grokHome := filepath.Join(home, ".grok")
+	auth := writeHostCLIAuthFile(t, grokHome, "auth.json", `{"https://auth.x.ai":{"key":"redacted"}}`)
+	writeHostCLIAuthFile(t, grokHome, "session.log", "not-auth")
+
+	args, err := buildSandboxArgs(sandboxExec{
+		Worktree: t.TempDir(),
+		Policy:   builtinPolicy(t, "strict"),
+		Layout:   sandboxLayoutCLI,
+		Provider: "grokbot",
+		Command:  "sh",
+		Args:     []string{"-c", "true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasArgSeq(args, "--ro-bind", auth, filepath.Join(sandboxCLIHome, ".grok", "auth.json")) {
+		t.Fatalf("Grok auth.json was not ro-bound into sandbox HOME: %s", strings.Join(args, " "))
+	}
+	if !hasArgSeq(args, "--setenv", "GROK_HOME", filepath.Join(sandboxCLIHome, ".grok")) {
+		t.Fatalf("GROK_HOME was not set to the sandbox auth home: %s", strings.Join(args, " "))
+	}
+	if strings.Contains(strings.Join(args, " "), filepath.Join(grokHome, "session.log")) {
+		t.Fatal("Grok non-auth files were mounted")
+	}
+}
+
+func TestCLISandboxIgnoresMissingHostCLIAuth(t *testing.T) {
+	isolateHostCLIAuth(t)
+	args, err := buildSandboxArgs(sandboxExec{
+		Worktree: t.TempDir(),
+		Policy:   builtinPolicy(t, "strict"),
+		Layout:   sandboxLayoutCLI,
+		Provider: "codex",
+		Command:  "sh",
+		Args:     []string{"-c", "true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, filepath.Join(sandboxCLIHome, ".codex")) || strings.Contains(joined, filepath.Join(sandboxCLIHome, ".grok")) {
+		t.Fatalf("missing host login still produced auth mounts: %s", joined)
+	}
+	if strings.Contains(joined, "CODEX_HOME") || strings.Contains(joined, "GROK_HOME") {
+		t.Fatalf("missing host login still set CLI home env: %s", joined)
+	}
+}
+
+func TestCLISandboxDoesNotMountOtherProviderAuth(t *testing.T) {
+	isolateHostCLIAuth(t)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	auth := writeHostCLIAuthFile(t, codexHome, "auth.json", `{"tokens":{}}`)
+
+	args, err := buildSandboxArgs(sandboxExec{
+		Worktree: t.TempDir(),
+		Policy:   builtinPolicy(t, "strict"),
+		Layout:   sandboxLayoutCLI,
+		Provider: "grokbot",
+		Command:  "sh",
+		Args:     []string{"-c", "true"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(args, " "), auth) {
+		t.Fatal("Codex auth was mounted into a Grokbot sandbox")
+	}
+}
+
+func TestStartCLISandboxLogsHostCodexAuthWithoutSecrets(t *testing.T) {
+	requireBubblewrap(t)
+	isolateHostCLIAuth(t)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	writeHostCLIAuthFile(t, codexHome, "auth.json", `{"tokens":{}}`)
+
+	session, err := startCLISandbox(context.Background(), cliSandboxRequest{
+		Worktree: t.TempDir(),
+		Policy:   builtinPolicy(t, "strict"),
+		Command:  "sh",
+		Args:     []string{"-c", "true"},
+		Provider: domain.ProviderSetting{Provider: "codex"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = session.Close() })
+	if session.HostAuthLog != hostCLIAuthMountedLog+"Codex" {
+		t.Fatalf("host auth log = %q", session.HostAuthLog)
+	}
+	if strings.Join(session.HostAuthMounted, ",") != "Codex" {
+		t.Fatalf("mounted = %#v", session.HostAuthMounted)
+	}
+	if strings.Contains(session.HostAuthLog, "tokens") || strings.Contains(session.HostAuthLog, "auth.json") {
+		t.Fatalf("auth log leaked auth material names beyond the provider: %q", session.HostAuthLog)
+	}
+}
+
+func TestCLISandboxHostCodexAuthVisibleWithoutCacheTree(t *testing.T) {
+	requireBubblewrap(t)
+	isolateHostCLIAuth(t)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	writeHostCLIAuthFile(t, codexHome, "auth.json", "login-ok\n")
+	writeHostCLIAuthFile(t, codexHome, "cache.bin", "cache-secret\n")
+
+	out, err := runCLISandbox(t, t.TempDir(), builtinPolicy(t, "strict"), `
+		echo "HOME=$HOME"
+		echo "CODEX_HOME=$CODEX_HOME"
+		if test -r "$HOME/.codex/auth.json"; then echo auth-visible; cat "$HOME/.codex/auth.json"; else echo auth-missing; fi
+		if test -e "$HOME/.codex/cache.bin" || test -e "$CODEX_HOME/cache.bin"; then echo cache-leaked; else echo cache-hidden; fi
+		if echo session > "$CODEX_HOME/session-write" && test -s "$CODEX_HOME/session-write"; then echo home-writable; else echo home-readonly; fi
+	`)
+	if err != nil {
+		t.Fatalf("sandbox probe failed: %v %s", err, out)
+	}
+	if !strings.Contains(out, "HOME="+sandboxCLIHome) || !strings.Contains(out, "CODEX_HOME="+filepath.Join(sandboxCLIHome, ".codex")) {
+		t.Fatalf("sandbox HOME layout missing Codex auth home: %q", out)
+	}
+	if !strings.Contains(out, "auth-visible") || !strings.Contains(out, "login-ok") {
+		t.Fatalf("host Codex login was not visible in the sandbox: %q", out)
+	}
+	if strings.Contains(out, "cache-leaked") || strings.Contains(out, "cache-secret") {
+		t.Fatalf("Codex cache leaked into the sandbox: %q", out)
+	}
+	if !strings.Contains(out, "home-writable") {
+		t.Fatalf("sandbox Codex home was not writable for session files: %q", out)
+	}
+}
+
+func TestAgentEnvironmentDoesNotInheritHostProviderKeys(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "host-key")
+	t.Setenv("XAI_API_KEY", "host-xai")
+	inherited := strings.Join(agentEnvironment(""), "\n")
+	if strings.Contains(inherited, "OPENAI_API_KEY=") || strings.Contains(inherited, "XAI_API_KEY=") {
+		t.Fatal("unassigned host provider keys leaked into the CLI environment")
+	}
+	injected := append(agentEnvironment(""), "OPENAI_API_KEY=assigned-secret")
+	if !strings.Contains(strings.Join(injected, "\n"), "OPENAI_API_KEY=assigned-secret") {
+		t.Fatal("assigned secrets were not present in the CLI environment")
+	}
 }
