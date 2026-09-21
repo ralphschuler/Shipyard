@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +15,7 @@ import (
 	"taskboard/internal/domain"
 	"taskboard/internal/release"
 	"taskboard/internal/store"
+	"taskboard/internal/workspace"
 	"testing"
 	"time"
 )
@@ -1185,6 +1188,210 @@ func TestProcessIntegrationQueueEndToEndRebasesPushesCreatesPRAndSyncsMerge(t *t
 	if dirty, err := gitOutput(ctx, source, "status", "--porcelain"); err != nil || dirty != "" {
 		t.Fatalf("managed checkout is not clean: %q (%v)", dirty, err)
 	}
+}
+
+func TestClaudeDeliveryRunProcessesSelfReviewWithArgvPrompt(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux is required for Claude delivery lifecycle tests")
+	}
+	if err := bubblewrapPreflight(context.Background()); err != nil {
+		t.Skip(err.Error())
+	}
+	s := workerIntegrationStore(t)
+	comment := "Claude Abschluss"
+	script := fakeStdoutProviderScript(t, germanDeliveryCompletion(comment))
+	run := startDeliveryLifecycleRun(t, s, deliveryLifecycleOptions{
+		adapter:  "claude",
+		model:    "claude-sonnet-4-6",
+		provider: "claude",
+		command:  script,
+	})
+	assertDeliveryProcessedCompletion(t, s, run, comment)
+}
+
+func TestOpenAIDeliveryRunProcessesSelfReviewAndComment(t *testing.T) {
+	installDummyBwrap(t)
+	t.Setenv("SHIPYARD_SECRET_KEY", "be02-openai-lifecycle-key")
+	comment := "OpenAI Abschluss"
+	completion := germanDeliveryCompletion(comment)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(openaiCompletionPayload(t, completion))
+	}))
+	t.Cleanup(server.Close)
+	previous := http.DefaultTransport
+	http.DefaultTransport = server.Client().Transport
+	t.Cleanup(func() { http.DefaultTransport = previous })
+
+	s := workerIntegrationStore(t)
+	run := startDeliveryLifecycleRun(t, s, deliveryLifecycleOptions{
+		adapter:   "openai",
+		model:     "gpt-test",
+		provider:  "openai",
+		baseURL:   server.URL,
+		secretEnv: "SHIPYARD_BE02_OPENAI_KEY",
+		assignKey: true,
+	})
+	assertDeliveryProcessedCompletion(t, s, run, comment)
+}
+
+type deliveryLifecycleOptions struct {
+	adapter, model, provider, command, baseURL, secretEnv string
+	assignKey                                             bool
+}
+
+func startDeliveryLifecycleRun(t *testing.T, s *store.Store, opts deliveryLifecycleOptions) domain.AgentRun {
+	t.Helper()
+	ctx := context.Background()
+	workspaceRoot := t.TempDir()
+	t.Setenv("TASKBOARD_WORKSPACE_ROOT", workspaceRoot)
+	if err := os.WriteFile(filepath.Join(workspaceRoot, ".shipyard-workspace"), []byte("storage=local\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := workspace.Validate(); err != nil {
+		t.Fatalf("workspace preflight: %v", err)
+	}
+
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	if err := os.MkdirAll(remote, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, remote, "init", "--bare", "-b", "master")
+	seed := t.TempDir()
+	runGit(t, seed, "init", "-b", "master")
+	runGit(t, seed, "config", "user.name", "Lifecycle Test")
+	runGit(t, seed, "config", "user.email", "lifecycle@example.invalid")
+	if err := os.WriteFile(filepath.Join(seed, "README.md"), []byte("lifecycle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, seed, "add", "README.md")
+	runGit(t, seed, "commit", "-m", "initial")
+	runGit(t, seed, "remote", "add", "origin", remote)
+	runGit(t, seed, "push", "-u", "origin", "master")
+
+	board, err := s.CreateBoardWithTemplate(ctx, "BE02 lifecycle "+t.Name(), "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	project, err := s.CreateProject(ctx, "BE02 project "+t.Name(), remote, "master", "", []string{board.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteProject(ctx, project.ID) })
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	development := integrationColumnByName(t, columns, "Entwicklung")
+	suffix := time.Now().Format("20060102150405.000000000")
+	agent, err := s.CreateAgent(ctx, "Delivery Agent "+t.Name()+" "+suffix, "lifecycle", "", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteAgent(ctx, agent.ID) })
+	if err = s.UpdateAgentAdapter(ctx, agent.ID, opts.adapter); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.UpdateAgentSelection(ctx, agent.ID, opts.model, "medium", "{}"); err != nil {
+		t.Fatal(err)
+	}
+	provider, err := s.Provider(ctx, opts.provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = s.SaveProvider(ctx, provider.Provider, provider.Model, provider.Command, provider.SecretEnv, provider.BaseURL, provider.Options, provider.Enabled)
+	})
+	secretEnv := provider.SecretEnv
+	if opts.secretEnv != "" {
+		secretEnv = opts.secretEnv
+	}
+	if err = s.SaveProvider(ctx, opts.provider, provider.Model, opts.command, secretEnv, opts.baseURL, provider.Options, true); err != nil {
+		t.Fatal(err)
+	}
+	if opts.assignKey {
+		secret, secretErr := s.CreateSecret(ctx, "lifecycle", "be02-"+suffix, "lifecycle", secretEnv, "test-openai-secret")
+		if secretErr != nil {
+			t.Fatal(secretErr)
+		}
+		t.Cleanup(func() { _ = s.DeleteSecret(ctx, "lifecycle", secret.ID) })
+		if err = s.SetSecretAgents(ctx, "lifecycle", secret.ID, []string{agent.ID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err = s.CreateRuleWithActions(ctx, "Start BE02 delivery "+suffix, board.ID, "task.entered_column", development.ID, agent.ID, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask(ctx, board.ID, "BE02 delivery", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetTaskTargets(ctx, task.ID, []string{project.ID}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, development.ID, "mcp"); err != nil {
+		t.Fatal(err)
+	}
+	worker := &Worker{Store: s}
+	var completed domain.AgentRun
+	waitForWorkerConditionTimeout(t, worker, 20*time.Second, func() bool {
+		runs, readErr := s.RunsForTask(ctx, task.ID)
+		if readErr != nil || len(runs) == 0 {
+			return false
+		}
+		latest := runs[0]
+		if latest.Status == "succeeded" || latest.Status == "failed" {
+			completed = latest
+			return true
+		}
+		return false
+	})
+	return completed
+}
+
+func assertDeliveryProcessedCompletion(t *testing.T, s *store.Store, run domain.AgentRun, comment string) {
+	t.Helper()
+	ctx := context.Background()
+	current, err := s.Run(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != "succeeded" {
+		logs, _ := s.RunLogs(ctx, run.ID)
+		var messages []string
+		for _, log := range logs {
+			messages = append(messages, log.Message)
+		}
+		t.Fatalf("delivery run status = %q summary=%q error=%q logs=%q", current.Status, current.Summary, current.ErrorMessage, strings.Join(messages, "\n"))
+	}
+	comments, err := s.Comments(ctx, current.TaskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range comments {
+		if entry.Author == "Agent" && entry.Body == comment {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("final agent comment %q was not persisted: %#v", comment, comments)
+	}
+}
+
+func waitForWorkerConditionTimeout(t *testing.T, worker *Worker, timeout time.Duration, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		worker.Process(context.Background())
+		if condition() {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("worker condition was not reached within %s", timeout)
 }
 
 func fakeProviderScript(t *testing.T, countPath, transition string, target ...string) string {

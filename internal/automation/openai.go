@@ -88,6 +88,24 @@ type openAIUsage struct {
 	APICalls                                                                                     int
 	ServiceTier                                                                                  string
 }
+
+// responsesRunResult separates authentic assistant completion from the tool
+// transcript written to run logs. Only Completion may populate the isolated
+// self-review control channel.
+type responsesRunResult struct {
+	Transcript string
+	Completion string
+	Usage      openAIUsage
+}
+
+func assembleResponsesRun(transcript []string, completion string, usage openAIUsage) responsesRunResult {
+	parts := append([]string(nil), transcript...)
+	if strings.TrimSpace(completion) != "" {
+		parts = append(parts, completion)
+	}
+	return responsesRunResult{Transcript: strings.Join(parts, "\n\n"), Completion: completion, Usage: usage}
+}
+
 type responseOutput struct {
 	Type      string `json:"type"`
 	CallID    string `json:"call_id"`
@@ -268,18 +286,19 @@ func runToolCommandWithPolicy(ctx context.Context, worktree, command string, pol
 }
 
 func runOpenAIResponses(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree string) (string, openAIUsage, error) {
-	return runOpenAIResponsesForProfile(ctx, provider, apiKey, prompt, worktree, "strict")
+	result, err := runOpenAIResponsesForProfile(ctx, provider, apiKey, prompt, worktree, "strict")
+	return result.Transcript, result.Usage, err
 }
 
-func runOpenAIResponsesForProfile(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree, profile string) (string, openAIUsage, error) {
+func runOpenAIResponsesForProfile(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree, profile string) (responsesRunResult, error) {
 	policy, err := sandbox.Effective(profile, worktree)
 	if err != nil {
-		return "", openAIUsage{}, err
+		return responsesRunResult{}, err
 	}
 	return runProviderResponsesWithPolicy(ctx, provider, apiKey, prompt, worktree, policy, responsesURL, "OpenAI")
 }
 
-func runOpenAIResponsesWithPolicy(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree string, policy sandbox.Profile) (string, openAIUsage, error) {
+func runOpenAIResponsesWithPolicy(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree string, policy sandbox.Profile) (responsesRunResult, error) {
 	return runProviderResponsesWithPolicy(ctx, provider, apiKey, prompt, worktree, policy, responsesURL, "OpenAI")
 }
 
@@ -301,33 +320,33 @@ func runGrokbotResponses(ctx context.Context, provider domain.ProviderSetting, a
 	return outputText(result), usage, nil
 }
 
-func runGrokbotResponsesWithPolicy(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree string, policy sandbox.Profile) (string, openAIUsage, error) {
+func runGrokbotResponsesWithPolicy(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree string, policy sandbox.Profile) (responsesRunResult, error) {
 	return runProviderResponsesWithPolicy(ctx, provider, apiKey, prompt, worktree, policy, grokbotResponsesURL, "Grokbot")
 }
 
-func runProviderResponsesWithPolicy(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree string, policy sandbox.Profile, endpointURL func(string) (string, error), providerLabel string) (string, openAIUsage, error) {
+func runProviderResponsesWithPolicy(ctx context.Context, provider domain.ProviderSetting, apiKey, prompt, worktree string, policy sandbox.Profile, endpointURL func(string) (string, error), providerLabel string) (responsesRunResult, error) {
 	if policy.NetworkMode == "bridge-only" {
-		return "", openAIUsage{}, errors.New("sandbox profile bridge-only erlaubt keine direkten Provider-Aufrufe; verwende den geprüften hostseitigen Release-Bridge-Dienst")
+		return responsesRunResult{}, errors.New("sandbox profile bridge-only erlaubt keine direkten Provider-Aufrufe; verwende den geprüften hostseitigen Release-Bridge-Dienst")
 	}
 	if strings.TrimSpace(provider.Model) == "" {
-		return "", openAIUsage{}, fmt.Errorf("%s-Modell fehlt in den Provider-Einstellungen", providerLabel)
+		return responsesRunResult{}, fmt.Errorf("%s-Modell fehlt in den Provider-Einstellungen", providerLabel)
 	}
 	if strings.TrimSpace(provider.SecretEnv) == "" {
-		return "", openAIUsage{}, fmt.Errorf("%s Secret-Umgebungsvariable fehlt", providerLabel)
+		return responsesRunResult{}, fmt.Errorf("%s Secret-Umgebungsvariable fehlt", providerLabel)
 	}
 	if os.Getenv("TASKBOARD_BWRAP_PREFLIGHT") != "0" {
 		if err := bubblewrapPreflight(ctx); err != nil {
-			return "", openAIUsage{}, err
+			return responsesRunResult{}, err
 		}
 	} else if _, err := exec.LookPath("bwrap"); err != nil {
-		return "", openAIUsage{}, errors.New("OpenAI-Agenten benötigen bubblewrap (bwrap); installiere das Paket bubblewrap auf dem Server und starte taskboard.service neu")
+		return responsesRunResult{}, errors.New("OpenAI-Agenten benötigen bubblewrap (bwrap); installiere das Paket bubblewrap auf dem Server und starte taskboard.service neu")
 	}
 	if strings.TrimSpace(apiKey) == "" {
-		return "", openAIUsage{}, fmt.Errorf("%s Secret-Umgebungsvariable ist nicht gesetzt", providerLabel)
+		return responsesRunResult{}, fmt.Errorf("%s Secret-Umgebungsvariable ist nicht gesetzt", providerLabel)
 	}
 	endpoint, err := endpointURL(provider.BaseURL)
 	if err != nil {
-		return "", openAIUsage{}, err
+		return responsesRunResult{}, err
 	}
 	var options struct {
 		ReasoningEffort      string   `json:"reasoning_effort"`
@@ -340,11 +359,11 @@ func runProviderResponsesWithPolicy(ctx context.Context, provider domain.Provide
 	}
 	if provider.Options != "" && provider.Options != "{}" {
 		if err := json.Unmarshal([]byte(provider.Options), &options); err != nil {
-			return "", openAIUsage{}, fmt.Errorf("%s-Optionen sind ungültig", providerLabel)
+			return responsesRunResult{}, fmt.Errorf("%s-Optionen sind ungültig", providerLabel)
 		}
 	}
 	if options.MaxOutputTokens < 0 || options.InputCostPerMillion < 0 || options.OutputCostPerMillion < 0 || (options.Temperature != nil && (*options.Temperature < 0 || *options.Temperature > 2)) {
-		return "", openAIUsage{}, fmt.Errorf("%s-Optionen enthalten ungültige Werte", providerLabel)
+		return responsesRunResult{}, fmt.Errorf("%s-Optionen enthalten ungültige Werte", providerLabel)
 	}
 	client := &http.Client{Timeout: 19 * time.Minute}
 	usageServiceTier := options.ServiceTier
@@ -370,7 +389,7 @@ func runProviderResponsesWithPolicy(ctx context.Context, provider domain.Provide
 	for round := 0; round < maxOpenAIToolRounds; round++ {
 		result, err := callResponses(ctx, client, endpoint, apiKey, request)
 		if err != nil {
-			return strings.Join(transcript, "\n"), usage, redactProviderSecret(err, apiKey)
+			return responsesRunResult{Transcript: strings.Join(transcript, "\n"), Usage: usage}, redactProviderSecret(err, apiKey)
 		}
 		accumulateOpenAIUsage(&usage, result.Usage)
 		var outputs []map[string]string
@@ -391,15 +410,12 @@ func runProviderResponsesWithPolicy(ctx context.Context, provider domain.Provide
 		}
 		if len(outputs) == 0 {
 			text := strings.TrimSpace(outputText(result))
-			if text != "" {
-				transcript = append(transcript, text)
-			}
 			usage.EstimatedCostMicrousd = int64(math.Round((float64(usage.InputTokens)*options.InputCostPerMillion + float64(usage.OutputTokens)*options.OutputCostPerMillion) / 1_000_000 * 1_000_000))
-			return strings.Join(transcript, "\n\n"), usage, nil
+			return assembleResponsesRun(transcript, text, usage), nil
 		}
 		request = responseRequest{Model: provider.Model, Input: outputs, PreviousResponseID: result.ID, Tools: toolDefinitions(), Reasoning: request.Reasoning, Text: request.Text, MaxOutputTokens: request.MaxOutputTokens, Temperature: request.Temperature, ServiceTier: request.ServiceTier, Store: false}
 	}
-	return strings.Join(transcript, "\n\n"), usage, errors.New("OpenAI-Agent hat das Werkzeuglimit erreicht")
+	return responsesRunResult{Transcript: strings.Join(transcript, "\n\n"), Usage: usage}, errors.New("OpenAI-Agent hat das Werkzeuglimit erreicht")
 }
 
 func redactProviderSecret(err error, secret string) error {

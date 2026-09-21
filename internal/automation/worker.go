@@ -2094,6 +2094,8 @@ func tmuxClientEnvironment() []string {
 	return append(env, "TERM=dumb")
 }
 
+// Stdout is redirected whenever a trusted output path is supplied,
+// including Claude's argv-only prompt transport which has no stdin.
 func tmuxRunnerScript(bashPath string) string {
 	if strings.TrimSpace(bashPath) == "" {
 		bashPath = "/bin/bash"
@@ -2117,8 +2119,12 @@ while IFS= read -r -d '' assignment || [[ -n "$assignment" ]]; do
 done < "$env_path"
 rm -f -- "$env_path"
 mapfile -d '' -t argv < "$args_path"
-if [[ -n "$stdin_path" && -n "$output_path" ]]; then
-  "${argv[@]}" < "$stdin_path" > "$output_path"
+if [[ -n "$output_path" ]]; then
+  if [[ -n "$stdin_path" ]]; then
+    "${argv[@]}" < "$stdin_path" > "$output_path"
+  else
+    "${argv[@]}" > "$output_path"
+  fi
 elif [[ -n "$stdin_path" ]]; then
   "${argv[@]}" < "$stdin_path"
 else
@@ -3731,18 +3737,18 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			w.failSecretAudit(ctx, run, provider.Provider, provider.Model)
 			return
 		}
-		var text string
-		var usage openAIUsage
+		var response responsesRunResult
 		var responseErr error
 		if provider.Provider == "grokbot" {
-			text, usage, responseErr = runGrokbotResponsesWithPolicy(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot, runSandbox)
+			response, responseErr = runGrokbotResponsesWithPolicy(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot, runSandbox)
 		} else {
-			text, usage, responseErr = runOpenAIResponsesWithPolicy(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot, runSandbox)
+			response, responseErr = runOpenAIResponsesWithPolicy(runCtx, provider, secret.Value, prompt, run.WorkspaceSnapshot, runSandbox)
 		}
-		out, tokenUsage, inputTokens, outputTokens, estimatedCostMicrousd, err = []byte(text), usage.TotalTokens, usage.InputTokens, usage.OutputTokens, usage.EstimatedCostMicrousd, responseErr
-		cachedInputTokens, cacheWriteTokens, reasoningTokens = usage.CachedInputTokens, usage.CacheWriteTokens, usage.ReasoningTokens
-		apiCalls, nativeCostMicrousd = usage.APICalls, usage.NativeCostMicrousd
-		serviceTier = usage.ServiceTier
+		out, tokenUsage, inputTokens, outputTokens, estimatedCostMicrousd, err = []byte(response.Transcript), response.Usage.TotalTokens, response.Usage.InputTokens, response.Usage.OutputTokens, response.Usage.EstimatedCostMicrousd, responseErr
+		cachedInputTokens, cacheWriteTokens, reasoningTokens = response.Usage.CachedInputTokens, response.Usage.CacheWriteTokens, response.Usage.ReasoningTokens
+		apiCalls, nativeCostMicrousd = response.Usage.APICalls, response.Usage.NativeCostMicrousd
+		serviceTier = response.Usage.ServiceTier
+		structuredOutput = response.Completion
 	} else {
 		if runSandbox.NetworkMode == "bridge-only" {
 			reason := "release-bridge blockiert direkte Provider-Kommandos"
