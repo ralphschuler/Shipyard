@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"syscall"
 	"taskboard/internal/automation"
+	"taskboard/internal/buildmeta"
 	"taskboard/internal/mcp"
 	"taskboard/internal/memory"
 	"taskboard/internal/release"
@@ -46,9 +47,10 @@ func requestTimeout(next http.Handler) http.Handler {
 // development defaults makes local `go run` useful while still exposing an
 // immutable build identity to the Updates view in production.
 var (
-	version = "development"
-	commit  = "unknown"
-	builtAt string
+	version   = "development"
+	commit    = "unknown"
+	builtAt   string
+	goversion string
 )
 
 func main() {
@@ -173,6 +175,11 @@ func setBuildMetadata() {
 	setDefaultEnv("TASKBOARD_VERSION", version)
 	setDefaultEnv("TASKBOARD_COMMIT_SHA", commit)
 	setDefaultEnv("TASKBOARD_BUILD_TIME", builtAt)
+	compiledGo := goversion
+	if compiledGo == "" {
+		compiledGo = buildmeta.GoVersion()
+	}
+	_ = os.Setenv("TASKBOARD_GO_VERSION", compiledGo)
 }
 
 func setDefaultEnv(key, value string) {

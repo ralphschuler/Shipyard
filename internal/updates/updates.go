@@ -35,9 +35,10 @@ var (
 )
 
 type Current struct {
-	Version string `json:"version"`
-	Commit  string `json:"commit"`
-	BuiltAt string `json:"builtAt"`
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	BuiltAt   string `json:"builtAt"`
+	GoVersion string `json:"goVersion,omitempty"`
 }
 type Release struct {
 	Version           string `json:"version"`
