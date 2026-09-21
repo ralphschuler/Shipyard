@@ -118,10 +118,9 @@ func cliContainerRuntimeAvailable(ctx context.Context) error {
 //     outside the worktree.
 //   - Allowlisted host CLI login files are mounted read-only under the
 //     container home. The host home directory itself is never mounted.
-//   - The host CLI install (Codex, and the same layout for other provider
-//     CLIs) is mounted read-only at its host path. Node entrypoints run with
-//     the image's node. The image toolchain is left in place. Login files
-//     and provider CLIs are not baked into the agent image.
+//     Codex, Claude, and Grok config directories that do not exist are
+//     skipped. Codex, Claude Code, and the Grok CLI themselves come from
+//     the agent image (/usr/local/bin), not from a host binary mount.
 //   - Task-assigned secrets are injected through an exec env-file. The
 //     container does not receive the Shipyard service environment.
 //   - Bind sources Shipyard creates (agent home, secret env-file, model-API

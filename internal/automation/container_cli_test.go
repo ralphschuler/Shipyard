@@ -2,7 +2,6 @@ package automation
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -69,31 +68,27 @@ func useHostCodexOnPATH(t *testing.T, install hostCodexInstall) {
 	t.Setenv("PATH", install.bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
-func TestResolveContainerCLIMountsCodexPackageAndExternalTarget(t *testing.T) {
+func TestResolveContainerCLIUsesImageProviderCLIs(t *testing.T) {
 	install := writeHostCodexInstall(t)
 	useHostCodexOnPATH(t, install)
-	cli, err := resolveContainerCLI("codex")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !cli.NeedsNode || !reflect.DeepEqual(cli.Argv, []string{"node", install.script}) {
-		t.Fatalf("argv = %#v needsNode=%v", cli.Argv, cli.NeedsNode)
-	}
-	if cli.ExtraPATH != "" {
-		t.Fatalf("extra PATH = %q", cli.ExtraPATH)
-	}
-	assertPathSet(t, cli.Binds, install.scope, install.cache)
-	for _, blocked := range []string{install.bin, install.link, install.npmDir, filepath.Dir(install.scope), install.root} {
-		if pathListed(cli.Binds, blocked) {
-			t.Fatalf("bind list includes %s: %#v", blocked, cli.Binds)
+	for _, name := range []string{"codex", "claude", "grok", install.link} {
+		cli, err := resolveContainerCLI(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "/usr/local/bin/" + filepath.Base(name)
+		if cli.NeedsNode || len(cli.Binds) != 0 || !reflect.DeepEqual(cli.Argv, []string{want}) {
+			t.Fatalf("%s plan = %#v", name, cli)
 		}
 	}
-	if _, err := exec.LookPath("node"); err != nil {
-		t.Skip("node is not installed; mount plan was still checked")
-	}
-	out, err := exec.Command("node", install.script).CombinedOutput()
-	if err != nil || !strings.Contains(string(out), "codex-ok") {
-		t.Fatalf("launcher did not resolve the platform package: %v %s", err, out)
+	for _, blocked := range []string{install.script, install.scope, install.cache, install.bin} {
+		cli, err := resolveContainerCLI("codex")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pathListed(cli.Binds, blocked) || strings.Contains(strings.Join(cli.Argv, " "), blocked) {
+			t.Fatalf("image Codex exec used host path %s: %#v", blocked, cli)
+		}
 	}
 }
 
@@ -142,13 +137,13 @@ func TestResolveContainerCLIMountsHoistedSiblingDependency(t *testing.T) {
 
 func TestResolveContainerCLIMountsNativePackageWithoutConfigHome(t *testing.T) {
 	root := t.TempDir()
-	pkg := filepath.Join(root, "libexec", "grok")
+	pkg := filepath.Join(root, "libexec", "helper")
 	binDir := filepath.Join(pkg, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	real := filepath.Join(binDir, "grok")
-	if err := os.WriteFile(real, []byte("#!/bin/sh\necho grok\n"), 0o755); err != nil {
+	real := filepath.Join(binDir, "helper")
+	if err := os.WriteFile(real, []byte("#!/bin/sh\necho helper\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(pkg, "share.txt"), []byte("data"), 0o644); err != nil {
@@ -158,11 +153,11 @@ func TestResolveContainerCLIMountsNativePackageWithoutConfigHome(t *testing.T) {
 	if err := os.MkdirAll(linkDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("../libexec/grok/bin/grok", filepath.Join(linkDir, "grok")); err != nil {
+	if err := os.Symlink("../libexec/helper/bin/helper", filepath.Join(linkDir, "helper")); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", linkDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	cli, err := resolveContainerCLI("grok")
+	cli, err := resolveContainerCLI("helper")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,12 +181,12 @@ func TestResolveContainerCLIMountsNativePackageWithoutConfigHome(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(config, "auth.json"), []byte("{\"token\":\"secret\"}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	binary := filepath.Join(configBin, "codex")
+	binary := filepath.Join(configBin, "helper")
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\necho native\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", configBin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	cli, err = resolveContainerCLI("codex")
+	cli, err = resolveContainerCLI("helper")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +226,7 @@ func TestResolveContainerCLIUsesImageToolsAsIs(t *testing.T) {
 	if len(cli.Argv) != 1 || filepath.Base(cli.Argv[0]) != "sh" {
 		t.Fatalf("argv = %#v", cli.Argv)
 	}
-	if _, err := resolveContainerCLI("/no/such/codex"); err == nil {
+	if _, err := resolveContainerCLI("/no/such/helper"); err == nil {
 		t.Fatal("missing absolute CLI was accepted")
 	}
 }

@@ -10,9 +10,9 @@
 # by the service account. This image intentionally has no baked-in login.
 # python3-minimal provides /usr/bin/python3 for the model-API allowlist relay.
 # The host interpreter is not used.
-# Provider CLIs (Codex and the other host logins) are not installed in this
-# image. The runner bind-mounts the host install read-only and starts Node
-# entrypoints with this image's node. Login files stay off the image.
+# Codex, Claude Code, and the Grok CLI are installed on PATH (/usr/local/bin).
+# Host credential directories are bind-mounted at runtime when they exist.
+# They are not copied into this image.
 
 FROM mcr.microsoft.com/devcontainers/base:ubuntu-24.04
 
@@ -61,6 +61,24 @@ RUN set -eux; \
 ENV GOTOOLCHAIN=local \
     npm_config_update_notifier=false \
     PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Pinned provider CLIs. npm's global prefix is /usr/local, so the binaries are
+# /usr/local/bin/codex, /usr/local/bin/claude, and /usr/local/bin/grok.
+ARG CODEX_CLI_VERSION=0.155.1
+ARG CLAUDE_CODE_VERSION=2.1.278
+ARG GROK_CLI_VERSION=1.0.40
+RUN npm install -g --no-audit --no-fund \
+        "@openai/codex@${CODEX_CLI_VERSION}" \
+        "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+        "@xai-official/grok@${GROK_CLI_VERSION}" \
+    && npm cache clean --force \
+    && chmod -R a+rX /usr/local/lib/node_modules \
+    && test -x /usr/local/bin/codex \
+    && test -x /usr/local/bin/claude \
+    && test -x /usr/local/bin/grok \
+    && codex --version \
+    && claude --version \
+    && grok --version
 
 WORKDIR /workspace
 CMD ["sleep", "infinity"]

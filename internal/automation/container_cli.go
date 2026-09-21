@@ -33,16 +33,21 @@ var containerImageTools = map[string]struct{}{
 	"curl": {},
 }
 
-// resolveContainerCLI makes a host CLI visible inside the agent image.
-// Bubblewrap can see host /usr because it bind-mounts that tree. The agent
-// image has its own /usr and does not contain host installs such as
-// /usr/local/bin/codex. A Node entrypoint is executed with the image node,
-// and its package directory is mounted at the real host path so the launcher
-// can find its platform binary. Login directories are not part of this mount.
+// resolveContainerCLI chooses the process an agent container execs.
+// Codex, Claude Code, and the Grok CLI are installed in the image at
+// /usr/local/bin, so those commands always use the image binary. Other host
+// CLIs that are not part of the image toolchain are still bind-mounted.
+// Login directories are not part of this mount.
 func resolveContainerCLI(command string) (containerCLI, error) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return containerCLI{}, errors.New("CLI-Kommando fehlt")
+	}
+	// Codex, Claude Code, and the Grok CLI are installed in the agent image
+	// at /usr/local/bin. Exec that path even when the host has its own binary,
+	// so a host symlink is not mounted over the image copy.
+	if path, ok := imageAgentCLI(command); ok {
+		return containerCLI{Argv: []string{path}}, nil
 	}
 	resolved, err := exec.LookPath(command)
 	if err != nil {
@@ -92,6 +97,15 @@ func resolveContainerCLI(command string) (containerCLI, error) {
 		extra = bin
 	}
 	return containerCLI{Argv: []string{real}, Binds: binds, ExtraPATH: extra}, nil
+}
+
+func imageAgentCLI(command string) (string, bool) {
+	switch filepath.Base(command) {
+	case "codex", "claude", "grok":
+		return "/usr/local/bin/" + filepath.Base(command), true
+	default:
+		return "", false
+	}
 }
 
 func containerImageProvides(resolved, real string) bool {

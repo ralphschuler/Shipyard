@@ -14,10 +14,12 @@ const (
 )
 
 // hostCLIAuthPlan is the minimal, read-only set of host CLI login files to
-// expose inside the CLI sandbox HOME. Codex and Grok write sessions, logs, and
-// caches under their home directories, so the host tree is never bind-mounted
-// as a whole: that would both block those writes on a read-only mount and pull
-// large cache/log directories into the sandbox.
+// expose inside the CLI sandbox HOME. Codex, Claude, and Grok write sessions,
+// logs, and caches under their home directories, so the host tree is never
+// bind-mounted as a whole: that would both block those writes on a read-only
+// mount and pull large cache/log directories into the sandbox. A missing
+// directory, or a directory with none of the allowlisted files, adds no bind
+// and does not fail container start.
 type hostCLIAuthPlan struct {
 	Names    []string
 	DestDirs []string
@@ -79,11 +81,16 @@ func resolveHostCLIAuth(provider, worktree string) hostCLIAuthPlan {
 	var plan hostCLIAuthPlan
 	includeCodex := provider == "" || provider == "codex"
 	includeGrok := provider == "" || provider == "grokbot"
+	includeClaude := provider == "" || provider == "claude"
 	if includeCodex {
 		plan.merge(collectHostCLIAuth("Codex", "CODEX_HOME", ".codex", worktree))
 	}
 	if includeGrok {
 		plan.merge(collectHostCLIAuth("Grok", "GROK_HOME", ".grok", worktree))
+	}
+	if includeClaude {
+		plan.merge(collectHostCLIAuth("Claude", "CLAUDE_CONFIG_DIR", ".claude", worktree, "settings.json"))
+		plan.merge(collectClaudeUserFile(worktree))
 	}
 	return plan
 }
@@ -92,44 +99,86 @@ func (p *hostCLIAuthPlan) merge(other hostCLIAuthPlan) {
 	if other.empty() {
 		return
 	}
-	p.Names = append(p.Names, other.Names...)
+	seen := map[string]struct{}{}
+	for _, name := range p.Names {
+		seen[name] = struct{}{}
+	}
+	for _, name := range other.Names {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		p.Names = append(p.Names, name)
+	}
 	p.DestDirs = append(p.DestDirs, other.DestDirs...)
 	p.Binds = append(p.Binds, other.Binds...)
 	p.Env = append(p.Env, other.Env...)
 }
 
-func collectHostCLIAuth(name, envKey, dirName, worktree string) hostCLIAuthPlan {
+func collectHostCLIAuth(name, envKey, dirName, worktree string, extraFiles ...string) hostCLIAuthPlan {
 	hostDir := hostCLIAuthDir(envKey, dirName)
 	if hostDir == "" || !safeHostAuthSource(hostDir, worktree) {
 		return hostCLIAuthPlan{}
 	}
-	authPath := absPath(filepath.Join(hostDir, "auth.json"))
-	if !regularFileExists(authPath) || !safeHostAuthSource(authPath, worktree) {
+	info, err := os.Stat(hostDir)
+	if err != nil || !info.IsDir() {
 		return hostCLIAuthPlan{}
 	}
 	destDir := filepath.Join(sandboxCLIHome, dirName)
 	plan := hostCLIAuthPlan{
 		Names:    []string{name},
 		DestDirs: []string{destDir},
-		Binds:    []sandboxMappedBind{{Source: authPath, Dest: filepath.Join(destDir, "auth.json")}},
 		Env:      []sandboxEnvVar{{Key: envKey, Value: destDir}},
 	}
-	for _, filename := range []string{"config.toml", "mcp_credentials.json", "credentials.json"} {
+	for _, filename := range hostAuthFilenames(extraFiles) {
 		path := absPath(filepath.Join(hostDir, filename))
 		if regularFileExists(path) && safeHostAuthSource(path, worktree) {
 			plan.Binds = append(plan.Binds, sandboxMappedBind{Source: path, Dest: filepath.Join(destDir, filename)})
 		}
 	}
 	tokens := absPath(filepath.Join(hostDir, "tokens"))
-	info, err := os.Stat(tokens)
-	if err != nil || !safeHostAuthSource(tokens, worktree) {
-		return plan
+	tokenInfo, tokenErr := os.Stat(tokens)
+	if tokenErr == nil && safeHostAuthSource(tokens, worktree) && (tokenInfo.IsDir() || tokenInfo.Mode().IsRegular()) {
+		plan.Binds = append(plan.Binds, sandboxMappedBind{Source: tokens, Dest: filepath.Join(destDir, "tokens")})
 	}
-	dest := filepath.Join(destDir, "tokens")
-	if info.IsDir() || info.Mode().IsRegular() {
-		plan.Binds = append(plan.Binds, sandboxMappedBind{Source: tokens, Dest: dest})
+	if len(plan.Binds) == 0 {
+		return hostCLIAuthPlan{}
 	}
 	return plan
+}
+
+func hostAuthFilenames(extra []string) []string {
+	seen := map[string]struct{}{}
+	var names []string
+	for _, name := range append([]string{"auth.json", "config.toml", "mcp_credentials.json", "credentials.json", ".credentials.json"}, extra...) {
+		if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	return names
+}
+
+// collectClaudeUserFile bind-mounts ~/.claude.json when that file exists.
+// Claude Code keeps the sign-in session there, outside CLAUDE_CONFIG_DIR.
+// A missing home or a missing file is skipped.
+func collectClaudeUserFile(worktree string) hostCLIAuthPlan {
+	userHome, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(userHome) == "" {
+		return hostCLIAuthPlan{}
+	}
+	path := absPath(filepath.Join(userHome, ".claude.json"))
+	if !regularFileExists(path) || !safeHostAuthSource(path, worktree) {
+		return hostCLIAuthPlan{}
+	}
+	return hostCLIAuthPlan{
+		Names: []string{"Claude"},
+		Binds: []sandboxMappedBind{{Source: path, Dest: filepath.Join(sandboxCLIHome, ".claude.json")}},
+	}
 }
 
 func absPath(path string) string {
