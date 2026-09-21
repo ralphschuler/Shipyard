@@ -24,6 +24,26 @@ func TestSetBuildMetadataExposesTheCompiledGoToolchain(t *testing.T) {
 	}
 }
 
+func TestSetBuildMetadataReleaseOverridesStaleEnvironment(t *testing.T) {
+	t.Setenv("TASKBOARD_VERSION", "v0.1.46")
+	t.Setenv("TASKBOARD_COMMIT_SHA", "old-commit")
+	t.Setenv("TASKBOARD_BUILD_TIME", "old-time")
+	previousVersion, previousCommit, previousBuiltAt := version, commit, builtAt
+	version, commit, builtAt = "v0.1.48", "new-commit", "new-time"
+	t.Cleanup(func() { version, commit, builtAt = previousVersion, previousCommit, previousBuiltAt })
+
+	setBuildMetadata()
+	if got := os.Getenv("TASKBOARD_VERSION"); got != "v0.1.48" {
+		t.Fatalf("TASKBOARD_VERSION = %q, want embedded release", got)
+	}
+	if got := os.Getenv("TASKBOARD_COMMIT_SHA"); got != "new-commit" {
+		t.Fatalf("TASKBOARD_COMMIT_SHA = %q, want embedded commit", got)
+	}
+	if got := os.Getenv("TASKBOARD_BUILD_TIME"); got != "new-time" {
+		t.Fatalf("TASKBOARD_BUILD_TIME = %q, want embedded build time", got)
+	}
+}
+
 func TestStreamingPathsBypassTheOrdinaryRequestTimeout(t *testing.T) {
 	for _, path := range []string{"/events", "/mcp"} {
 		if !isStreamingPath(path) {

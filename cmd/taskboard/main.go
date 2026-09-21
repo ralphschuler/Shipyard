@@ -191,9 +191,20 @@ func migrateWorkspace(source, target string) error {
 }
 
 func setBuildMetadata() {
-	setDefaultEnv("TASKBOARD_VERSION", version)
-	setDefaultEnv("TASKBOARD_COMMIT_SHA", commit)
-	setDefaultEnv("TASKBOARD_BUILD_TIME", builtAt)
+	// Release metadata is embedded in the binary and must win over stale
+	// values from a previous systemd EnvironmentFile. Otherwise an update can
+	// replace the executable successfully while /app/build-info.json still
+	// reports the old release. Development builds keep the explicit environment
+	// override so local workflows remain configurable.
+	if version != "" && version != "development" {
+		_ = os.Setenv("TASKBOARD_VERSION", version)
+		_ = os.Setenv("TASKBOARD_COMMIT_SHA", commit)
+		_ = os.Setenv("TASKBOARD_BUILD_TIME", builtAt)
+	} else {
+		setDefaultEnv("TASKBOARD_VERSION", version)
+		setDefaultEnv("TASKBOARD_COMMIT_SHA", commit)
+		setDefaultEnv("TASKBOARD_BUILD_TIME", builtAt)
+	}
 	compiledGo := goversion
 	if compiledGo == "" {
 		compiledGo = buildmeta.GoVersion()
