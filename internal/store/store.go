@@ -3236,6 +3236,101 @@ func (s *Store) ConsumeBatchDelivery(c context.Context, id string) (bool, error)
 		AND NOT EXISTS (SELECT 1 FROM agent_runs r WHERE r.batch_id=b.id AND (r.status<>'succeeded' OR r.applied_at IS NULL))`, id)
 	return tag.RowsAffected() == 1, err
 }
+
+// RecentReworkLeagueRuns lists finished attempts for one task, newest first.
+// The current run is omitted. The result is a prompt summary: model, effort,
+// status, gate, whether the diff was applied, and the short summary or error.
+// Prompt snapshots, logs, diffs, and gate output are not loaded.
+func (s *Store) RecentReworkLeagueRuns(c context.Context, taskID, excludeRunID string, limit int) ([]domain.ReworkLeagueRun, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 12 {
+		limit = 12
+	}
+	rows, err := s.DB.Query(c, `SELECT r.id::text, a.name, r.effective_model, r.effective_effort, r.status, r.gate_status,
+		(r.applied_at IS NOT NULL), r.summary, r.error_message,
+		COALESCE(r.finished_at, r.started_at, r.created_at)
+		FROM agent_runs r
+		JOIN agents a ON a.id = r.agent_id
+		WHERE r.task_id = $1
+		  AND ($2 = '' OR r.id::text <> $2)
+		  AND r.status IN ('succeeded', 'failed', 'cancelled')
+		ORDER BY r.created_at DESC
+		LIMIT $3`, taskID, strings.TrimSpace(excludeRunID), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []domain.ReworkLeagueRun
+	for rows.Next() {
+		var run domain.ReworkLeagueRun
+		if err := rows.Scan(&run.ID, &run.AgentName, &run.Model, &run.Effort, &run.Status, &run.GateStatus, &run.Applied, &run.Summary, &run.ErrorMessage, &run.OccurredAt); err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+// ReworkLeagueLogs loads a bounded slice of durable run-log rows for the
+// attempts a rework prompt may quote. Each message is truncated in the query.
+// The caller still has to prefer finding-dense lines; this only prevents a
+// full protocol download.
+func (s *Store) ReworkLeagueLogs(c context.Context, runIDs []string) (map[string][]domain.RunLog, error) {
+	ids := make([]string, 0, len(runIDs))
+	seen := map[string]struct{}{}
+	for _, id := range runIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+		if len(ids) == 8 {
+			break
+		}
+	}
+	grouped := map[string][]domain.RunLog{}
+	if len(ids) == 0 {
+		return grouped, nil
+	}
+	rows, err := s.DB.Query(c, `WITH ranked AS (
+		SELECT l.id, l.agent_run_id::text AS run_id, l.sequence, l.level, left(l.message, 2000) AS message, l.created_at,
+			row_number() OVER (PARTITION BY l.agent_run_id ORDER BY l.sequence DESC) AS tail_rank,
+			(
+				l.level IN ('error', 'warning')
+				OR l.message ILIKE '%befund%'
+				OR l.message ILIKE '%fehlgeschlagen%'
+				OR l.message ILIKE '%failed%'
+				OR l.message ILIKE '%panic%'
+				OR l.message ILIKE '%gate%'
+				OR l.message ILIKE '%nicht bestanden%'
+			) AS signal
+		FROM agent_run_logs l
+		WHERE l.agent_run_id = ANY($1::uuid[])
+	)
+	SELECT id, run_id, sequence, level, message, created_at
+	FROM ranked
+	WHERE tail_rank <= 40 OR (signal AND tail_rank <= 200)
+	ORDER BY run_id, sequence`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var entry domain.RunLog
+		if err := rows.Scan(&entry.ID, &entry.RunID, &entry.Sequence, &entry.Level, &entry.Message, &entry.CreatedAt); err != nil {
+			return nil, err
+		}
+		grouped[entry.RunID] = append(grouped[entry.RunID], entry)
+	}
+	return grouped, rows.Err()
+}
+
 func (s *Store) RunsForTask(c context.Context, task string) ([]domain.AgentRun, error) {
 	r, e := s.DB.Query(c, "SELECT id,task_id,agent_id,COALESCE(rule_id::text,''),COALESCE(batch_id::text,''),status,prompt_snapshot,workspace_snapshot,COALESCE(target_project_id::text,''),summary,error_message,started_at,finished_at,created_at FROM agent_runs WHERE task_id=$1 ORDER BY created_at DESC", task)
 	if e != nil {
