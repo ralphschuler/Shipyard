@@ -60,7 +60,10 @@ run_govulncheck_json() {
   local output="$1"
   shift
   set +e
-  if "$govulncheck_bin" -h 2>&1 | grep -q -- '-format'; then
+  # Do not use `cmd | grep -q` under pipefail: grep -q closes early, the writer
+  # gets SIGPIPE, and the pipeline status becomes 141 (false) even on a match.
+  govulncheck_help="$("$govulncheck_bin" -h 2>&1 || true)"
+  if [[ "$govulncheck_help" == *'-format'* ]]; then
     timeout "${TASKBOARD_GOVULNCHECK_TIMEOUT:-180}s" "$govulncheck_bin" -format=json "$@" >"$output"
   else
     timeout "${TASKBOARD_GOVULNCHECK_TIMEOUT:-180}s" "$govulncheck_bin" -json "$@" >"$output"
