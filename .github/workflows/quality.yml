@@ -44,6 +44,16 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Build embedded frontend for Go tests
         run: timeout 120s npm ci --prefix frontend && timeout 120s npm run build --prefix frontend
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          # Ubuntu 24.04 restricts unprivileged user namespaces. Bubblewrap needs
+          # them to create the isolated loopback used by NetworkMode=none.
+          if [ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns >/dev/null
+          fi
+          ./deploy/bubblewrap-healthcheck.sh || printf 'Bubblewrap preflight failed; live isolation tests will skip.\n'
       - name: Vet
         run: timeout 120s go vet ./...
       - name: Unit and integration tests (shuffled)
