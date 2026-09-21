@@ -93,7 +93,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           TASKBOARD_VERSION: ${{ env.RELEASE_VERSION }}
-          TASKBOARD_COMMIT_SHA: ${{ github.sha }}
+          TASKBOARD_COMMIT_SHA: ${{ env.RELEASE_COMMIT }}
           TASKBOARD_LDFLAGS_EXTRA: "-s -w"
         run: |
           set -euo pipefail
