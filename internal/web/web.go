@@ -2422,8 +2422,8 @@ func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
 	if a.update.AfterSuccess != nil {
 		handoff := a.update.AfterSuccess
 		// The supervisor monitor waits for this process to exit. It must not
-		// run inside this handler or the browser request deadlocks until the
-		// 30s TimeoutHandler fires.
+		// run inside this handler or the browser request deadlocks against the
+		// monitor that is waiting for healthz to go down.
 		go handoff()
 	}
 }
