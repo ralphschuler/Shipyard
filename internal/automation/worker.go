@@ -432,9 +432,10 @@ func measuredUsagePointer(value int, known bool) *int64 {
 	return &v
 }
 
-// projectSyncLocks serializes a managed source checkout. Individual agent runs
-// never share a worktree, but they intentionally share this clean, read-only
-// source checkout from which their worktrees are created.
+// projectSyncLocks serializes a managed source checkout. Delivery runs never
+// share a worktree with each other. Review is the exception: it attaches
+// read-only to the Delivery worktree instead of creating a second checkout.
+// Every run still shares the clean source checkout those worktrees come from.
 var projectSyncLocks sync.Map
 
 type interactionOption struct {
@@ -3406,14 +3407,23 @@ func (w *Worker) recordIntegrationConflictByIDs(ctx context.Context, runID, task
 
 // Diff returns the reviewable patch from the isolated worktree. It never reads
 // the source workspace and does not execute shell input supplied by a user.
+// A Review run has no private worktree; its patch is the Delivery worktree
+// it was attached to.
 func (w *Worker) Diff(ctx context.Context, runID string) (string, error) {
 	worktree, err := w.Store.RunWorktree(ctx, runID)
-	if err != nil || worktree == "" {
-		return "", errors.New("Worktree für diesen Run nicht verfügbar")
+	if err != nil {
+		return "", err
 	}
 	startSHA, startErr := w.Store.RunStartSHA(ctx, runID)
 	if startErr != nil {
 		return "", startErr
+	}
+	if strings.TrimSpace(worktree) == "" {
+		fallback, fallbackStart, ok := w.reviewDiffWorkspace(ctx, runID, startSHA)
+		if !ok {
+			return "", errors.New("Worktree für diesen Run nicht verfügbar")
+		}
+		worktree, startSHA = fallback, fallbackStart
 	}
 	out, err := runDiffAgainstStart(ctx, worktree, startSHA)
 	if err != nil {
@@ -3660,72 +3670,6 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		_ = w.finish(ctx, run, "failed")
 		return
 	}
-	worktree := filepath.Join(workspace.RunsRoot(), run.ID)
-	if err := os.MkdirAll(filepath.Dir(worktree), 0700); err != nil {
-		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", err.Error())
-		_ = w.finish(ctx, run, "failed")
-		return
-	}
-	// Keep a durable branch per task while retaining a disposable branch and
-	// worktree per run attempt. Branch creation is protected by the same
-	// repository lock used by delivery so concurrent tasks cannot race Git's
-	// refs, but the expensive agent execution remains fully parallel.
-	branchLock, branchLockErr := lockRepository(ctx, run.WorkspaceSnapshot)
-	if branchLockErr != nil {
-		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", branchLockErr.Error())
-		_ = w.finish(ctx, run, "failed")
-		return
-	}
-	defaultBranch := repositoryBranch(ctx, run.WorkspaceSnapshot)
-	if run.TargetProject != "" {
-		if project, projectErr := w.Store.Project(ctx, run.TargetProject); projectErr == nil {
-			defaultBranch = integrationDefaultBranch(project, defaultBranch)
-		}
-	}
-	reworkDelivery := false
-	if taskForBranch, taskForBranchErr := w.Store.GetTask(ctx, run.TaskID); taskForBranchErr == nil && taskForBranch.ReworkCount > 0 {
-		reworkDelivery = true
-	}
-	taskBranch, taskBranchErr := prepareDeliveryTaskBranch(ctx, run.WorkspaceSnapshot, run.TaskID, run.ID, defaultBranch, reworkDelivery)
-	if taskBranchErr != nil {
-		branchLock()
-		_ = w.Store.AddRunLog(ctx, run.ID, "error", taskBranchErr.Error())
-		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", taskBranchErr.Error())
-		_ = w.finish(ctx, run, "failed")
-		return
-	}
-	branch := "agent/run-" + run.ID
-	if out, err := exec.Command("git", "-C", run.WorkspaceSnapshot, "worktree", "add", "-b", branch, worktree, taskBranch).CombinedOutput(); err != nil {
-		branchLock()
-		_ = w.Store.AddRunLog(ctx, run.ID, "error", string(out))
-		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", err.Error())
-		_ = w.finish(ctx, run, "failed")
-		return
-	}
-	runStartSHA, startErr := gitOutput(ctx, worktree, "rev-parse", "HEAD")
-	if startErr != nil {
-		branchLock()
-		_ = w.Store.AddRunLog(ctx, run.ID, "error", "Run-Start-Commit konnte nicht bestimmt werden: "+startErr.Error())
-		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Run-Start-Commit konnte nicht bestimmt werden", startErr.Error())
-		_ = w.finish(ctx, run, "failed")
-		return
-	}
-	if err := w.Store.SetRunStartSHA(ctx, run.ID, runStartSHA); err != nil {
-		branchLock()
-		_ = w.Store.AddRunLog(ctx, run.ID, "error", "Run-Start-Commit konnte nicht persistiert werden: "+err.Error())
-		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Run-Start-Commit konnte nicht persistiert werden", err.Error())
-		_ = w.finish(ctx, run, "failed")
-		return
-	}
-	branchLock()
-	_ = w.Store.SetRunWorktree(ctx, run.ID, worktree)
-	if reworkDelivery {
-		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Task-Branch für Rework beibehalten: "+taskBranch)
-	} else {
-		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Task-Branch vor Delivery auf origin/"+defaultBranch+" aktualisiert: "+taskBranch)
-	}
-	_ = w.Store.AddRunLog(ctx, run.ID, "info", "Isolierter Git-Worktree: "+worktree)
-	run.WorkspaceSnapshot = worktree
 	agent, agentErr := w.Store.GetAgent(ctx, run.AgentID)
 	if agentErr != nil {
 		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", agentErr.Error())
@@ -3737,6 +3681,98 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 			agent = normalized
 		}
 	}
+	worktree := filepath.Join(workspace.RunsRoot(), run.ID)
+	var runStartSHA string
+	reviewAttached := false
+	if isReviewAgent(agent.Name) {
+		// Review reads the Delivery worktree in place. A fresh task-branch
+		// checkout would be master whenever Delivery has not been applied yet.
+		attached, attachErr := w.prepareReviewWorkspace(ctx, run)
+		if attachErr != nil {
+			_ = w.Store.AddRunLog(ctx, run.ID, "error", attachErr.Error())
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", attachErr.Error())
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		worktree = attached.Path
+		runStartSHA = attached.DiffBase
+		reviewAttached = true
+		if err := w.Store.SetRunStartSHA(ctx, run.ID, runStartSHA); err != nil {
+			_ = w.Store.AddRunLog(ctx, run.ID, "error", "Run-Start-Commit konnte nicht persistiert werden: "+err.Error())
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Run-Start-Commit konnte nicht persistiert werden", err.Error())
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Review verwendet den Delivery-Worktree von Run "+attached.DeliveryRunID+" schreibgeschützt: "+worktree)
+		run.WorkspaceSnapshot = worktree
+	} else {
+		if err := os.MkdirAll(filepath.Dir(worktree), 0700); err != nil {
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", err.Error())
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		// Keep a durable branch per task while retaining a disposable branch and
+		// worktree per run attempt. Branch creation is protected by the same
+		// repository lock used by delivery so concurrent tasks cannot race Git's
+		// refs, but the expensive agent execution remains fully parallel.
+		branchLock, branchLockErr := lockRepository(ctx, run.WorkspaceSnapshot)
+		if branchLockErr != nil {
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", branchLockErr.Error())
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		defaultBranch := repositoryBranch(ctx, run.WorkspaceSnapshot)
+		if run.TargetProject != "" {
+			if project, projectErr := w.Store.Project(ctx, run.TargetProject); projectErr == nil {
+				defaultBranch = integrationDefaultBranch(project, defaultBranch)
+			}
+		}
+		reworkDelivery := false
+		if taskForBranch, taskForBranchErr := w.Store.GetTask(ctx, run.TaskID); taskForBranchErr == nil && taskForBranch.ReworkCount > 0 {
+			reworkDelivery = true
+		}
+		taskBranch, taskBranchErr := prepareDeliveryTaskBranch(ctx, run.WorkspaceSnapshot, run.TaskID, run.ID, defaultBranch, reworkDelivery)
+		if taskBranchErr != nil {
+			branchLock()
+			_ = w.Store.AddRunLog(ctx, run.ID, "error", taskBranchErr.Error())
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", taskBranchErr.Error())
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		branch := "agent/run-" + run.ID
+		if out, err := exec.Command("git", "-C", run.WorkspaceSnapshot, "worktree", "add", "-b", branch, worktree, taskBranch).CombinedOutput(); err != nil {
+			branchLock()
+			_ = w.Store.AddRunLog(ctx, run.ID, "error", string(out))
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", err.Error())
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		var startErr error
+		runStartSHA, startErr = gitOutput(ctx, worktree, "rev-parse", "HEAD")
+		if startErr != nil {
+			branchLock()
+			_ = w.Store.AddRunLog(ctx, run.ID, "error", "Run-Start-Commit konnte nicht bestimmt werden: "+startErr.Error())
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Run-Start-Commit konnte nicht bestimmt werden", startErr.Error())
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		if err := w.Store.SetRunStartSHA(ctx, run.ID, runStartSHA); err != nil {
+			branchLock()
+			_ = w.Store.AddRunLog(ctx, run.ID, "error", "Run-Start-Commit konnte nicht persistiert werden: "+err.Error())
+			_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Run-Start-Commit konnte nicht persistiert werden", err.Error())
+			_ = w.finish(ctx, run, "failed")
+			return
+		}
+		branchLock()
+		_ = w.Store.SetRunWorktree(ctx, run.ID, worktree)
+		if reworkDelivery {
+			_ = w.Store.AddRunLog(ctx, run.ID, "info", "Task-Branch für Rework beibehalten: "+taskBranch)
+		} else {
+			_ = w.Store.AddRunLog(ctx, run.ID, "info", "Task-Branch vor Delivery auf origin/"+defaultBranch+" aktualisiert: "+taskBranch)
+		}
+		_ = w.Store.AddRunLog(ctx, run.ID, "info", "Isolierter Git-Worktree: "+worktree)
+		run.WorkspaceSnapshot = worktree
+	}
 	runSandbox, sandboxErr := w.Store.RunSandboxPolicy(ctx, run.ID)
 	if sandboxErr != nil {
 		reason := "Sandbox-Profil des Runs ist ungültig oder nicht verfügbar"
@@ -3745,6 +3781,9 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
 		_ = w.finish(ctx, run, "failed")
 		return
+	}
+	if reviewAttached {
+		runSandbox = reviewAttachmentSandbox(runSandbox)
 	}
 	_ = w.Store.AddRunLog(ctx, run.ID, "info", fmt.Sprintf("Sandbox-Profil: %s · Netzwerk=%s · Schreiben=%s", runSandbox.Name, runSandbox.NetworkMode, runSandbox.WriteMode))
 	devDefinition, hasDevContainer, devErr := discoverDevContainer(worktree)
@@ -4300,13 +4339,23 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		}
 		_ = w.Store.AddComment(ctx, run.TaskID, "Taskboard", state)
 	}
-	// Include newly created files in the review diff without staging a commit.
-	_ = exec.Command("git", "-C", run.WorkspaceSnapshot, "add", "-N", ".").Run()
+	// Include newly created files in the delivery diff without staging a commit.
+	// Review shares the Delivery worktree and must not touch its index.
+	if !reviewAttached {
+		_ = exec.Command("git", "-C", run.WorkspaceSnapshot, "add", "-N", ".").Run()
+	}
 	diffBase := strings.TrimSpace(runStartSHA)
 	if diffBase == "" {
 		diffBase = "HEAD"
 	}
-	diffOut, _ := exec.Command("git", "-C", run.WorkspaceSnapshot, "diff", diffBase, "--stat").Output()
+	var diffOut []byte
+	if reviewAttached {
+		if summary, summaryErr := deliveryChangeSummary(ctx, run.WorkspaceSnapshot, diffBase); summaryErr == nil {
+			diffOut = []byte(summary)
+		}
+	} else {
+		diffOut, _ = exec.Command("git", "-C", run.WorkspaceSnapshot, "diff", diffBase, "--stat").Output()
+	}
 	// Tests are deliberately agent-controlled: a task/agent prompt decides whether and how to run them.
 	// The delivery gate only verifies that the generated patch is syntactically applicable.
 	gateOut, gateErr := exec.Command("git", "-C", run.WorkspaceSnapshot, "diff", diffBase, "--check").CombinedOutput()

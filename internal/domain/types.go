@@ -224,6 +224,13 @@ type RunQueueStatus struct {
 type WorktreeCleanupCandidate struct {
 	RunID, SourceWorkspace, WorktreePath string
 }
+
+// DeliveryWorktree is the checkout a succeeded Delivery run left behind.
+// Review reads it before any human apply, so accepted commit and applied_at
+// are intentionally not part of this identity.
+type DeliveryWorktree struct {
+	RunID, WorktreePath, SourceWorkspace, StartSHA, TargetProject string
+}
 type RunOverview struct {
 	ID, TaskID, TaskTitle, AgentID, AgentName, Status, Summary, ErrorMessage string
 	QueuePosition                                                            int

@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1310,6 +1311,206 @@ func waitForWorkerCondition(t *testing.T, worker *Worker, condition func() bool)
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("worker condition was not reached within 10 seconds")
+}
+
+func TestReviewAttachesToUnappliedDeliveryWorktreeAndApplyStillRecordsCommit(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	source, origin := integrationDeliveryRepository(t)
+	start := integrationGitOutput(t, source, "rev-parse", "HEAD")
+	latestTree := filepath.Join(t.TempDir(), "latest-delivery")
+	olderTree := filepath.Join(t.TempDir(), "older-delivery")
+	decoyTree := filepath.Join(t.TempDir(), "review-decoy")
+	runGit(t, source, "worktree", "add", "-b", "agent/run-latest", latestTree, "HEAD")
+	runGit(t, source, "worktree", "add", "-b", "agent/run-older", olderTree, "HEAD")
+	runGit(t, source, "worktree", "add", "-b", "agent/run-decoy", decoyTree, "HEAD")
+	if err := os.WriteFile(filepath.Join(latestTree, "feature.txt"), []byte("uncommitted delivery\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, latestTree, "add", "-N", "feature.txt")
+	if err := os.WriteFile(filepath.Join(olderTree, "old.txt"), []byte("older\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(decoyTree, "decoy.txt"), []byte("decoy\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	board, err := s.CreateBoardWithTemplate(ctx, "Review attachment "+time.Now().Format("150405.000000000"), "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	project, err := s.CreateProject(ctx, "Review attachment project "+time.Now().Format("150405.000000000"), origin, "master", source, []string{board.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask(ctx, board.ID, "Review the uncommitted delivery", "see the worktree", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlog := integrationColumnByName(t, columns, "Backlog")
+	development := integrationColumnByName(t, columns, "Entwicklung")
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, backlog.ID, "mcp"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.MoveTaskToColumnID(ctx, task.ID, development.ID, "mcp"); err != nil {
+		t.Fatal(err)
+	}
+	suffix := time.Now().Format("20060102150405.000000000")
+	deliveryAgent, err := s.CreateAgent(ctx, "Delivery Agent "+suffix, "integration", "", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewAgent, err := s.CreateAgent(ctx, "Review Agent "+suffix, "integration", "", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	olderID := insertDeliveryRun(t, s, task.ID, deliveryAgent.ID, project.ID, source, olderTree, start, time.Now().Add(-2*time.Minute))
+	latestID := insertDeliveryRun(t, s, task.ID, deliveryAgent.ID, project.ID, source, latestTree, start, time.Now().Add(-time.Minute))
+	if _, err = s.DB.Exec(ctx, `INSERT INTO agent_runs(task_id,agent_id,status,prompt_snapshot,workspace_snapshot,target_project_id,source_workspace,worktree_path,run_start_sha,gate_status,finished_at)
+		VALUES($1,$2,'succeeded','review decoy',$3,$4,$3,$5,$6,'passed',now())`, task.ID, reviewAgent.ID, source, project.ID, decoyTree, start); err != nil {
+		t.Fatal(err)
+	}
+	var reviewID string
+	if err = s.DB.QueryRow(ctx, `INSERT INTO agent_runs(task_id,agent_id,status,prompt_snapshot,workspace_snapshot,target_project_id,source_workspace,gate_status)
+		VALUES($1,$2,'queued','review',$3,$4,$3,'pending') RETURNING id::text`, task.ID, reviewAgent.ID, source, project.ID).Scan(&reviewID); err != nil {
+		t.Fatal(err)
+	}
+	reviewRun, err := s.Run(ctx, reviewID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	attached, err := (&Worker{Store: s}).prepareReviewWorkspace(ctx, reviewRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attached.Path != latestTree || attached.DeliveryRunID != latestID || attached.DeliveryRunID == olderID {
+		t.Fatalf("attached to %+v, want latest delivery %s at %s", attached, latestID, latestTree)
+	}
+	body, err := os.ReadFile(filepath.Join(attached.Path, "feature.txt"))
+	if err != nil || string(body) != "uncommitted delivery\n" {
+		t.Fatalf("review workspace missing uncommitted delivery file: %q %v", body, err)
+	}
+	var accepted string
+	var unapplied bool
+	if err = s.DB.QueryRow(ctx, `SELECT COALESCE(accepted_commit_sha,''), applied_at IS NULL FROM agent_runs WHERE id=$1`, latestID).Scan(&accepted, &unapplied); err != nil {
+		t.Fatal(err)
+	}
+	if accepted != "" || !unapplied {
+		t.Fatalf("review attachment recorded an apply: sha=%q unapplied=%t", accepted, unapplied)
+	}
+	var reviewWorktree string
+	if err = s.DB.QueryRow(ctx, `SELECT worktree_path FROM agent_runs WHERE id=$1`, reviewID).Scan(&reviewWorktree); err != nil {
+		t.Fatal(err)
+	}
+	if reviewWorktree != "" {
+		t.Fatalf("review run stored the shared worktree and could delete it: %s", reviewWorktree)
+	}
+
+	if err = (&Worker{Store: s}).Apply(ctx, latestID); err != nil {
+		t.Fatal(err)
+	}
+	var applied bool
+	if err = s.DB.QueryRow(ctx, `SELECT COALESCE(accepted_commit_sha,''), applied_at IS NOT NULL FROM agent_runs WHERE id=$1`, latestID).Scan(&accepted, &applied); err != nil {
+		t.Fatal(err)
+	}
+	if accepted == "" || !applied {
+		t.Fatalf("human apply did not record the delivery commit: sha=%q applied=%t", accepted, applied)
+	}
+	current, err := s.GetTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.ColumnName != "Review" {
+		t.Fatalf("apply moved the task to %q, want Review", current.ColumnName)
+	}
+}
+
+func TestReviewDoesNotFallBackWhenLatestDeliveryWorktreeIsGone(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	source, origin := integrationDeliveryRepository(t)
+	start := integrationGitOutput(t, source, "rev-parse", "HEAD")
+	olderTree := filepath.Join(t.TempDir(), "older-delivery")
+	runGit(t, source, "worktree", "add", "-b", "agent/run-older", olderTree, "HEAD")
+	if err := os.WriteFile(filepath.Join(olderTree, "old.txt"), []byte("older\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	board, err := s.CreateBoardWithTemplate(ctx, "Review missing worktree "+time.Now().Format("150405.000000000"), "software")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	project, err := s.CreateProject(ctx, "Review missing project "+time.Now().Format("150405.000000000"), origin, "master", source, []string{board.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask(ctx, board.ID, "Missing delivery worktree", "re-run delivery", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	suffix := time.Now().Format("20060102150405.000000000")
+	deliveryAgent, err := s.CreateAgent(ctx, "Delivery Agent "+suffix, "integration", "", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewAgent, err := s.CreateAgent(ctx, "Review Agent "+suffix, "integration", "", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertDeliveryRun(t, s, task.ID, deliveryAgent.ID, project.ID, source, olderTree, start, time.Now().Add(-time.Minute))
+	if _, err = s.DB.Exec(ctx, `INSERT INTO agent_runs(task_id,agent_id,status,prompt_snapshot,workspace_snapshot,target_project_id,source_workspace,worktree_path,gate_status,finished_at)
+		VALUES($1,$2,'succeeded','cleaned',$3,$4,$3,'','passed',now())`, task.ID, deliveryAgent.ID, source, project.ID); err != nil {
+		t.Fatal(err)
+	}
+	var reviewID string
+	if err = s.DB.QueryRow(ctx, `INSERT INTO agent_runs(task_id,agent_id,status,prompt_snapshot,workspace_snapshot,target_project_id,source_workspace)
+		VALUES($1,$2,'queued','review',$3,$4,$3) RETURNING id::text`, task.ID, reviewAgent.ID, source, project.ID).Scan(&reviewID); err != nil {
+		t.Fatal(err)
+	}
+	reviewRun, err := s.Run(ctx, reviewID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = (&Worker{Store: s}).prepareReviewWorkspace(ctx, reviewRun)
+	if !errors.Is(err, errReviewWorktreeMissing) || !strings.Contains(err.Error(), "erneut ausführen") {
+		t.Fatalf("cleaned delivery worktree error = %v", err)
+	}
+}
+
+func integrationDeliveryRepository(t *testing.T) (source, origin string) {
+	t.Helper()
+	source = t.TempDir()
+	origin = filepath.Join(t.TempDir(), "origin.git")
+	runGit(t, origin, "init", "--bare")
+	runGit(t, source, "init", "-b", "master")
+	runGit(t, source, "config", "user.name", "Integration Test")
+	runGit(t, source, "config", "user.email", "integration@example.invalid")
+	if err := os.WriteFile(filepath.Join(source, "base.txt"), []byte("base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, source, "add", "base.txt")
+	runGit(t, source, "commit", "-m", "base")
+	runGit(t, source, "remote", "add", "origin", origin)
+	runGit(t, source, "push", "-u", "origin", "HEAD:master")
+	return source, origin
+}
+
+func insertDeliveryRun(t *testing.T, s *store.Store, taskID, agentID, projectID, source, worktree, start string, finished time.Time) string {
+	t.Helper()
+	var id string
+	err := s.DB.QueryRow(context.Background(), `INSERT INTO agent_runs(task_id,agent_id,status,prompt_snapshot,workspace_snapshot,target_project_id,source_workspace,worktree_path,run_start_sha,gate_status,finished_at)
+		VALUES($1,$2,'succeeded','delivery',$3,$4,$3,$5,$6,'passed',$7) RETURNING id::text`, taskID, agentID, source, projectID, worktree, start, finished).Scan(&id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 func integrationColumnByName(t *testing.T, columns []domain.Column, name string) domain.Column {
