@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"taskboard/internal/automation"
+	"taskboard/internal/buildmeta"
 	"taskboard/internal/domain"
 	"taskboard/internal/memory"
 	"taskboard/internal/sandbox"
@@ -68,8 +69,7 @@ func EmbeddedAppHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("GET /app/", embeddedAppHandler())
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok","database":"embedded-test"}`))
+		writeHealth(w, "embedded-test")
 	})
 	return mux
 }
@@ -782,8 +782,21 @@ func (a *App) health(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "database unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	writeHealth(w, "ok")
+}
+
+func writeHealth(w http.ResponseWriter, database string) {
+	payload, err := json.Marshal(map[string]string{
+		"status":    "ok",
+		"database":  database,
+		"goVersion": buildmeta.GoVersion(),
+	})
+	if err != nil {
+		http.Error(w, "health payload unavailable", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(`{"status":"ok","database":"ok"}`))
+	_, _ = w.Write(payload)
 }
 func (a *App) events(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -2248,7 +2261,7 @@ func (a *App) updatesAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) resolveUpdates(r *http.Request) updates.Snapshot {
-	current := updates.Current{Version: os.Getenv("TASKBOARD_VERSION"), Commit: os.Getenv("TASKBOARD_COMMIT_SHA"), BuiltAt: os.Getenv("TASKBOARD_BUILD_TIME")}
+	current := updates.Current{Version: os.Getenv("TASKBOARD_VERSION"), Commit: os.Getenv("TASKBOARD_COMMIT_SHA"), BuiltAt: os.Getenv("TASKBOARD_BUILD_TIME"), GoVersion: buildmeta.GoVersion()}
 	if current.Version == "" {
 		current.Version = "development"
 	}

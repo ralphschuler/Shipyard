@@ -60,3 +60,22 @@ func TestAppAssetsAreServedFromEmbeddedFilesystem(t *testing.T) {
 		t.Fatalf("stale external asset response status = %d, want %d", staleResponse.Code, http.StatusNotFound)
 	}
 }
+
+func TestEmbeddedHealthReportsTheCompiledGoToolchain(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	response := httptest.NewRecorder()
+	EmbeddedAppHandler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["status"] != "ok" || payload["database"] != "embedded-test" {
+		t.Fatalf("payload = %#v", payload)
+	}
+	if !strings.HasPrefix(payload["goVersion"], "go1.") {
+		t.Fatalf("goVersion = %q, want a compiled go1.x toolchain", payload["goVersion"])
+	}
+}

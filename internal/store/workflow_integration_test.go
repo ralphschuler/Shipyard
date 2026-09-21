@@ -709,6 +709,176 @@ func TestWorkflowIntegrationQAReworkSupersedesPreviousReleaseDecision(t *testing
 	}
 }
 
+func TestWorkflowIntegrationForwardQualityMovesAreNotReturns(t *testing.T) {
+	s := integrationStore(t)
+	ctx := context.Background()
+	board, err := s.CreateBoardWithTemplate(ctx, "Forward quality moves", "personal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlog := columnByName(t, columns, "Backlog")
+	development := columnByName(t, columns, "In Progress")
+	review := columnByName(t, columns, "Review")
+	qa := columnByName(t, columns, "QA")
+	done := columnByName(t, columns, "Done")
+	task, err := s.CreateTask(ctx, board.ID, "Accepted quality chain", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "Forward quality agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.DB.Exec(ctx, `INSERT INTO agent_runs(task_id,agent_id,status,prompt_snapshot,workspace_snapshot,accepted_commit_sha,applied_at,gate_status)
+		VALUES($1,$2,'succeeded','accepted delivery','managed checkout','0123456789abcdef0123456789abcdef01234567',now(),'passed')`, task.ID, agent.ID); err != nil {
+		t.Fatal(err)
+	}
+	moveAlong(t, s, ctx, task.ID, backlog, development, review, qa)
+	eventType, payload := latestTaskEvent(t, s, ctx, task.ID)
+	if eventType != "task.entered_column" {
+		t.Fatalf("Review→QA event type = %q, want task.entered_column", eventType)
+	}
+	assertQualityPayload(t, payload, false, false)
+	current, err := s.GetTask(ctx, task.ID)
+	if err != nil || current.ReworkCount != 0 {
+		t.Fatalf("accepted Review→QA rework_count = %d err=%v, want 0", current.ReworkCount, err)
+	}
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, done.ID, "mcp"); err != nil || !moved {
+		t.Fatalf("QA→Done: moved=%t err=%v", moved, err)
+	}
+	eventType, payload = latestTaskEvent(t, s, ctx, task.ID)
+	if eventType != "task.completed" {
+		t.Fatalf("QA→Done event type = %q, want task.completed", eventType)
+	}
+	assertQualityPayload(t, payload, false, false)
+	current, err = s.GetTask(ctx, task.ID)
+	if err != nil || current.ReworkCount != 0 {
+		t.Fatalf("QA→Done rework_count = %d err=%v, want 0", current.ReworkCount, err)
+	}
+}
+
+func TestWorkflowIntegrationExplicitRejectionIncrementsReworkOnce(t *testing.T) {
+	s := integrationStore(t)
+	ctx := context.Background()
+	prepareTestWorkspace(t)
+	board, err := s.CreateBoardWithTemplate(ctx, "Explicit rejection once", "personal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlog := columnByName(t, columns, "Backlog")
+	development := columnByName(t, columns, "In Progress")
+	review := columnByName(t, columns, "Review")
+	qa := columnByName(t, columns, "QA")
+	first, err := s.CreateProject(ctx, "Rejection repo A "+time.Now().Format("20060102150405.000000000"), "https://example.invalid/a.git", "master", t.TempDir(), []string{board.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.CreateProject(ctx, "Rejection repo B "+time.Now().Format("20060102150405.000000000"), "https://example.invalid/b.git", "master", t.TempDir(), []string{board.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask(ctx, board.ID, "Explicit rejection once", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetTaskTargets(ctx, task.ID, []string{first.ID, second.ID}, nil); err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "Rejection agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ruleOne, err := s.CreateRuleWithActions(ctx, "Rejection rule one", board.ID, "task.entered_column", development.ID, agent.ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ruleTwo, err := s.CreateRuleWithActions(ctx, "Rejection rule two", board.ID, "task.entered_column", development.ID, agent.ID, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runID string
+	if err = s.DB.QueryRow(ctx, `INSERT INTO agent_runs(task_id,agent_id,status,prompt_snapshot,workspace_snapshot,accepted_commit_sha,applied_at,gate_status)
+		VALUES($1,$2,'succeeded','accepted delivery','managed checkout','0123456789abcdef0123456789abcdef01234567',now(),'passed') RETURNING id`, task.ID, agent.ID).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	moveAlong(t, s, ctx, task.ID, backlog, development, review, qa)
+	current, err := s.GetTask(ctx, task.ID)
+	if err != nil || current.ReworkCount != 0 {
+		t.Fatalf("pre-rejection rework_count = %d err=%v, want 0", current.ReworkCount, err)
+	}
+	interaction, err := s.CreateInteraction(ctx, task.ID, agent.ID, runID, "qa_release", "qa-rework-once", "Freigabe für QA", "QA entscheidet", []byte(`{"fields":[{"id":"release_decision","type":"buttons"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.ResolveInteractionAndMove(ctx, interaction.ID, "qa-test", "Ablehnungsgrund", []byte(`{"release_decision":["rework"]}`), ""); err != nil {
+		t.Fatal(err)
+	}
+	current, err = s.GetTask(ctx, task.ID)
+	if err != nil || current.ReworkCount != 1 {
+		t.Fatalf("explicit rejection rework_count = %d err=%v, want 1", current.ReworkCount, err)
+	}
+	eventType, payload := latestTaskEvent(t, s, ctx, task.ID)
+	if eventType != "task.entered_column" {
+		t.Fatalf("rejection event type = %q, want task.entered_column", eventType)
+	}
+	assertQualityPayload(t, payload, true, true)
+	var reworkEvent struct {
+		ReworkRequested bool `json:"rework_requested"`
+	}
+	if err = json.Unmarshal(payload, &reworkEvent); err != nil || !reworkEvent.ReworkRequested {
+		t.Fatalf("rejection payload = %s, want rework_requested", payload)
+	}
+	events, err := s.PendingEvents(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event domain.AutomationEvent
+	for _, candidate := range events {
+		if candidate.TaskID == task.ID && candidate.Type == "task.entered_column" {
+			var value struct {
+				QAReturn bool `json:"qa_return"`
+			}
+			if json.Unmarshal(candidate.Payload, &value) == nil && value.QAReturn {
+				event = candidate
+			}
+		}
+	}
+	if event.ID == "" {
+		t.Fatal("rejection automation event not found")
+	}
+	var wg sync.WaitGroup
+	results := make(chan error, 2)
+	for _, rule := range []domain.AutomationRule{ruleOne, ruleTwo} {
+		wg.Add(1)
+		go func(rule domain.AutomationRule) {
+			defer wg.Done()
+			_, callErr := s.CreateRunsForEvent(ctx, event, rule)
+			results <- callErr
+		}(rule)
+	}
+	wg.Wait()
+	close(results)
+	for callErr := range results {
+		if callErr != nil && !errors.Is(callErr, ErrNoRunCreated) && !errors.Is(callErr, ErrAutomationActive) {
+			t.Fatalf("rule claim after rejection: %v", callErr)
+		}
+	}
+	current, err = s.GetTask(ctx, task.ID)
+	if err != nil || current.ReworkCount != 1 {
+		t.Fatalf("rework_count after parallel rule claims = %d err=%v, want 1", current.ReworkCount, err)
+	}
+}
+
 func deliverySource(t *testing.T, s *Store, ctx context.Context, runID string) string {
 	t.Helper()
 	source, err := s.RunSource(ctx, runID)
@@ -733,5 +903,48 @@ func assertLatestReturnPayload(t *testing.T, s *Store, ctx context.Context, task
 	}
 	if value.ChangeAvailable != wantChange || value.ReturnGeneration == "" {
 		t.Fatalf("return payload = %#v, want change_available=%t and a generation", value, wantChange)
+	}
+}
+
+func prepareTestWorkspace(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("TASKBOARD_WORKSPACE_ROOT", root)
+	if err := os.WriteFile(root+"/.shipyard-workspace", []byte("shipyard workspace\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func moveAlong(t *testing.T, s *Store, ctx context.Context, taskID string, columns ...domain.Column) {
+	t.Helper()
+	for _, column := range columns {
+		if moved, err := s.MoveTaskToColumnID(ctx, taskID, column.ID, "mcp"); err != nil || !moved {
+			t.Fatalf("move to %s: moved=%t err=%v", column.Name, moved, err)
+		}
+	}
+}
+
+func latestTaskEvent(t *testing.T, s *Store, ctx context.Context, taskID string) (string, []byte) {
+	t.Helper()
+	var eventType string
+	var payload []byte
+	if err := s.DB.QueryRow(ctx, `SELECT type,payload FROM automation_events WHERE task_id=$1 ORDER BY occurred_at DESC,id DESC LIMIT 1`, taskID).Scan(&eventType, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return eventType, payload
+}
+
+func assertQualityPayload(t *testing.T, payload []byte, wantReturn, wantChange bool) {
+	t.Helper()
+	var value struct {
+		QAReturn         bool   `json:"qa_return"`
+		ChangeAvailable  bool   `json:"change_available"`
+		ReturnGeneration string `json:"return_generation"`
+	}
+	if err := json.Unmarshal(payload, &value); err != nil {
+		t.Fatal(err)
+	}
+	if value.QAReturn != wantReturn || value.ChangeAvailable != wantChange || value.ReturnGeneration == "" {
+		t.Fatalf("quality payload = %#v, want qa_return=%t change_available=%t and a generation", value, wantReturn, wantChange)
 	}
 }

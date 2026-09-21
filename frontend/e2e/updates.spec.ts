@@ -50,7 +50,7 @@ test("shows raw changelog text when Markdown cannot be rendered", async ({ page 
 });
 
 const updateFixture = {
-  current: { version: "1.0.0", commit: "current-sha", builtAt: "2026-09-17T12:00:00Z" },
+  current: { version: "1.0.0", commit: "current-sha", builtAt: "2026-09-17T12:00:00Z", goVersion: "go1.26.8" },
   source: { provider: "GitHub", repository: "example/shipyard", branch: "master" },
   status: "up_to_date",
   release: {},
@@ -133,6 +133,8 @@ test("manual update check reports an available release", async ({ page }) => {
   await expect(page.getByRole("status")).toContainText("Update available");
   await expect(page.getByText("1.1.0")).toBeVisible();
   await expect(page.getByLabel("Last checked")).toBeVisible();
+  await expect(page.getByText("Go toolchain")).toBeVisible();
+  await expect(page.getByText("go1.26.8")).toBeVisible();
 });
 
 test("manual update check treats malformed responses as a readable failure", async ({ page }) => {

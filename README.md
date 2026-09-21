@@ -31,7 +31,7 @@ It is intended for developers, maintainers, and small teams running their own wo
 
 ## Requirements
 
-- Go 1.26 or newer.
+- Go 1.26.8 or a later patched Go release. Local and CI builds pin the `toolchain` line in `go.mod`; unpatched 1.26.0 builds are rejected.
 - PostgreSQL 16 or a compatible PostgreSQL release supported by the project.
 - Git, for repository projects and agent worktrees.
 - Node.js and npm only when building or testing the optional frontend in `frontend/`.
@@ -110,7 +110,7 @@ MCP clients authenticate with a token and can list or create boards, tasks, proj
 
 ## Updates and releases
 
-Releases are built by the repository's GitHub Actions workflow and publish Linux artifacts for `amd64` and `arm64` with checksums. Each binary runs `npm ci`/`npm run build` first and embeds the resulting fingerprinted React app under `/app/`; no checkout `frontend/dist` is read in production. `build-info.json` records the release version and commit alongside the backend metadata. Review the workflow and the deployment examples under [`deploy/`](deploy/) before adapting them to an installation. The systemd unit supervises [`deploy/taskboard-runner.sh`](deploy/taskboard-runner.sh) as its MainPID; the runner starts the binary as a child and accepts the restart signal from the update monitor, so candidate and rollback bundles are restarted by one supervisor without a competing MainPID. After an update, run `TASKBOARD_EXPECTED_VERSION=<release> TASKBOARD_EXPECTED_COMMIT=<commit> ./deploy/verify-production.sh`; it verifies `/app/` and requires the embedded asset metadata to match the backend build exactly. For browser verification against a running production bundle, set `TASKBOARD_E2E_BASE_URL` and run `npm run test:e2e --prefix frontend`; this skips the Vite server and checks the live Go bundle, including every fingerprinted asset. `deploy/deploy-local.sh` exports these expected values from the same variables used by both builds. Update checks are optional and should be configured only with a repository and release allowlist that you control; public repositories do not require a GitHub token. Changelogs use the GitHub release body and fall back to `TASKBOARD_CHANGELOG_PATH`, `CHANGELOG.md`, or `CHANGELOG.markdown`; local files are limited to 1 MiB and are display-only.
+Releases are built by the repository's GitHub Actions workflow and publish Linux artifacts for `amd64` and `arm64` with checksums. Each binary is compiled with the patched Go toolchain from `go.mod`, scanned with `govulncheck` in both source (call-path) and binary (symbol) modes, and embeds that toolchain in `/healthz`, `/api/v1/settings/updates`, and `go version -m`. Call-path and symbol hits fail the gate; they are static advisory matches, not proven exploits. Each binary runs `npm ci`/`npm run build` first and embeds the resulting fingerprinted React app under `/app/`; no checkout `frontend/dist` is read in production. `build-info.json` records the release version and commit alongside the backend metadata. Review the workflow and the deployment examples under [`deploy/`](deploy/) before adapting them to an installation. The systemd unit supervises [`deploy/taskboard-runner.sh`](deploy/taskboard-runner.sh) as its MainPID; the runner starts the binary as a child and accepts the restart signal from the update monitor, so candidate and rollback bundles are restarted by one supervisor without a competing MainPID. After an update, run `TASKBOARD_EXPECTED_VERSION=<release> TASKBOARD_EXPECTED_COMMIT=<commit> ./deploy/verify-production.sh`; it verifies `/app/` and requires the embedded asset metadata to match the backend build exactly, and it checks that `/healthz` reports a patched Go toolchain. For browser verification against a running production bundle, set `TASKBOARD_E2E_BASE_URL` and run `npm run test:e2e --prefix frontend`; this skips the Vite server and checks the live Go bundle, including every fingerprinted asset. `deploy/deploy-local.sh` exports these expected values from the same variables used by both builds. Update checks are optional and should be configured only with a repository and release allowlist that you control; public repositories do not require a GitHub token. Changelogs use the GitHub release body and fall back to `TASKBOARD_CHANGELOG_PATH`, `CHANGELOG.md`, or `CHANGELOG.markdown`; local files are limited to 1 MiB and are display-only.
 
 This README documents the user-facing setup. Host-specific reverse-proxy, backup, restore, and service-unit procedures belong in deployment runbooks and must be adapted to the target environment.
 
@@ -120,11 +120,13 @@ The application targets platforms supported by Go and PostgreSQL. The checked-in
 
 ## Development and tests
 
-Run Go checks from the repository root:
+Run Go checks from the repository root. `go test` and `go vet` use the patched toolchain declared in `go.mod`. Production builds also scan the finished binary:
 
 ```sh
 go test ./...
 go vet ./...
+./scripts/require-go-toolchain.sh
+./scripts/build-taskboard.sh -o /tmp/shipyard --scan
 ```
 
 The opt-in integration suite starts a disposable PostgreSQL container through Podman and cleans it up when it finishes:
