@@ -68,10 +68,14 @@ func (w *statusWriter) Write(body []byte) (int, error) {
 }
 
 const loginWindow = 15 * time.Minute
+const loginMaxFailures = 6
+const loginMaxClients = 4096
 
 type loginAttempt struct {
-	failures int
-	until    time.Time
+	failures    int
+	pending     int
+	windowUntil time.Time
+	until       time.Time
 }
 
 // loginThrottle is deliberately bounded and in-memory: it protects the
@@ -98,28 +102,55 @@ func loginClient(r *http.Request) string {
 func (l *loginThrottle) blocked(client string, at time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	l.pruneExpired(at)
 	a, ok := l.attempts[client]
-	if !ok || !a.until.After(at) {
-		if ok {
-			delete(l.attempts, client)
+	if !ok {
+		if len(l.attempts) >= loginMaxClients {
+			return true
 		}
-		return false
+		a.windowUntil = at.Add(loginWindow)
 	}
-	return true
+	if a.until.After(at) {
+		return true
+	}
+	// Reserve the slot before the password comparison. Without this reservation,
+	// concurrent requests could all pass this check before failed records them.
+	if a.failures+a.pending >= loginMaxFailures {
+		return true
+	}
+	a.pending++
+	l.attempts[client] = a
+	return false
 }
 
 func (l *loginThrottle) failed(client string, at time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if len(l.attempts) >= 4096 {
-		l.attempts = map[string]loginAttempt{}
+
+	l.pruneExpired(at)
+	a, ok := l.attempts[client]
+	// A failure only belongs to a request that was admitted by blocked. In
+	// particular, do not recreate state that a concurrent successful login has
+	// just removed.
+	if !ok || a.until.After(at) || a.pending == 0 {
+		return
 	}
-	a := l.attempts[client]
+	a.pending--
 	a.failures++
-	if a.failures >= 6 {
+	if a.failures >= loginMaxFailures {
 		a.until = at.Add(loginWindow)
 	}
 	l.attempts[client] = a
+}
+
+func (l *loginThrottle) pruneExpired(at time.Time) {
+	for client, attempt := range l.attempts {
+		if (!attempt.until.IsZero() && !attempt.until.After(at)) ||
+			(attempt.until.IsZero() && !attempt.windowUntil.IsZero() && !attempt.windowUntil.After(at)) {
+			delete(l.attempts, client)
+		}
+	}
 }
 
 func (l *loginThrottle) succeeded(client string) {
@@ -401,7 +432,7 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Zu viele fehlgeschlagene Anmeldeversuche. Bitte später erneut versuchen.", http.StatusTooManyRequests)
 		return
 	}
-	u, err := a.store.UserByEmail(r.Context(), r.FormValue("email"))
+	u, err := a.lookupUser(r.Context(), r.FormValue("email"))
 	if err != nil || !passwordMatches(u.PasswordHash, r.FormValue("password")) {
 		a.logins.failed(client, now())
 		http.Error(w, "E-Mail oder Passwort ist nicht korrekt.", 401)
@@ -415,6 +446,14 @@ func (a *App) login(w http.ResponseWriter, r *http.Request) {
 	}
 	http.Redirect(w, r, "/", 303)
 }
+
+func (a *App) lookupUser(ctx context.Context, email string) (domain.User, error) {
+	if a.userLookup != nil {
+		return a.userLookup(ctx, email)
+	}
+	return a.store.UserByEmail(ctx, email)
+}
+
 func (a *App) logout(w http.ResponseWriter, r *http.Request) {
 	if c, e := r.Cookie("taskboard_session"); e == nil {
 		_ = a.store.DeleteSession(r.Context(), tokenHash(c.Value))

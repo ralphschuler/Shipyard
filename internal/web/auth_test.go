@@ -3,7 +3,9 @@ package web
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"taskboard/internal/domain"
 	"testing"
 	"time"
@@ -246,17 +248,124 @@ func TestParseRemoteDefaultBranch(t *testing.T) {
 	}
 }
 
-func TestLoginThrottle(t *testing.T) {
+func TestLoginThrottleSequentialRequests(t *testing.T) {
 	throttle := newLoginThrottle()
 	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
-	for range 6 {
-		throttle.failed("192.0.2.10", at)
+	client := "192.0.2.10"
+	for attempt := 0; attempt < loginMaxFailures; attempt++ {
+		if throttle.blocked(client, at) {
+			t.Fatalf("request %d was blocked before the limit", attempt+1)
+		}
+		throttle.failed(client, at)
 	}
-	if !throttle.blocked("192.0.2.10", at.Add(time.Minute)) {
-		t.Fatal("six failed attempts must trigger a temporary block")
+	if !throttle.blocked(client, at.Add(time.Minute)) {
+		t.Fatal("the request after six sequential failures must be blocked")
 	}
-	throttle.succeeded("192.0.2.10")
-	if throttle.blocked("192.0.2.10", at.Add(time.Minute)) {
+	throttle.succeeded(client)
+	if throttle.blocked(client, at.Add(time.Minute)) {
 		t.Fatal("successful login must clear the temporary block")
+	}
+}
+
+func TestLoginThrottleExpiredWindowResetsState(t *testing.T) {
+	throttle := newLoginThrottle()
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	client := "192.0.2.11"
+	for range loginMaxFailures {
+		if throttle.blocked(client, at) {
+			t.Fatal("request was blocked before the limit")
+		}
+		throttle.failed(client, at)
+	}
+	if throttle.blocked(client, at.Add(loginWindow)) {
+		t.Fatal("an expired block must allow a new request")
+	}
+	throttle.failed(client, at.Add(loginWindow))
+	if got := throttle.attempts[client].failures; got != 1 {
+		t.Fatalf("failures after the window expired = %d, want 1", got)
+	}
+}
+
+func TestLoginThrottleSuccessDoesNotAllowStaleFailureToRestoreState(t *testing.T) {
+	throttle := newLoginThrottle()
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	client := "192.0.2.13"
+
+	if throttle.blocked(client, at) {
+		t.Fatal("request was unexpectedly blocked")
+	}
+	throttle.succeeded(client)
+	throttle.failed(client, at)
+	if _, ok := throttle.attempts[client]; ok {
+		t.Fatal("a stale failure restored state after a successful login")
+	}
+}
+
+func TestLoginThrottleParallelRequestsReserveLimit(t *testing.T) {
+	throttle := newLoginThrottle()
+	at := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	client := "192.0.2.12"
+	const parallel = 20
+
+	start := make(chan struct{})
+	results := make(chan bool, parallel)
+	var wg sync.WaitGroup
+	for range parallel {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- !throttle.blocked(client, at)
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	allowed := 0
+	for admitted := range results {
+		if admitted {
+			allowed++
+			throttle.failed(client, at)
+		}
+	}
+	if allowed != loginMaxFailures {
+		t.Fatalf("parallel requests admitted = %d, want %d", allowed, loginMaxFailures)
+	}
+	if !throttle.blocked(client, at.Add(time.Second)) {
+		t.Fatal("parallel failures must activate the block")
+	}
+}
+
+func TestLoginHandlerBlocksAfterSixSequentialFailures(t *testing.T) {
+	user := domain.User{PasswordHash: passwordHash("correct-password")}
+	app := &App{
+		logins: newLoginThrottle(),
+		userLookup: func(context.Context, string) (domain.User, error) {
+			return user, nil
+		},
+	}
+
+	for attempt := 0; attempt < loginMaxFailures; attempt++ {
+		request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("email=user%40example.test&password=wrong-password"))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		request.RemoteAddr = "192.0.2.20:12345"
+		response := httptest.NewRecorder()
+		app.login(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: status = %d, want %d", attempt+1, response.Code, http.StatusUnauthorized)
+		}
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("email=user%40example.test&password=wrong-password"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.RemoteAddr = "192.0.2.20:12345"
+	response := httptest.NewRecorder()
+	app.login(response, request)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("status after %d failures = %d, want %d", loginMaxFailures, response.Code, http.StatusTooManyRequests)
+	}
+	if got, want := response.Header().Get("Retry-After"), strconv.Itoa(int(loginWindow.Seconds())); got != want {
+		t.Fatalf("Retry-After = %q, want %q", got, want)
 	}
 }
