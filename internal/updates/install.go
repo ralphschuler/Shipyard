@@ -9,6 +9,7 @@ import (
 var (
 	ErrUpdateUnavailable = errors.New("update is not verified and installable")
 	ErrUpdateBusy        = errors.New("active runs or workspaces block update installation")
+	ErrBackupUnavailable = errors.New("backup adapter is unavailable")
 )
 
 type Progress struct {
@@ -36,14 +37,16 @@ type Orchestrator struct {
 	Switch  func(context.Context, Snapshot, []byte) error
 	Restart func(context.Context, Snapshot) error
 	Health  func(context.Context, Snapshot) error
-	// RestartVerifiesHealth means Restart waits for the new supervisor process
-	// and verifies its complete bundle. The old process must not be accepted by
-	// the generic post-restart health step in that case.
+	// RestartVerifiesHealth means Restart has already validated the candidate
+	// bundle (for production: --validate-embedded-app). The generic post-restart
+	// health step must not accept the still-running old process in that case.
 	RestartVerifiesHealth bool
 	Rollback              func(context.Context, Snapshot) error
-	// AfterSuccess is reserved for adapters whose restart is intentionally
-	// outside Install. Production adapters leave it unset because Restart must
-	// synchronously verify the supervisor-started bundle before Install returns.
+	// AfterSuccess runs after Install has returned success so the HTTP handler
+	// can flush the install response before the process is replaced. Production
+	// adapters start the supervisor restart monitor here and must not wait for
+	// that monitor inside Restart or Install: the monitor waits for the old
+	// process to exit, which deadlocks if the request handler is still blocked.
 	AfterSuccess func()
 }
 

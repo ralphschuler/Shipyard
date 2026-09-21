@@ -21,25 +21,44 @@ import (
 )
 
 const (
-	defaultAddress     = "127.0.0.1:8080"
-	defaultDatabaseURL = "postgres://taskboard:taskboard@localhost:5432/taskboard?sslmode=disable"
-	shutdownTimeout    = 10 * time.Second
+	defaultAddress         = "127.0.0.1:8080"
+	defaultDatabaseURL     = "postgres://taskboard:taskboard@localhost:5432/taskboard?sslmode=disable"
+	shutdownTimeout        = 10 * time.Second
+	ordinaryRequestTimeout = 30 * time.Second
+	updateInstallTimeout   = 5 * time.Minute
+	timeoutMessage         = "request timed out\n"
+	updateInstallPath      = "/api/v1/settings/updates/install"
 )
 
 func isStreamingPath(path string) bool {
 	return path == "/events" || path == "/mcp"
 }
 
+func isUpdateInstallPath(path string) bool {
+	return path == updateInstallPath
+}
+
 // requestTimeout protects ordinary requests without severing the long-lived
-// Server-Sent Events and MCP transports.
+// Server-Sent Events and MCP transports. In-app update installation is not an
+// ordinary request: backup, artifact download, and migrate routinely exceed
+// 30s, so that route uses a dedicated longer budget instead of TimeoutHandler's
+// 30s kill that left the Settings UI hung on "prepared for maintenance".
 func requestTimeout(next http.Handler) http.Handler {
-	standard := http.TimeoutHandler(next, 30*time.Second, "request timed out\n")
+	return requestTimeoutWith(next, ordinaryRequestTimeout, updateInstallTimeout)
+}
+
+func requestTimeoutWith(next http.Handler, ordinary, updateInstall time.Duration) http.Handler {
+	standard := http.TimeoutHandler(next, ordinary, timeoutMessage)
+	install := http.TimeoutHandler(next, updateInstall, timeoutMessage)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if isStreamingPath(r.URL.Path) {
+		switch {
+		case isStreamingPath(r.URL.Path):
 			next.ServeHTTP(w, r)
-			return
+		case isUpdateInstallPath(r.URL.Path):
+			install.ServeHTTP(w, r)
+		default:
+			standard.ServeHTTP(w, r)
 		}
-		standard.ServeHTTP(w, r)
 	})
 }
 

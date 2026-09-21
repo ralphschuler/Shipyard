@@ -1588,7 +1588,7 @@ function Updates({ language }: { language: Language }) {
       const response = await mutation("/api/v1/settings/updates/install", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ confirm: true }) });
       const result = await response.json();
       setProgress(result.progress || []);
-      setMessage(result.status === "succeeded" ? text("Update erfolgreich abgeschlossen.", "Update completed successfully.") : text("Update abgeschlossen.", "Update completed."));
+      setMessage(result.status === "succeeded" ? text("Update installiert. Der Dienst wird jetzt neu gestartet …", "Update installed. The service is restarting …") : text("Update abgeschlossen.", "Update completed."));
     } catch (err) {
       setMessage(String(err));
     } finally { setInstalling(false); }

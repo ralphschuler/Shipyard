@@ -12,6 +12,7 @@ import (
 	"strings"
 	"taskboard/internal/updates"
 	"testing"
+	"time"
 )
 
 // Parent navigation paths are part of the public UI contract. Settings uses
@@ -215,6 +216,95 @@ func TestInstallUpdateRunsOnlyAfterVerifiedSnapshot(t *testing.T) {
 	app.installUpdateAPI(res, httptest.NewRequest(http.MethodPost, "/api/v1/settings/updates/install", bytes.NewBufferString(`{"confirm":true}`)))
 	if res.Code != http.StatusOK || !called {
 		t.Fatalf("status = %d, called = %v, body = %s", res.Code, called, res.Body.String())
+	}
+}
+
+func TestInstallUpdateAPIReturnsBeforeBlockingRestartHandoff(t *testing.T) {
+	stubInstallableGitHubRelease(t)
+	unblock := make(chan struct{})
+	handoffStarted := make(chan struct{})
+	noop := func(context.Context, updates.Snapshot) error { return nil }
+	app := &App{update: &updates.Orchestrator{
+		Backup:            noop,
+		DownloadAndVerify: func(context.Context, string, string) ([]byte, error) { return []byte("artifact"), nil },
+		VerifyArtifact:    func(context.Context, updates.Snapshot, []byte) error { return nil },
+		Verify:            noop,
+		Migrate:           noop,
+		Switch:            func(context.Context, updates.Snapshot, []byte) error { return nil },
+		Restart:           noop,
+		Health:            noop,
+		Rollback:          noop,
+		AfterSuccess: func() {
+			close(handoffStarted)
+			<-unblock
+		},
+	}}
+	srv := httptest.NewServer(http.HandlerFunc(app.installUpdateAPI))
+	t.Cleanup(srv.Close)
+	t.Cleanup(func() { close(unblock) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL, strings.NewReader(`{"confirm":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("install request hung waiting for restart handoff: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["status"] != "succeeded" {
+		t.Fatalf("payload = %#v", payload)
+	}
+
+	select {
+	case <-handoffStarted:
+	case <-time.After(time.Second):
+		t.Fatal("restart handoff was not started after the install response")
+	}
+}
+
+func stubInstallableGitHubRelease(t *testing.T) {
+	t.Helper()
+	t.Setenv("TASKBOARD_VERSION", "1.2.0")
+	t.Setenv("TASKBOARD_GITHUB_RELEASE_ALLOWLIST", "v1.3.0")
+	t.Setenv("TASKBOARD_GITHUB_TOKEN", "read-only-token")
+	commit := "0123456789012345678901234567890123456789"
+	transport := updateRoundTripper(func(r *http.Request) (*http.Response, error) {
+		var body string
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/releases/latest"):
+			body = fmt.Sprintf(`{"tag_name":"v1.3.0","html_url":"https://github.com/ralphschuler/Shipyard/releases/tag/v1.3.0","published_at":"2026-09-17T10:00:00Z","target_commitish":"master","assets":[{"name":"shipyard-linux-%s","browser_download_url":"https://github.com/ralphschuler/Shipyard/releases/download/v1.3.0/shipyard-linux-%s","digest":"sha256:0123456789012345678901234567890123456789012345678901234567890123"}]}`, runtime.GOARCH, runtime.GOARCH)
+		case strings.HasSuffix(r.URL.Path, "/commits/v1.3.0"):
+			body = fmt.Sprintf(`{"sha":"%s","commit":{"verification":{"verified":true}}}`, commit)
+		case strings.HasSuffix(r.URL.Path, "/compare/master..."+commit):
+			body = `{"status":"behind","ahead_by":0,"behind_by":1}`
+		default:
+			return nil, fmt.Errorf("unexpected GitHub path %s", r.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})
+	old := http.DefaultClient
+	http.DefaultClient = &http.Client{Transport: transport}
+	t.Cleanup(func() { http.DefaultClient = old })
+}
+
+func TestUpdateInstallErrorMessageReportsMissingBackup(t *testing.T) {
+	got := updateInstallErrorMessage(fmt.Errorf("backup: %w", updates.ErrBackupUnavailable))
+	if !strings.Contains(got, "Backup") {
+		t.Fatalf("missing backup error = %q", got)
+	}
+	if strings.Contains(got, "/") || strings.Contains(got, "backup-postgres") {
+		t.Fatalf("error message exposes adapter details: %q", got)
 	}
 }
 

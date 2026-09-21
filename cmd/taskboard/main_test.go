@@ -1,8 +1,13 @@
 package main
 
 import (
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestSetBuildMetadataExposesTheCompiledGoToolchain(t *testing.T) {
@@ -25,9 +30,79 @@ func TestStreamingPathsBypassTheOrdinaryRequestTimeout(t *testing.T) {
 			t.Fatalf("%s must be treated as streaming", path)
 		}
 	}
-	for _, path := range []string{"/", "/runs", "/mcp/other", "/events/other"} {
+	for _, path := range []string{"/", "/runs", "/mcp/other", "/events/other", updateInstallPath} {
 		if isStreamingPath(path) {
-			t.Fatalf("%s must retain the normal request timeout", path)
+			t.Fatalf("%s must retain a request timeout", path)
 		}
+	}
+}
+
+func TestUpdateInstallPathUsesADedicatedTimeout(t *testing.T) {
+	if !isUpdateInstallPath(updateInstallPath) {
+		t.Fatal("update install must be classified as a long-running route")
+	}
+	for _, path := range []string{"/", "/runs", "/api/v1/settings/updates", "/api/v1/settings/updates/install/other", "/events", "/mcp"} {
+		if isUpdateInstallPath(path) {
+			t.Fatalf("%s must not inherit the update-install timeout", path)
+		}
+	}
+}
+
+func TestRequestTimeoutDoesNotKillUpdateInstallAtTheOrdinaryDeadline(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(80 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	srv := httptest.NewServer(requestTimeoutWith(inner, 20*time.Millisecond, time.Second))
+	t.Cleanup(srv.Close)
+	client := &http.Client{Timeout: time.Second}
+
+	ordinary, err := client.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("ordinary request: %v", err)
+	}
+	ordinaryBody, _ := io.ReadAll(ordinary.Body)
+	ordinary.Body.Close()
+	if ordinary.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(ordinaryBody), "request timed out") {
+		t.Fatalf("ordinary status = %d body = %q, want 503 timeout", ordinary.StatusCode, ordinaryBody)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+updateInstallPath, strings.NewReader(`{"confirm":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	install, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("update install request: %v", err)
+	}
+	installBody, _ := io.ReadAll(install.Body)
+	install.Body.Close()
+	if install.StatusCode != http.StatusOK || string(installBody) != "ok" {
+		t.Fatalf("update install status = %d body = %q, want 200 after exceeding the ordinary 30s budget", install.StatusCode, installBody)
+	}
+}
+
+func TestUpdateInstallStillHasADedicatedTimeout(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(80 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	srv := httptest.NewServer(requestTimeoutWith(inner, 20*time.Millisecond, 20*time.Millisecond))
+	t.Cleanup(srv.Close)
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL+updateInstallPath, strings.NewReader(`{"confirm":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := (&http.Client{Timeout: time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("update install request: %v", err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(body), "request timed out") {
+		t.Fatalf("status = %d body = %q, want the dedicated install timeout to still fire", res.StatusCode, body)
 	}
 }

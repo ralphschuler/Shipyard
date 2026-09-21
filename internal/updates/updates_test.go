@@ -623,7 +623,35 @@ func TestProductionAdapterRestartValidatesInstalledBundle(t *testing.T) {
 	}
 }
 
-func TestProductionAdapterRestartWaitsForMonitorResult(t *testing.T) {
+func TestProductionAdapterBackupFailsFastWhenScriptMissing(t *testing.T) {
+	p := &productionAdapter{backupScript: filepath.Join(t.TempDir(), "missing-backup.sh")}
+	start := time.Now()
+	err := p.backup(context.Background(), Snapshot{})
+	if !errors.Is(err, ErrBackupUnavailable) {
+		t.Fatalf("backup() error = %v, want ErrBackupUnavailable", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("missing backup must fail fast instead of hanging")
+	}
+}
+
+func TestProductionAdapterBackupFailsFastWhenScriptNotExecutable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "backup-postgres.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nsleep 30\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	p := &productionAdapter{backupScript: path}
+	start := time.Now()
+	err := p.backup(context.Background(), Snapshot{})
+	if !errors.Is(err, ErrBackupUnavailable) {
+		t.Fatalf("backup() error = %v, want ErrBackupUnavailable", err)
+	}
+	if time.Since(start) > time.Second {
+		t.Fatal("non-executable backup must fail fast instead of hanging")
+	}
+}
+
+func TestProductionAdapterRestartDoesNotWaitForRestartMonitor(t *testing.T) {
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "taskboard")
 	started := filepath.Join(dir, "monitor-started")
@@ -634,17 +662,88 @@ func TestProductionAdapterRestartWaitsForMonitorResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := &productionAdapter{binary: binary, previous: filepath.Join(dir, "previous")}
-	go func() {
-		if !waitForRestartHelper(t, started) {
-			return
-		}
-		_ = os.WriteFile(release, []byte("release"), 0600)
-	}()
-	if err := p.restart(context.Background(), Snapshot{Release: Release{Version: "v2", Commit: "candidate"}}); err != nil {
+	start := time.Now()
+	if err := p.restart(context.Background(), Snapshot{Release: Release{Version: "v2", Commit: "candidate"}, Current: Current{Version: "v1", Commit: "old"}}); err != nil {
 		t.Fatalf("restart() error = %v", err)
 	}
-	if _, err := os.Stat(marker); err != nil {
-		t.Fatalf("monitor completion was not observed: %v", err)
+	if time.Since(start) > time.Second {
+		t.Fatal("restart() waited for the restart monitor")
+	}
+	if _, err := os.Stat(started); err == nil {
+		t.Fatal("restart() started the monitor before AfterSuccess")
+	}
+
+	p.startRestartMonitor()
+	if !waitForRestartHelper(t, started) {
+		t.Fatal("AfterSuccess did not start the restart monitor")
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("AfterSuccess waited for the restart monitor to finish")
+	}
+	if err := os.WriteFile(release, []byte("release"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForRestartHelper(t, marker) {
+		t.Fatal("monitor did not complete after being released")
+	}
+}
+
+func TestOrchestratorInstallReturnsBeforeRestartMonitorHandoff(t *testing.T) {
+	dir := t.TempDir()
+	binary := filepath.Join(dir, "taskboard")
+	started := filepath.Join(dir, "monitor-started")
+	release := filepath.Join(dir, "release-monitor")
+	marker := filepath.Join(dir, "monitor-finished")
+	script := fmt.Sprintf("#!/bin/sh\ncase \"$1\" in\n--validate-embedded-app) exit 0 ;;\n--monitor-restart) : > %q; while [ ! -f %q ]; do sleep 0.01; done; : > %q; exit 0 ;;\n*) exit 2 ;;\nesac\n", started, release, marker)
+	if err := os.WriteFile(binary, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	p := &productionAdapter{binary: binary, previous: filepath.Join(dir, "previous")}
+	noop := func(context.Context, Snapshot) error { return nil }
+	o := Orchestrator{
+		Backup: noop,
+		DownloadAndVerify: func(context.Context, string, string) ([]byte, error) {
+			return []byte("artifact"), nil
+		},
+		VerifyArtifact:        func(context.Context, Snapshot, []byte) error { return nil },
+		Verify:                noop,
+		Migrate:               noop,
+		Switch:                func(context.Context, Snapshot, []byte) error { return nil },
+		Restart:               p.restart,
+		RestartVerifiesHealth: true,
+		Rollback:              noop,
+		AfterSuccess:          p.startRestartMonitor,
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- o.Install(context.Background(), Snapshot{
+			Status: "update_available", Installable: true,
+			Release: Release{Version: "v2", Commit: "candidate"},
+			Current: Current{Version: "v1", Commit: "old"},
+		}, nil)
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Install() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Install deadlocked waiting for the restart monitor")
+	}
+	if _, err := os.Stat(started); err == nil {
+		t.Fatal("monitor started during Install; that deadlocks the HTTP handler")
+	}
+
+	o.AfterSuccess()
+	if !waitForRestartHelper(t, started) {
+		t.Fatal("AfterSuccess did not start the restart monitor")
+	}
+	if err := os.WriteFile(release, []byte("release"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if !waitForRestartHelper(t, marker) {
+		t.Fatal("monitor did not complete after install returned")
 	}
 }
 

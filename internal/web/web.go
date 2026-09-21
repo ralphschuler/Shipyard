@@ -2418,17 +2418,45 @@ func (a *App) installUpdateAPI(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Update wurde ausgeführt, aber nicht vollständig auditiert.", http.StatusServiceUnavailable)
 		return
 	}
-	writeAPI(w, map[string]any{"status": "succeeded", "progress": progress}, nil)
+	writeFlushedAPI(w, map[string]any{"status": "succeeded", "progress": progress})
 	if a.update.AfterSuccess != nil {
-		a.update.AfterSuccess()
+		handoff := a.update.AfterSuccess
+		// The supervisor monitor waits for this process to exit. It must not
+		// run inside this handler or the browser request deadlocks against the
+		// monitor that is waiting for healthz to go down.
+		go handoff()
+	}
+}
+
+func writeFlushedAPI(w http.ResponseWriter, value any) {
+	body, err := json.Marshal(value)
+	if err != nil {
+		http.Error(w, "Daten sind momentan nicht verfügbar.", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
 	}
 }
 
 // Adapter errors can contain filesystem paths, command lines, or deployment
 // details. Keep those details in server-side diagnostics, never in the API
 // response rendered by the browser.
-func updateInstallErrorMessage(error) string {
-	return "Update konnte nicht sicher installiert werden. Die Wiederherstellung wurde geprüft."
+func updateInstallErrorMessage(err error) string {
+	switch {
+	case errors.Is(err, updates.ErrBackupUnavailable):
+		return "Update kann nicht installiert werden, weil das Backup fehlt oder nicht ausführbar ist."
+	case errors.Is(err, updates.ErrUpdateBusy):
+		return "Aktive Runs oder Workspaces blockieren die Update-Installation."
+	case errors.Is(err, updates.ErrUpdateUnavailable):
+		return "Update ist nicht verifiziert und installierbar."
+	default:
+		return "Update konnte nicht sicher installiert werden. Die Wiederherstellung wurde geprüft."
+	}
 }
 
 func activeUpdateRunsQuery(currentSessionHash string) (string, []any) {
