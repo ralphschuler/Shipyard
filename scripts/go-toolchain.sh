@@ -64,18 +64,36 @@ shipyard_selected_go_version() {
   printf '%s\n' "$version"
 }
 
+# Capture command output, then search it. grep -q / awk-exit on a live pipe
+# under pipefail is SIGPIPE (141) when the writer still has unread bytes.
+shipyard_cmd_help_has_flag() {
+  local bin="$1"
+  local flag="$2"
+  local help=""
+  help="$("$bin" -h 2>&1)" || true
+  if grep -Fq -- "$flag" <<<"$help"; then
+    return 0
+  fi
+  return 1
+}
+
 shipyard_artifact_go_version() {
   local binary="$1"
   if [[ ! -e "$binary" ]]; then
     printf 'artifact %s does not exist\n' "$binary" >&2
     return 1
   fi
-  go version -m "$binary" | awk 'NR==1 {
+  local buildinfo version
+  # `go version -m` prints one header line then every module. awk-exit on that
+  # live pipe under pipefail aborts the release with 141 before "built ...".
+  buildinfo="$(go version -m "$binary")"
+  version="$(awk 'NR==1 {
     for (i = 1; i <= NF; i++) {
       if ($i ~ /^go[0-9]/) { print $i; exit }
     }
     exit 1
-  }'
+  }' <<<"$buildinfo")"
+  printf '%s\n' "$version"
 }
 
 shipyard_require_patched_go() {

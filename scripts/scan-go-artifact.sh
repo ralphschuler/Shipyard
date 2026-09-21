@@ -60,7 +60,9 @@ run_govulncheck_json() {
   local output="$1"
   shift
   set +e
-  if "$govulncheck_bin" -h 2>&1 | grep -q -- '-format'; then
+  # Capture help first. `govulncheck -h | grep -q -- -format` under pipefail is
+  # 141 when help exceeds the pipe buffer, which mis-selects -json vs -format.
+  if shipyard_cmd_help_has_flag "$govulncheck_bin" '-format'; then
     timeout "${TASKBOARD_GOVULNCHECK_TIMEOUT:-180}s" "$govulncheck_bin" -format=json "$@" >"$output"
   else
     timeout "${TASKBOARD_GOVULNCHECK_TIMEOUT:-180}s" "$govulncheck_bin" -json "$@" >"$output"

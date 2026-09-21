@@ -22,6 +22,9 @@ func TestScanGoArtifactDoesNotUseGoRun(t *testing.T) {
 		if strings.Contains(trimmed, "go run ") {
 			t.Fatal("scan-go-artifact.sh must not invoke go run; it remaps os.Exit(3) to status 1")
 		}
+		if strings.Contains(trimmed, "| grep -q") {
+			t.Fatal("scan-go-artifact.sh must not grep -q a live pipe under pipefail (SIGPIPE 141)")
+		}
 	}
 	if !strings.Contains(text, "go build") || !strings.Contains(text, "./cmd/govulngate") {
 		t.Fatal("scan-go-artifact.sh must build and exec cmd/govulngate")
@@ -29,6 +32,65 @@ func TestScanGoArtifactDoesNotUseGoRun(t *testing.T) {
 	if !strings.Contains(text, "exit 3") {
 		t.Fatal("scan-go-artifact.sh must preserve classifier exit 3")
 	}
+	if !strings.Contains(text, "shipyard_cmd_help_has_flag") {
+		t.Fatal("scan-go-artifact.sh must detect govulncheck -format from captured help text")
+	}
+}
+
+func TestGoToolchainCapturesBuildinfoBeforeParse(t *testing.T) {
+	body, err := os.ReadFile("go-toolchain.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn := functionBody(string(body), "shipyard_artifact_go_version() {")
+	if fn == "" {
+		t.Fatal("shipyard_artifact_go_version is missing")
+	}
+	if strings.Contains(fn, "| awk") {
+		t.Fatal("shipyard_artifact_go_version must parse captured buildinfo, not awk-exit on a live pipe")
+	}
+	if !strings.Contains(fn, `buildinfo="$(go version -m "$binary")"`) {
+		t.Fatal("shipyard_artifact_go_version must capture go version -m before parsing")
+	}
+}
+
+func functionBody(source, signature string) string {
+	idx := strings.Index(source, signature)
+	if idx < 0 {
+		return ""
+	}
+	rest := source[idx:]
+	depth := 0
+	for i := 0; i < len(rest); i++ {
+		switch rest[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return rest[:i+1]
+			}
+		}
+	}
+	return rest
+}
+
+func govulncheckStub(body string) string {
+	return `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-h" ]]; then
+  printf '  -format string\n'
+  head -c 2097152 /dev/zero | tr '\0' 'x'
+  printf '\n'
+  exit 0
+fi
+for arg in "$@"; do
+  if [[ "$arg" == "-json" ]]; then
+    printf 'help detection chose legacy -json; want -format=json\n' >&2
+    exit 1
+  fi
+done
+` + body
 }
 
 func TestScanGoArtifactPreservesGovulngateExit3(t *testing.T) {
@@ -45,13 +107,7 @@ func TestScanGoArtifactPreservesGovulngateExit3(t *testing.T) {
 	if err := os.Mkdir(stubDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	stub := `#!/usr/bin/env bash
-set -euo pipefail
-if [[ "${1:-}" == "-h" ]]; then
-  printf '  -format string\n'
-  exit 0
-fi
-mode=source
+	stub := govulncheckStub(`mode=source
 for arg in "$@"; do
   if [[ "$arg" == "-mode=binary" ]]; then
     mode=binary
@@ -63,7 +119,7 @@ if [[ "$mode" == "binary" ]]; then
 fi
 printf '%s\n' '{"config":{"scanner_name":"govulncheck"}}'
 exit 0
-`
+`)
 	if err := os.WriteFile(filepath.Join(stubDir, "govulncheck"), []byte(stub), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -113,13 +169,7 @@ func TestScanGoArtifactPreservesStubClassifierExit3(t *testing.T) {
 	if err := os.Mkdir(stubDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	govulncheck := `#!/usr/bin/env bash
-if [[ "${1:-}" == "-h" ]]; then
-  printf '  -format string\n'
-  exit 0
-fi
-exit 0
-`
+	govulncheck := govulncheckStub("exit 0\n")
 	gate := `#!/usr/bin/env bash
 printf 'artifact toolchain: testdata\n' >&2
 exit 3
