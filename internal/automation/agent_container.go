@@ -422,10 +422,13 @@ func ensureAgentHomeLayout(homeHost string, auth hostCLIAuthPlan) error {
 	if err := os.MkdirAll(homeHost, 0o700); err != nil {
 		return err
 	}
-	// The bind root is already mode 0700 on the host. The per-run home itself
-	// must be traversable by a non-root container UID after rootless UID
-	// remapping, where the host owner is represented as container root.
-	if err := os.Chmod(homeHost, 0o755); err != nil {
+	// The bind root is already mode 0700 on the host. In rootless Docker the
+	// host owner of this bind mount is represented as container root, whereas
+	// the agent runs as a non-root UID. The disposable home must therefore be
+	// writable by that UID, not merely traversable. Host credentials are copied
+	// into this short-lived directory and the private bind root prevents other
+	// host users from reaching it.
+	if err := os.Chmod(homeHost, 0o777); err != nil {
 		return err
 	}
 	for _, dir := range auth.DestDirs {
@@ -433,28 +436,26 @@ func ensureAgentHomeLayout(homeHost string, auth hostCLIAuthPlan) error {
 		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return errors.New("Host-CLI-Login liegt außerhalb des Container-Home")
 		}
-		// The bind root remains service-private (0700), but every directory
-		// below it must be traversable by the container user. Rootless Docker
-		// remaps that user to a subordinate host UID, so owner-only (0700)
-		// directories here cause CODEX_HOME/CLAUDE_CONFIG_DIR to fail with
-		// EACCES even when the staged files themselves are readable.
-		if err := os.MkdirAll(filepath.Join(homeHost, rel), 0o755); err != nil {
+		// The agent creates app-server state next to its staged credentials.
+		// It is mapped to a subordinate host UID, so writable modes are required
+		// even though the service itself owns the source directory.
+		if err := os.MkdirAll(filepath.Join(homeHost, rel), 0o777); err != nil {
 			return err
 		}
-		if err := os.Chmod(filepath.Join(homeHost, rel), 0o755); err != nil {
+		if err := os.Chmod(filepath.Join(homeHost, rel), 0o777); err != nil {
 			return err
 		}
 	}
-	if err := os.MkdirAll(filepath.Join(homeHost, ".config"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(homeHost, ".config"), 0o777); err != nil {
 		return err
 	}
-	if err := os.Chmod(filepath.Join(homeHost, ".config"), 0o755); err != nil {
+	if err := os.Chmod(filepath.Join(homeHost, ".config"), 0o777); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(homeHost, ".cache"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(homeHost, ".cache"), 0o777); err != nil {
 		return err
 	}
-	if err := os.Chmod(filepath.Join(homeHost, ".cache"), 0o755); err != nil {
+	if err := os.Chmod(filepath.Join(homeHost, ".cache"), 0o777); err != nil {
 		return err
 	}
 	return nil

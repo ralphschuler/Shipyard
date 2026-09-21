@@ -166,7 +166,10 @@ func buildSandboxArgs(spec sandboxExec) ([]string, error) {
 		if spec.ExtraPATH != "" {
 			path = spec.ExtraPATH + ":" + path
 		}
-		args = append(args, "--tmpfs", home)
+		// The CLI home must not live below /tmp: Codex rejects that location for
+		// its app-server helper binaries. Build the otherwise empty /home tree
+		// explicitly, then put the disposable per-run home on tmpfs.
+		args = append(args, "--dir", "/home", "--tmpfs", home)
 		if spec.HostCLIAuth != nil {
 			auth = *spec.HostCLIAuth
 		} else {
