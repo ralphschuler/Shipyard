@@ -931,12 +931,16 @@ func TestAgentHomeIsRecreatedImmediatelyBeforeCreate(t *testing.T) {
 	if err != nil || !info.IsDir() {
 		t.Fatalf("agent home was not recreated before create: %v", err)
 	}
-	if info.Mode().Perm() != 0o755 {
+	if info.Mode().Perm() != 0o777 {
 		t.Fatalf("agent home mode = %o", info.Mode().Perm())
 	}
 	for _, dir := range []string{".config", ".cache", ".codex"} {
-		if _, err := os.Stat(filepath.Join(home, dir)); err != nil {
+		dirInfo, err := os.Stat(filepath.Join(home, dir))
+		if err != nil {
 			t.Fatalf("recreated home missing %s: %v", dir, err)
+		}
+		if dirInfo.Mode().Perm() != 0o777 {
+			t.Fatalf("recreated home directory %s mode = %o", dir, dirInfo.Mode().Perm())
 		}
 	}
 	assertDurableRuntimePath(t, home)
