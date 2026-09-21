@@ -1335,7 +1335,7 @@ func (a *App) createTemplateAgent(w http.ResponseWriter, r *http.Request) {
 	prompt := "Implement the assigned task with a focused scope. Do not create a push, merge, or release."
 	desc := "Implementation agent"
 	if kind == "review" {
-		prompt = "Review the change critically and document concrete issues. Do not create a push, merge, or release."
+		prompt = automation.DefaultReviewAgentPrompt
 		desc = "Code review agent"
 	}
 	if kind == "docs" {

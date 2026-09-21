@@ -52,6 +52,27 @@ func TestSandboxEffectivePolicyMigrationBackfillsLegacyRuns(t *testing.T) {
 	}
 }
 
+func TestReviewReworkDefaultsMigrationRewritesLegacyPromptAndFailureColumn(t *testing.T) {
+	body, err := migrationFiles.ReadFile("migrations/053_review_rework_defaults.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, required := range []string{
+		"Never leave defective work in Review",
+		"taskboard-transition",
+		"Überarbeiten",
+		"failure_column_id",
+		"entwicklung",
+		"review agent",
+		"Prüfe die Änderung kritisch",
+	} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("review rework migration is missing %q", required)
+		}
+	}
+}
+
 func TestReworkBudgetSnapshotMigrationDocumentsLimitAndCost(t *testing.T) {
 	body, err := migrationFiles.ReadFile("migrations/052_rework_budget_snapshot.sql")
 	if err != nil {

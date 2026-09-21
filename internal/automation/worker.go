@@ -234,71 +234,11 @@ var selfReviewCheckByAlias = func() map[string]selfReviewCheckSpec {
 var selfReviewResultValues = []string{"ok", "passed", "pass", "bestanden", "erfüllt", "erfuellt", "geprüft", "geprueft"}
 
 func requestedSelfReview(logs []domain.RunLog) (taskboardSelfReview, error) {
-	matches := selfReviewFence.FindAllStringSubmatch(joinRunLogs(logs), -1)
-	if len(matches) == 0 {
-		return taskboardSelfReview{}, errors.New("kein taskboard-self-review-Block gefunden")
-	}
-	// Codex can emit a progress response followed by a separate final handoff.
-	// The final handoff is what --output-last-message retains, so tolerate
-	// multiple assistant-authored review blocks and use the newest complete,
-	// passing review. A malformed earlier draft must not discard a later valid
-	// review, while a run with no valid review remains gated.
-	var lastErr error
-	for index := len(matches) - 1; index >= 0; index-- {
-		var review taskboardSelfReview
-		if err := json.Unmarshal([]byte(matches[index][1]), &review); err != nil {
-			lastErr = errors.New("taskboard-self-review ist kein gültiges JSON")
-			continue
-		}
-		if err := validateRequestedSelfReview(review); err != nil {
-			lastErr = err
-			continue
-		}
-		return review, nil
-	}
-	if lastErr != nil {
-		return taskboardSelfReview{}, lastErr
-	}
-	return taskboardSelfReview{}, errors.New("kein gültiger taskboard-self-review-Block gefunden")
+	return requestedSelfReviewForAgent("", logs)
 }
 
 func validateRequestedSelfReview(review taskboardSelfReview) error {
-	if strings.ToLower(strings.TrimSpace(review.Status)) != "passed" {
-		return errors.New("taskboard-self-review muss status=passed enthalten")
-	}
-	requiredChecks := make(map[string]bool, len(selfReviewChecklist))
-	for _, check := range selfReviewChecklist {
-		requiredChecks[check.ID] = false
-	}
-	if len(review.Checklist) != len(requiredChecks) {
-		return errors.New("taskboard-self-review benötigt genau die fünf Pflicht-Checklistenpunkte")
-	}
-	for _, item := range review.Checklist {
-		check := canonicalSelfReviewCheck(item.Check)
-		if strings.TrimSpace(item.Check) == "" || strings.TrimSpace(item.Result) == "" {
-			return errors.New("taskboard-self-review enthält einen unvollständigen Checklistenpunkt")
-		}
-		result := strings.ToLower(strings.TrimSpace(item.Result))
-		if !validSelfReviewResult(result) {
-			return fmt.Errorf("taskboard-self-review Checklistenpunkt %q enthält den ungültigen Status %s (Länge %d); erwartet wird einer von: %s", item.Check, safeSelfReviewResultForError(item.Result), len(strings.TrimSpace(item.Result)), strings.Join(selfReviewResultValues, ", "))
-		}
-		if _, required := requiredChecks[check]; !required {
-			return fmt.Errorf("taskboard-self-review enthält keine gültige Pflichtkategorie %q", item.Check)
-		}
-		if requiredChecks[check] {
-			return fmt.Errorf("taskboard-self-review enthält die Pflichtkategorie %q doppelt", item.Check)
-		}
-		requiredChecks[check] = true
-	}
-	for check, present := range requiredChecks {
-		if !present {
-			return fmt.Errorf("taskboard-self-review fehlt die Pflichtkategorie %q", selfReviewPromptLabel(check))
-		}
-	}
-	if len(review.Tests) == 0 || string(review.Tests) == "null" || len(review.OpenRisks) == 0 || string(review.OpenRisks) == "null" {
-		return errors.New("taskboard-self-review benötigt Testnachweise und offene Risiken")
-	}
-	return nil
+	return validateSelfReviewDocument(review, false)
 }
 
 func canonicalSelfReviewCheck(raw string) string {
@@ -339,7 +279,10 @@ func selfReviewExampleJSON() string {
 	return string(raw)
 }
 
-func selfReviewPromptSection() string {
+func selfReviewPromptSection(agentName string) string {
+	if isReviewAgent(agentName) {
+		return reviewSelfReviewPromptSection()
+	}
 	labels := make([]string, len(selfReviewChecklist))
 	for i, check := range selfReviewChecklist {
 		labels[i] = check.PromptLabel
@@ -441,7 +384,7 @@ func validateSelfReview(agentName string, logs []domain.RunLog, logErr error) er
 	if logErr != nil {
 		return fmt.Errorf("Abschlussprotokoll konnte nicht gelesen werden: %w", logErr)
 	}
-	_, err := requestedSelfReview(logs)
+	_, err := requestedSelfReviewForAgent(agentName, logs)
 	return err
 }
 
@@ -889,9 +832,9 @@ func normalizeBuiltinAgent(agent domain.Agent) (domain.Agent, bool) {
 		agent.Description = "Implementation agent"
 		agent.Prompt = "Implement the assigned task with a focused scope. Do not create a push, merge, or release."
 		changed = true
-	case agent.Description == "Code-Review-Agent" && agent.Prompt == "Prüfe die Änderung kritisch und dokumentiere konkrete Probleme. Erstelle keinen Push, Merge oder Release.":
+	case (agent.Description == "Code-Review-Agent" || agent.Description == "Code review agent") && isLegacyReviewPrompt(agent.Prompt):
 		agent.Description = "Code review agent"
-		agent.Prompt = "Review the change critically and document concrete issues. Do not create a push, merge, or release."
+		agent.Prompt = DefaultReviewAgentPrompt
 		changed = true
 	case agent.Description == "Dokumentations-Agent" && agent.Prompt == "Aktualisiere die Dokumentation zur Aufgabe. Erstelle keinen Push, Merge oder Release.":
 		agent.Description = "Documentation agent"
@@ -905,8 +848,8 @@ func normalizeBuiltinPromptSnapshot(prompt string) string {
 	switch prompt {
 	case "Implementiere die zugewiesene Aufgabe fokussiert. Erstelle keinen Push, Merge oder Release.":
 		return "Implement the assigned task with a focused scope. Do not create a push, merge, or release."
-	case "Prüfe die Änderung kritisch und dokumentiere konkrete Probleme. Erstelle keinen Push, Merge oder Release.":
-		return "Review the change critically and document concrete issues. Do not create a push, merge, or release."
+	case legacyReviewPromptDE, legacyReviewPromptEN:
+		return DefaultReviewAgentPrompt
 	case "Aktualisiere die Dokumentation zur Aufgabe. Erstelle keinen Push, Merge oder Release.":
 		return "Update the task documentation. Do not create a push, merge, or release."
 	default:
@@ -1026,7 +969,12 @@ func formatAllowedTransitions(transitions []domain.Transition, columns []domain.
 	var b strings.Builder
 	b.WriteString("\n\nAllowed workflow transitions (request structured ID/label pairs only):\n")
 	for _, transition := range transitions {
-		fmt.Fprintf(&b, "- {\"target_column_id\":\"%s\",\"label\":%q}\n", transition.ToColumnID, labels[transition.ToColumnID])
+		label := labels[transition.ToColumnID]
+		action := strings.TrimSpace(transition.ActionName)
+		if action == "" {
+			action = label
+		}
+		fmt.Fprintf(&b, "- {\"target_column_id\":\"%s\",\"target\":%q,\"label\":%q}\n", transition.ToColumnID, label, action)
 	}
 	return b.String()
 }
@@ -3667,11 +3615,14 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		allowed, _ := w.Store.Allowed(ctx, task.ID)
 		columns, _ := w.Store.Columns(ctx, task.BoardID)
 		prompt += formatAllowedTransitions(allowed, columns)
+		if isReviewAgent(agent.Name) {
+			prompt += reviewAgentWorkflowSection(allowed, columns, task)
+		}
 	}
 	prompt += "\n\nRun the project-specific tests for your change and document the result in the final response. Prefix every test, build, or install command with `timeout 120s <command>` (or the platform equivalent). Do not use nested `bash -lc`, extra shell quoting, or evaluate `$?`; the execution environment reports status and output. If a command hangs or reaches its limit, document it as an open risk and continue with other useful checks. Remove generated development artifacts such as __pycache__, *.pyc, coverage files, and temporary data before finishing. Stop temporary servers and browser processes before finishing; do not use interactive or indefinitely waiting commands. Do not create a push, merge, release, or deployment."
-	prompt += "\n\nAt the end, document the result, changed areas, tests, and open risks for humans in exactly one ```taskboard-comment\n…\n``` block. If a new decision is required, output exactly one taskboard-interaction block: {\"key\":\"stable_key\",\"title\":\"Short question\",\"body\":\"Context\",\"fields\":[...]}. Supported field types: text, textarea, select, buttons. Do not ask for a binding user decision again. Use reopen:true and reason only when circumstances materially changed. After an answer, exactly one follow-up run starts. If you are reviewing and require rework, also output exactly one ```taskboard-transition\n{\"target\":\"In Progress\",\"comment\":\"specific rework\"}\n``` block; it is executed only when allowed by the board. Only the triage agent may additionally output one ```taskboard-update\n{\"title\":\"…\",\"description\":\"…\"}\n``` block and one ```taskboard-targets\n{\"project_ids\":[\"uuid\"],\"group_ids\":[]}\n``` block."
+	prompt += "\n\nAt the end, document the result, changed areas, tests, and open risks for humans in exactly one ```taskboard-comment\n…\n``` block. If a new decision is required, output exactly one taskboard-interaction block: {\"key\":\"stable_key\",\"title\":\"Short question\",\"body\":\"Context\",\"fields\":[...]}. Supported field types: text, textarea, select, buttons. Do not ask for a binding user decision again. Use reopen:true and reason only when circumstances materially changed. After an answer, exactly one follow-up run starts. Request a taskboard-transition only when the board lists that move as allowed. Only the triage agent may additionally output one ```taskboard-update\n{\"title\":\"…\",\"description\":\"…\"}\n``` block and one ```taskboard-targets\n{\"project_ids\":[\"uuid\"],\"group_ids\":[]}\n``` block."
 	prompt += "\n\nProject creation is an exception to existing target projects: when a task asks to create or import projects from repository URLs, a missing project_id is expected and is not a blocker. Check for duplicates by repository URL and create missing projects; their project_id is assigned during creation. Require a project_id only when the task explicitly changes an already registered individual project. Never report a run as successful without implementing the requested work. If a decision is unavoidable, output exactly one valid taskboard-interaction block; every fields item must include id, label, and type, and select/buttons fields must include at least one option."
-	prompt += selfReviewPromptSection()
+	prompt += selfReviewPromptSection(agent.Name)
 	if skills, err := w.Store.AgentSkills(ctx, run.AgentID); err == nil && len(skills) > 0 {
 		paths := make([]string, 0, len(skills))
 		for _, skill := range skills {
@@ -3987,6 +3938,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 				_ = w.finish(ctx, run, "failed")
 				return
 			}
+			review, _ := requestedSelfReviewForAgent(agent.Name, reviewLogs)
 			for _, comment := range requestedTaskComments(controlLogs) {
 				_ = w.Store.AddComment(ctx, run.TaskID, "Agent", comment)
 			}
@@ -4019,6 +3971,19 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 				}
 			}
 			requestedRoute, hasRequestedRoute = requestedTransition(controlLogs)
+			if isReviewAgent(agent.Name) && taskErr == nil {
+				liveAllowed, _ := w.Store.Allowed(ctx, task.ID)
+				liveColumns, _ := w.Store.Columns(ctx, task.BoardID)
+				var policyErr error
+				requestedRoute, hasRequestedRoute, policyErr = applyReviewReworkPolicy(task, review, requestedRoute, hasRequestedRoute, liveAllowed, liveColumns)
+				if policyErr != nil {
+					reason := "Self-Review abgelehnt: " + policyErr.Error()
+					_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
+					_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "Self-Review fehlgeschlagen", reason)
+					_ = w.finish(ctx, run, "failed")
+					return
+				}
+			}
 			if taskErr == nil && hasRequestedRoute {
 				// Reload after provider execution: another actor may have moved the
 				// task while the agent was working.
