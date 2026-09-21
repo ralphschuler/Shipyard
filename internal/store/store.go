@@ -876,6 +876,21 @@ func qaReviewReturn(currentName string, currentPosition int, targetType string, 
 	}
 	return targetPosition < currentPosition
 }
+
+// explicitReworkTransition increments the persistent rework/escalation
+// counter. Column drag, MCP moves, and other generic sources must not: only a
+// QA release decision or an agent_review return from a Review/QA gate is a
+// counted rework.
+func explicitReworkTransition(source string, qaReturn bool) bool {
+	switch strings.TrimSpace(source) {
+	case "qa_rework":
+		return true
+	case "agent_review":
+		return qaReturn
+	default:
+		return false
+	}
+}
 func (s *Store) TaskTargetProjects(c context.Context, taskID string) ([]domain.Project, error) {
 	rows, err := s.DB.Query(c, `SELECT DISTINCT p.id,p.name,p.repository_url,p.default_branch,p.local_path,p.last_synced_at,p.last_sync_error,p.created_at,p.updated_at FROM projects p WHERE p.id IN (SELECT project_id FROM task_target_projects WHERE task_id=$1 UNION SELECT m.project_id FROM project_group_members m JOIN task_target_groups g ON g.group_id=m.group_id WHERE g.task_id=$1) ORDER BY p.name`, taskID)
 	if err != nil {
@@ -1779,7 +1794,8 @@ func moveTaskTxWithPolicy(c context.Context, tx pgx.Tx, id, target, source strin
 	// Count a return generation exactly once at the transition that produced
 	// it. Rule claims and multi-target deliveries must not multiply this.
 	qaReturn := qaReviewReturn(currentName, currentPosition, targetType, targetPosition)
-	_, err = tx.Exec(c, `UPDATE tasks SET column_id=$2,completed_at=CASE WHEN $3 THEN now() ELSE NULL END,rework_count=rework_count+(CASE WHEN $4 THEN 1 ELSE 0 END),updated_at=now() WHERE id=$1`, id, target, terminal, qaReturn)
+	incrementRework := explicitReworkTransition(source, qaReturn)
+	_, err = tx.Exec(c, `UPDATE tasks SET column_id=$2,completed_at=CASE WHEN $3 THEN now() ELSE NULL END,rework_count=rework_count+(CASE WHEN $4 THEN 1 ELSE 0 END),updated_at=now() WHERE id=$1`, id, target, terminal, incrementRework)
 	if err != nil {
 		return err
 	}
@@ -1856,13 +1872,13 @@ func moveTaskTxWithPolicy(c context.Context, tx pgx.Tx, id, target, source strin
 		}
 	}
 	_, err = tx.Exec(c, `INSERT INTO automation_events(type,task_id,board_id,payload)
-		VALUES($1,$2,$3,jsonb_build_object('target_column_id',$4::text,'qa_return',$5::boolean,'change_available',$6::boolean,'return_generation',$7::text))`, eventType, id, board, target, qaReturn, changeAvailable, taskTransitionID)
+		VALUES($1,$2,$3,jsonb_build_object('target_column_id',$4::text,'qa_return',$5::boolean,'change_available',$6::boolean,'return_generation',$7::text,'rework_requested',$8::boolean))`, eventType, id, board, target, qaReturn, changeAvailable, taskTransitionID, incrementRework)
 	if err != nil {
 		return err
 	}
-	if qaReturn {
+	if incrementRework {
 		_, err = tx.Exec(c, `INSERT INTO audit_events(kind,resource_type,resource_id,metadata)
-			VALUES('task.rework.incremented','task',$1,jsonb_build_object('reason','explicit_review_return','return_generation',$2::text))`, id, taskTransitionID)
+			VALUES('task.rework.incremented','task',$1,jsonb_build_object('reason','explicit_review_return','return_generation',$2::text,'source',$3::text))`, id, taskTransitionID, source)
 	}
 	return err
 }
@@ -2116,15 +2132,12 @@ func (s *Store) ResolveInteractionAndMove(c context.Context, id, answerer, freef
 	// entered-column event will pick the appropriate specialist exactly once;
 	// creating an additional manual continuation here would race that rule.
 	if target := strings.TrimSpace(targetColumnID); target != "" {
-		if err = moveTaskTx(c, tx, i.TaskID, target, "web"); err != nil {
-			return i, nil, err
-		}
+		moveSource := "web"
 		if qaRework {
-			if _, err = tx.Exec(c, `UPDATE automation_events SET payload=payload || '{"rework_requested":true}'::jsonb
-				WHERE id=(SELECT id FROM automation_events WHERE task_id=$1 AND processed_at IS NULL
-				ORDER BY occurred_at DESC,id DESC LIMIT 1)`, i.TaskID); err != nil {
-				return i, nil, err
-			}
+			moveSource = "qa_rework"
+		}
+		if err = moveTaskTx(c, tx, i.TaskID, target, moveSource); err != nil {
+			return i, nil, err
 		}
 		key := i.DecisionKey
 		if key == "" {

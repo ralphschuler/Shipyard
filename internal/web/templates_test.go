@@ -56,6 +56,45 @@ func TestSecretsTemplatePreservesExistingAgentAssignments(t *testing.T) {
 	}
 }
 
+func TestAgentsTemplateBindsModelEffortAndEscalationToTheAgent(t *testing.T) {
+	page, err := files.ReadFile("templates/agents.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(page)
+	for _, required := range []string{
+		`{{$agent := .}}`,
+		`name="model"`,
+		`{{if eq . $agent.Model}}`,
+		`name="reasoning_effort"`,
+		`{{if eq . $agent.ReasoningEffort}}`,
+		`name="escalation_policy"`,
+		`{{.EscalationPolicy}}`,
+		`CreateModels`,
+		`CreateEfforts`,
+	} {
+		if !strings.Contains(html, required) {
+			t.Fatalf("agents template is missing %q", required)
+		}
+	}
+	if strings.Contains(html, `{{if eq . $.Model}}`) || strings.Contains(html, `{{if eq . $.ReasoningEffort}}`) {
+		t.Fatal("agents template must not bind model/effort to the page root")
+	}
+}
+
+func TestRunTemplateShowsEscalationSelection(t *testing.T) {
+	page, err := files.ReadFile("templates/run.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	html := string(page)
+	for _, required := range []string{"Modell &amp; Eskalation", ".Selection.Model", ".Selection.Effort", ".Selection.Stage", ".Selection.PolicyVersion"} {
+		if !strings.Contains(html, required) {
+			t.Fatalf("run template is missing %q", required)
+		}
+	}
+}
+
 func TestAgentsTemplatePreservesSandboxProfileActiveState(t *testing.T) {
 	page, err := files.ReadFile("templates/agents.html")
 	if err != nil {
