@@ -3506,6 +3506,34 @@ func (s *Store) RunStartSHA(c context.Context, id string) (string, error) {
 	return sha, err
 }
 
+// LatestSucceededDeliveryWorktree returns the newest succeeded Delivery run
+// for a task, including runs that have not been applied. The name predicate
+// must stay aligned with isDeliveryAgent. An empty worktree path is returned
+// as found so Review can ask for a new Delivery instead of falling back to
+// an older checkout or to master.
+func (s *Store) LatestSucceededDeliveryWorktree(c context.Context, taskID, targetProject string) (domain.DeliveryWorktree, bool, error) {
+	var d domain.DeliveryWorktree
+	err := s.DB.QueryRow(c, `SELECT r.id::text, COALESCE(r.worktree_path,''), COALESCE(r.source_workspace,''), COALESCE(r.run_start_sha,''), COALESCE(r.target_project_id::text,'')
+		FROM agent_runs r
+		JOIN agents a ON a.id = r.agent_id
+		WHERE r.task_id = $1
+		  AND r.status = 'succeeded'
+		  AND ($2 = '' OR COALESCE(r.target_project_id::text,'') = $2)
+		  AND (
+		    lower(btrim(a.name)) = 'delivery agent'
+		    OR lower(btrim(a.name)) LIKE 'delivery agent %'
+		  )
+		ORDER BY COALESCE(r.finished_at, r.created_at) DESC, r.created_at DESC, r.id DESC
+		LIMIT 1`, taskID, strings.TrimSpace(targetProject)).Scan(&d.RunID, &d.WorktreePath, &d.SourceWorkspace, &d.StartSHA, &d.TargetProject)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return domain.DeliveryWorktree{}, false, nil
+	}
+	if err != nil {
+		return domain.DeliveryWorktree{}, false, err
+	}
+	return d, true, nil
+}
+
 func (s *Store) SetRunStartSHA(c context.Context, id, sha string) error {
 	_, err := s.DB.Exec(c, "UPDATE agent_runs SET run_start_sha=$2 WHERE id=$1 AND run_start_sha=''", id, sha)
 	return err

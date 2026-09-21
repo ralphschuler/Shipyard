@@ -39,6 +39,12 @@ func TestIsReviewAgentMatchesTriageStylePrefix(t *testing.T) {
 	if isReviewAgent("Delivery Agent") || isReviewAgent("Code review helper") {
 		t.Fatal("non-review names must not use Review self-review semantics")
 	}
+	if !isDeliveryAgent("Delivery Agent") || !isDeliveryAgent("Delivery Agent SEC-06") {
+		t.Fatal("Delivery Agent names must be recognized")
+	}
+	if isDeliveryAgent("Review Agent") || isDeliveryAgent("Delivery helper") {
+		t.Fatal("non-delivery names must not be treated as Delivery")
+	}
 }
 
 func TestRequestedSelfReviewRejectsPassedUnmetCriteriaForDelivery(t *testing.T) {
@@ -146,6 +152,8 @@ func TestReviewAgentPromptRequiresAutomaticRework(t *testing.T) {
 		"dev-id",
 		"Entwicklung",
 		"do not emit a transition to Erledigt",
+		"Delivery worktree already attached",
+		"read-only",
 	} {
 		if !strings.Contains(strings.ToLower(section), strings.ToLower(want)) && !strings.Contains(section, want) {
 			t.Fatalf("review workflow section missing %q: %s", want, section)

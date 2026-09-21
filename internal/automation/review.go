@@ -62,6 +62,7 @@ func reviewAgentWorkflowSection(allowed []domain.Transition, columns []domain.Co
 	var b strings.Builder
 	b.WriteString("\n\n--- REVIEW WORKFLOW (platform rules; they override agent prompt text that forbids automatic rework) ---\n")
 	b.WriteString("You are the Review agent. Do not create a push, merge, or release.\n")
+	b.WriteString("Inspect the Delivery worktree already attached to this run. It is read-only: do not modify files or implement fixes there. Rework is a board transition, not an edit of that tree.\n")
 	b.WriteString("If this review finds defects or unmet acceptance criteria: emit self-review status=failed and exactly one taskboard-transition to the board's rework target. Never leave defective work sitting in Review for a human decision.\n")
 	b.WriteString("If this review passes: emit self-review status=passed. Do not emit a transition to Erledigt or Done; leave the task in Review for human QA unless a SuccessColumn is configured.\n")
 	if route, ok := resolveReworkTransition(allowed, columns, task); ok {
