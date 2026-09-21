@@ -4,6 +4,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -32,5 +33,28 @@ func TestRequireGoToolchainScriptRejectsUnpatchedVersion(t *testing.T) {
 	cmd.Dir = root
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("toolchain self-test failed: %s", out)
+	}
+}
+
+func TestTaskboardDoesNotImportOpenPGP(t *testing.T) {
+	root := repoRoot(t)
+	cmd := exec.Command("go", "list", "-deps", "-e", "-f", "{{.ImportPath}}", "./cmd/taskboard")
+	cmd.Dir = root
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list deps: %v\n%s", err, out)
+	}
+	var argon2 bool
+	for _, path := range strings.Split(string(out), "\n") {
+		path = strings.TrimSpace(path)
+		if path == "golang.org/x/crypto/argon2" {
+			argon2 = true
+		}
+		if strings.Contains(path, "openpgp") {
+			t.Fatalf("taskboard must not import OpenPGP packages; found %s", path)
+		}
+	}
+	if !argon2 {
+		t.Fatal("expected golang.org/x/crypto/argon2 to remain the password-hashing dependency")
 	}
 }

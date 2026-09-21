@@ -96,7 +96,7 @@ func TestReleaseWorkflowPinsArtifactsAndTagToRunSHA(t *testing.T) {
 	for _, required := range []string{
 		"RELEASE_COMMIT: ${{ github.sha }}",
 		"TASKBOARD_COMMIT_SHA: ${{ env.RELEASE_COMMIT }}",
-		"./scripts/build-taskboard.sh",
+		"./scripts/build-release-artifact.sh",
 		"./scripts/publish-github-release.sh",
 		"needs: gate",
 		"RELEASE_APPROVED_REF: refs/heads/master",
@@ -105,8 +105,8 @@ func TestReleaseWorkflowPinsArtifactsAndTagToRunSHA(t *testing.T) {
 			t.Fatalf("release workflow missing %q", required)
 		}
 	}
-	if strings.Count(text, "TASKBOARD_COMMIT_SHA: ${{ env.RELEASE_COMMIT }}") < 2 {
-		t.Fatal("frontend and backend builds must both pin TASKBOARD_COMMIT_SHA to RELEASE_COMMIT")
+	if strings.Contains(text, "./scripts/build-taskboard.sh") {
+		t.Fatal("release workflow must call the shared release-artifact script, not build-taskboard.sh directly")
 	}
 	if strings.Contains(text, "--target master") || strings.Contains(text, "--target ${{ env.RELEASE_APPROVED_BRANCH }}") {
 		t.Fatal("workflow must not create tags at a moving branch HEAD")
@@ -117,6 +117,22 @@ func TestReleaseWorkflowPinsArtifactsAndTagToRunSHA(t *testing.T) {
 	if strings.Contains(text, "TASKBOARD_COMMIT_SHA: ${{ github.sha }}") {
 		t.Fatal("frontend and backend metadata must use the pinned RELEASE_COMMIT")
 	}
+	releaseScript, err := os.ReadFile("build-release-artifact.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseText := string(releaseScript)
+	for _, required := range []string{
+		`GOOS="${GOOS:-linux}"`,
+		`GOARCH="${GOARCH:-amd64}"`,
+		`TASKBOARD_LDFLAGS_EXTRA="${TASKBOARD_LDFLAGS_EXTRA:--s -w}"`,
+		"npm run build",
+		`exec "$script_dir/build-taskboard.sh" "$@"`,
+	} {
+		if !strings.Contains(releaseText, required) {
+			t.Fatalf("build-release-artifact.sh missing %q", required)
+		}
+	}
 	buildScript, err := os.ReadFile("build-taskboard.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -125,10 +141,14 @@ func TestReleaseWorkflowPinsArtifactsAndTagToRunSHA(t *testing.T) {
 	for _, required := range []string{
 		`build_commit="${TASKBOARD_COMMIT_SHA:-$(git rev-parse HEAD)}"`,
 		"-X main.commit=${build_commit}",
+		`"$script_dir/scan-go-artifact.sh" "$output"`,
 	} {
 		if !strings.Contains(buildText, required) {
 			t.Fatalf("build-taskboard.sh missing %q", required)
 		}
+	}
+	if !strings.Contains(buildText, `case "$flag" in`) || !strings.Contains(buildText, "-s|-w") {
+		t.Fatal("build-taskboard.sh must scan before applying -s/-w strip flags")
 	}
 	script, err := os.ReadFile("publish-github-release.sh")
 	if err != nil {

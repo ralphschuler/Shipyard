@@ -42,22 +42,57 @@ build_commit="${TASKBOARD_COMMIT_SHA:-$(git rev-parse HEAD)}"
 build_time="${TASKBOARD_BUILD_TIME:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 go_version="$(shipyard_selected_go_version)"
 
-ldflags="-X main.version=${build_version} -X main.commit=${build_commit} -X main.builtAt=${build_time} -X main.goversion=${go_version}"
+metadata_ldflags="-X main.version=${build_version} -X main.commit=${build_commit} -X main.builtAt=${build_time} -X main.goversion=${go_version}"
+
+# -s/-w strip the symbol table and DWARF govulncheck binary mode needs.
+# Scanning a stripped binary reports unused packages from a present module
+# (GO-2026-5932 openpgp next to argon2) as wildcard symbol hits. Drop those
+# flags for the scanned compile; re-apply them on the shipped artifact.
+scan_extra=""
+for flag in $extra_ldflags; do
+  case "$flag" in
+    -s|-w) ;;
+    *)
+      if [[ -n "$scan_extra" ]]; then
+        scan_extra+=" $flag"
+      else
+        scan_extra="$flag"
+      fi
+      ;;
+  esac
+done
+
+scan_ldflags="$metadata_ldflags"
+if [[ -n "$scan_extra" ]]; then
+  scan_ldflags="${scan_extra} ${metadata_ldflags}"
+fi
+ship_ldflags="$metadata_ldflags"
 if [[ -n "$extra_ldflags" ]]; then
-  ldflags="${extra_ldflags} ${ldflags}"
+  ship_ldflags="${extra_ldflags} ${metadata_ldflags}"
 fi
 
-mkdir -p "$(dirname "$output")"
-timeout "${TASKBOARD_BUILD_TIMEOUT:-120}s" go build -trimpath -ldflags "$ldflags" -o "$output" ./cmd/taskboard
-chmod 0755 "$output"
+build_binary() {
+  local flags="$1"
+  mkdir -p "$(dirname "$output")"
+  timeout "${TASKBOARD_BUILD_TIMEOUT:-120}s" go build -trimpath -ldflags "$flags" -o "$output" ./cmd/taskboard
+  chmod 0755 "$output"
 
-artifact_version="$(shipyard_artifact_go_version "$output")"
-if ! shipyard_go_version_ge "$artifact_version" "$GOTOOLCHAIN_MINIMUM"; then
-  printf 'built artifact embeds %s, which is older than required %s\n' "$artifact_version" "$GOTOOLCHAIN_MINIMUM" >&2
-  exit 1
-fi
-printf 'built %s with %s\n' "$output" "$artifact_version"
+  local artifact_version
+  artifact_version="$(shipyard_artifact_go_version "$output")"
+  if ! shipyard_go_version_ge "$artifact_version" "$GOTOOLCHAIN_MINIMUM"; then
+    printf 'built artifact embeds %s, which is older than required %s\n' "$artifact_version" "$GOTOOLCHAIN_MINIMUM" >&2
+    return 1
+  fi
+  printf 'built %s with %s\n' "$output" "$artifact_version"
+}
 
-if (( scan )); then
+if (( scan )) && [[ "$scan_ldflags" != "$ship_ldflags" ]]; then
+  build_binary "$scan_ldflags"
   "$script_dir/scan-go-artifact.sh" "$output"
+  build_binary "$ship_ldflags"
+else
+  build_binary "$ship_ldflags"
+  if (( scan )); then
+    "$script_dir/scan-go-artifact.sh" "$output"
+  fi
 fi
