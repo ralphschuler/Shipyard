@@ -2135,16 +2135,26 @@ func (s *Store) ResolveInteractionAndMove(c context.Context, id, answerer, freef
 		targetColumnID = qaTarget
 	}
 	qaRework := i.DecisionKey == "qa_release" && qaDecisionIsRework(response)
+	qaApprove := i.DecisionKey == "qa_release" && qaDecisionIsApproved(response)
+	// Approval records the human release decision but deliberately keeps the
+	// task in QA. The distinct Apply action performs repository integration and
+	// only then advances the task to Done. Rework remains an immediate route
+	// back to Development.
+	if qaApprove {
+		targetColumnID = ""
+	}
 	// A selected workflow step hands the task back to the workflow itself. Its
 	// entered-column event will pick the appropriate specialist exactly once;
 	// creating an additional manual continuation here would race that rule.
-	if target := strings.TrimSpace(targetColumnID); target != "" {
+	if target := strings.TrimSpace(targetColumnID); target != "" || qaApprove {
 		moveSource := "web"
 		if qaRework {
 			moveSource = "qa_rework"
 		}
-		if err = moveTaskTx(c, tx, i.TaskID, target, moveSource); err != nil {
-			return i, nil, err
+		if target != "" {
+			if err = moveTaskTx(c, tx, i.TaskID, target, moveSource); err != nil {
+				return i, nil, err
+			}
 		}
 		key := i.DecisionKey
 		if key == "" {
@@ -2301,6 +2311,14 @@ func qaDecisionIsRework(response []byte) bool {
 		return false
 	}
 	return strings.EqualFold(strings.TrimSpace(answers["release_decision"][0]), "rework")
+}
+
+func qaDecisionIsApproved(response []byte) bool {
+	var answers map[string][]string
+	if json.Unmarshal(response, &answers) != nil || len(answers["release_decision"]) != 1 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(answers["release_decision"][0]), "approve")
 }
 
 func resolveQADecisionTarget(key string, response []byte, currentColumnID string, columns []domain.Column, transitions []domain.Transition) (string, error) {
@@ -3580,6 +3598,44 @@ func (s *Store) ReclaimableRunWorktrees(c context.Context, before time.Time, lim
 func (s *Store) MarkRunApplied(c context.Context, id, commitSHA string) (bool, error) {
 	tag, err := s.DB.Exec(c, "UPDATE agent_runs SET accepted_commit_sha=$2,applied_at=now(),summary='Änderungen übernommen' WHERE id=$1 AND applied_at IS NULL AND $2 <> ''", id, commitSHA)
 	return tag.RowsAffected() == 1, err
+}
+
+// HumanQAApproved verifies the current task gate before repository work starts.
+func (s *Store) HumanQAApproved(c context.Context, id string) (bool, error) {
+	var approved bool
+	err := s.DB.QueryRow(c, `SELECT EXISTS (SELECT 1 FROM agent_runs r JOIN tasks t ON t.id=r.task_id JOIN workflow_columns col ON col.id=t.column_id JOIN task_decisions d ON d.task_id=r.task_id WHERE r.id=$1 AND r.applied_at IS NULL AND lower(trim(col.name))='qa' AND d.decision_key='qa_release' AND d.superseded_at IS NULL AND d.response->'release_decision' ? 'approve')`, id).Scan(&approved)
+	return approved, err
+}
+
+// MarkRunAppliedByHumanQA is the atomic Human-QA integration boundary.
+func (s *Store) MarkRunAppliedByHumanQA(c context.Context, id, commitSHA, actor string) (bool, error) {
+	tx, err := s.DB.Begin(c)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(c)
+	var taskID string
+	err = tx.QueryRow(c, `SELECT r.task_id::text FROM agent_runs r JOIN tasks t ON t.id=r.task_id JOIN workflow_columns col ON col.id=t.column_id WHERE r.id=$1 AND r.applied_at IS NULL AND lower(trim(col.name))='qa' AND EXISTS (SELECT 1 FROM task_decisions d WHERE d.task_id=r.task_id AND d.decision_key='qa_release' AND d.superseded_at IS NULL AND d.response->'release_decision' ? 'approve') FOR UPDATE OF r`, id).Scan(&taskID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, errors.New("Run darf erst nach positiver Human-QA in der QA-Spalte übernommen werden")
+		}
+		return false, err
+	}
+	result, err := tx.Exec(c, `UPDATE agent_runs SET accepted_commit_sha=$2,applied_at=now(),summary='Änderungen übernommen' WHERE id=$1 AND applied_at IS NULL AND $2 <> ''`, id, strings.TrimSpace(commitSHA))
+	if err != nil {
+		return false, err
+	}
+	if result.RowsAffected() != 1 {
+		return false, errors.New("Änderungen dieses Runs wurden bereits übernommen")
+	}
+	if err = recordAudit(c, tx, actor, "delivery.applied", "agent_run", id, map[string]string{"run_id": id, "task_id": taskID, "commit_sha": strings.TrimSpace(commitSHA), "qa_decision": "approve"}); err != nil {
+		return false, err
+	}
+	if err = tx.Commit(c); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // UpdateRunAcceptedCommitSHA stores the replacement identity after a clean
