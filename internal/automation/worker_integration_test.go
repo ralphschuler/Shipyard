@@ -2,6 +2,7 @@ package automation
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -145,6 +146,239 @@ func TestProcessRoutesExplicitQAReworkExactlyOnce(t *testing.T) {
 	}
 	if current.ColumnID != development.ID {
 		t.Fatalf("QA rework target = %s, want development %s", current.ColumnID, development.ID)
+	}
+}
+
+func TestProcessMoveTaskQADoneCompletionIsProcessedOnce(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	prepareWorkerWorkspace(t)
+	t.Setenv("SHIPYARD_SECRET_KEY", "integration-release-secret-key")
+	t.Setenv("SHIPYARD_GITHUB_SECRET_ENV", "SHIPYARD_TEST_GITHUB_TOKEN")
+
+	board, err := s.CreateBoardWithTemplate(ctx, "QA done completion", "personal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	source := t.TempDir()
+	project, err := s.CreateProject(ctx, "QA done project "+time.Now().Format("20060102150405.000000000"), "https://github.com/example/release-lifecycle.git", "master", source, []string{board.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask(ctx, board.ID, "QA done completion", "release integration", "high", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "QA done agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CreateRuleWithActions(ctx, "Completion rule", board.ID, "task.completed", integrationColumnByName(t, columns, "Done").ID, agent.ID, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	secret, err := s.CreateSecret(ctx, "", "qa-done-token-"+time.Now().Format("20060102150405000000000"), "integration token", "SHIPYARD_TEST_GITHUB_TOKEN", "github_pat_integration_secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetSecretAgents(ctx, "", secret.ID, []string{agent.ID}); err != nil {
+		t.Fatal(err)
+	}
+	commit := "0123456789abcdef0123456789abcdef01234567"
+	if _, err = s.DB.Exec(ctx, `INSERT INTO agent_runs(task_id,agent_id,status,prompt_snapshot,workspace_snapshot,target_project_id,source_workspace,accepted_commit_sha,applied_at,diff_summary,gate_status)
+		VALUES($1,$2,'succeeded','accepted delivery','managed checkout',$3,$4,$5,now(),'release summary','passed')`, task.ID, agent.ID, project.ID, source, commit); err != nil {
+		t.Fatal(err)
+	}
+	moveAlongWorker(t, s, ctx, task.ID, columns, "Backlog", "In Progress", "Review", "QA")
+	if _, err = s.DB.Exec(ctx, `UPDATE automation_events SET processed_at=now() WHERE task_id=$1 AND processed_at IS NULL`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, integrationColumnByName(t, columns, "Done").ID, "mcp"); err != nil || !moved {
+		t.Fatalf("QA→Done: moved=%t err=%v", moved, err)
+	}
+	eventID, eventType, payload := latestWorkerEvent(t, s, ctx, task.ID)
+	if eventType != "task.completed" {
+		t.Fatalf("MoveTask QA→Done type = %q, want task.completed", eventType)
+	}
+	assertWorkerQualityPayload(t, payload, false, false)
+
+	var requests []release.Request
+	worker := &Worker{
+		Store: s,
+		ReleasePublisher: ReleasePublisherFunc(func(_ context.Context, request release.Request) (release.Result, error) {
+			requests = append(requests, request)
+			return release.Result{PR: release.PullRequest{Number: 42, URL: "https://github.com/example/release-lifecycle/pull/42"}}, nil
+		}),
+		executeRun: func(context.Context, domain.AgentRun) {},
+	}
+	isolateEvent(t, s, ctx, eventID)
+	worker.Process(ctx)
+	if len(requests) != 1 {
+		t.Fatalf("publisher calls after MoveTask QA→Done = %d, want 1", len(requests))
+	}
+	var processedAt *time.Time
+	if err = s.DB.QueryRow(ctx, "SELECT processed_at FROM automation_events WHERE id=$1", eventID).Scan(&processedAt); err != nil {
+		t.Fatal(err)
+	}
+	if processedAt == nil {
+		t.Fatal("MoveTask QA→Done task.completed was acknowledged as a no-op or left pending")
+	}
+	publication, found, err := s.ReleasePublication(ctx, task.ID, project.ID, requests[0].RunID)
+	if err != nil || !found || publication.PRURL != "https://github.com/example/release-lifecycle/pull/42" {
+		t.Fatalf("publication = %#v found=%t err=%v", publication, found, err)
+	}
+	var completionRuns int
+	if err = s.DB.QueryRow(ctx, "SELECT count(*) FROM agent_runs WHERE event_id=$1", eventID).Scan(&completionRuns); err != nil {
+		t.Fatal(err)
+	}
+	if completionRuns != 1 {
+		t.Fatalf("task.completed rules started %d runs, want 1", completionRuns)
+	}
+	worker.Process(ctx)
+	if err = s.DB.QueryRow(ctx, "SELECT count(*) FROM agent_runs WHERE event_id=$1", eventID).Scan(&completionRuns); err != nil {
+		t.Fatal(err)
+	}
+	if len(requests) != 1 || completionRuns != 1 {
+		t.Fatalf("second Process duplicated completion work: publisher=%d runs=%d", len(requests), completionRuns)
+	}
+}
+
+func TestProcessAcceptedReviewToQADoesNotCountRework(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	prepareWorkerWorkspace(t)
+	board, err := s.CreateBoardWithTemplate(ctx, "Accepted review to QA", "personal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	project, err := s.CreateProject(ctx, "Accepted review project "+time.Now().Format("20060102150405.000000000"), "https://example.invalid/review.git", "master", t.TempDir(), []string{board.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask(ctx, board.ID, "Accepted review to QA", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "Accepted review agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	qa := integrationColumnByName(t, columns, "QA")
+	if _, err = s.CreateRuleWithActions(ctx, "QA column rule", board.ID, "task.entered_column", qa.ID, agent.ID, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.DB.Exec(ctx, `INSERT INTO agent_runs(task_id,agent_id,status,prompt_snapshot,workspace_snapshot,target_project_id,source_workspace,accepted_commit_sha,applied_at,gate_status)
+		VALUES($1,$2,'succeeded','accepted delivery','managed checkout',$3,$4,'0123456789abcdef0123456789abcdef01234567',now(),'passed')`, task.ID, agent.ID, project.ID, project.LocalPath); err != nil {
+		t.Fatal(err)
+	}
+	moveAlongWorker(t, s, ctx, task.ID, columns, "Backlog", "In Progress", "Review")
+	if _, err = s.DB.Exec(ctx, `UPDATE automation_events SET processed_at=now() WHERE task_id=$1 AND processed_at IS NULL`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if moved, err := s.MoveTaskToColumnID(ctx, task.ID, qa.ID, "mcp"); err != nil || !moved {
+		t.Fatalf("Review→QA: moved=%t err=%v", moved, err)
+	}
+	eventID, eventType, payload := latestWorkerEvent(t, s, ctx, task.ID)
+	if eventType != "task.entered_column" {
+		t.Fatalf("Review→QA type = %q, want task.entered_column", eventType)
+	}
+	assertWorkerQualityPayload(t, payload, false, false)
+	isolateEvent(t, s, ctx, eventID)
+	worker := &Worker{Store: s, executeRun: func(context.Context, domain.AgentRun) {}}
+	worker.Process(ctx)
+	current, err := s.GetTask(ctx, task.ID)
+	if err != nil || current.ReworkCount != 0 {
+		t.Fatalf("accepted Review→QA rework_count = %d err=%v, want 0", current.ReworkCount, err)
+	}
+}
+
+func TestProcessExplicitRejectionCountsReworkOnceWithMultipleRules(t *testing.T) {
+	s := workerIntegrationStore(t)
+	ctx := context.Background()
+	prepareWorkerWorkspace(t)
+	board, err := s.CreateBoardWithTemplate(ctx, "Rejection once process", "personal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.DeleteBoard(ctx, board.ID) })
+	first, err := s.CreateProject(ctx, "Rejection process A "+time.Now().Format("20060102150405.000000000"), "https://example.invalid/a.git", "master", t.TempDir(), []string{board.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.CreateProject(ctx, "Rejection process B "+time.Now().Format("20060102150405.000000000"), "https://example.invalid/b.git", "master", t.TempDir(), []string{board.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns, err := s.Columns(ctx, board.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := s.CreateTask(ctx, board.ID, "Rejection once process", "test", "normal", "", "", "mcp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetTaskTargets(ctx, task.ID, []string{first.ID, second.ID}, nil); err != nil {
+		t.Fatal(err)
+	}
+	agent, err := s.CreateAgent(ctx, "Rejection process agent "+time.Now().Format("20060102150405.000000000"), "integration", "", "", "", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	development := integrationColumnByName(t, columns, "In Progress")
+	if _, err = s.CreateRuleWithActions(ctx, "Rejection process rule one", board.ID, "task.entered_column", development.ID, agent.ID, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.CreateRuleWithActions(ctx, "Rejection process rule two", board.ID, "task.entered_column", development.ID, agent.ID, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	var runID string
+	if err = s.DB.QueryRow(ctx, `INSERT INTO agent_runs(task_id,agent_id,status,prompt_snapshot,workspace_snapshot,accepted_commit_sha,applied_at,gate_status)
+		VALUES($1,$2,'succeeded','accepted delivery','managed checkout','0123456789abcdef0123456789abcdef01234567',now(),'passed') RETURNING id`, task.ID, agent.ID).Scan(&runID); err != nil {
+		t.Fatal(err)
+	}
+	moveAlongWorker(t, s, ctx, task.ID, columns, "Backlog", "In Progress", "Review", "QA")
+	if _, err = s.DB.Exec(ctx, `UPDATE automation_events SET processed_at=now() WHERE task_id=$1 AND processed_at IS NULL`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	interaction, err := s.CreateInteraction(ctx, task.ID, agent.ID, runID, "qa_release", "process-qa-rework", "Freigabe für QA", "QA entscheidet", []byte(`{"fields":[{"id":"release_decision","type":"buttons"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = s.ResolveInteractionAndMove(ctx, interaction.ID, "qa", "Ablehnungsgrund", []byte(`{"release_decision":["rework"]}`), ""); err != nil {
+		t.Fatal(err)
+	}
+	eventID, eventType, payload := latestWorkerEvent(t, s, ctx, task.ID)
+	if eventType != "task.entered_column" {
+		t.Fatalf("rejection type = %q, want task.entered_column", eventType)
+	}
+	assertWorkerQualityPayload(t, payload, true, true)
+	isolateEvent(t, s, ctx, eventID)
+	worker := &Worker{Store: s, executeRun: func(context.Context, domain.AgentRun) {}}
+	worker.Process(ctx)
+	current, err := s.GetTask(ctx, task.ID)
+	if err != nil || current.ReworkCount != 1 {
+		t.Fatalf("explicit rejection rework_count = %d err=%v, want 1", current.ReworkCount, err)
+	}
+	var delivery int
+	if err = s.DB.QueryRow(ctx, "SELECT count(*) FROM agent_runs WHERE event_id=$1", eventID).Scan(&delivery); err != nil {
+		t.Fatal(err)
+	}
+	if delivery < 2 {
+		t.Fatalf("parallel rejection delivery runs = %d, want at least 2", delivery)
+	}
+	worker.Process(ctx)
+	current, err = s.GetTask(ctx, task.ID)
+	if err != nil || current.ReworkCount != 1 {
+		t.Fatalf("rework_count after second Process = %d err=%v, want 1", current.ReworkCount, err)
 	}
 }
 
@@ -998,6 +1232,57 @@ func waitForWorkerCondition(t *testing.T, worker *Worker, condition func() bool)
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("worker condition was not reached within 10 seconds")
+}
+
+func prepareWorkerWorkspace(t *testing.T) {
+	t.Helper()
+	root := t.TempDir()
+	t.Setenv("TASKBOARD_WORKSPACE_ROOT", root)
+	if err := os.WriteFile(filepath.Join(root, ".shipyard-workspace"), []byte("shipyard workspace\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func moveAlongWorker(t *testing.T, s *store.Store, ctx context.Context, taskID string, columns []domain.Column, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		column := integrationColumnByName(t, columns, name)
+		if moved, err := s.MoveTaskToColumnID(ctx, taskID, column.ID, "mcp"); err != nil || !moved {
+			t.Fatalf("move to %s: moved=%t err=%v", name, moved, err)
+		}
+	}
+}
+
+func latestWorkerEvent(t *testing.T, s *store.Store, ctx context.Context, taskID string) (string, string, []byte) {
+	t.Helper()
+	var eventID, eventType string
+	var payload []byte
+	if err := s.DB.QueryRow(ctx, `SELECT id,type,payload FROM automation_events WHERE task_id=$1 ORDER BY occurred_at DESC,id DESC LIMIT 1`, taskID).Scan(&eventID, &eventType, &payload); err != nil {
+		t.Fatal(err)
+	}
+	return eventID, eventType, payload
+}
+
+func isolateEvent(t *testing.T, s *store.Store, ctx context.Context, eventID string) {
+	t.Helper()
+	if _, err := s.DB.Exec(ctx, `UPDATE automation_events SET processed_at=now() WHERE processed_at IS NULL AND id<>$1`, eventID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertWorkerQualityPayload(t *testing.T, payload []byte, wantReturn, wantChange bool) {
+	t.Helper()
+	var value struct {
+		QAReturn         bool   `json:"qa_return"`
+		ChangeAvailable  bool   `json:"change_available"`
+		ReturnGeneration string `json:"return_generation"`
+	}
+	if err := json.Unmarshal(payload, &value); err != nil {
+		t.Fatal(err)
+	}
+	if value.QAReturn != wantReturn || value.ChangeAvailable != wantChange || value.ReturnGeneration == "" {
+		t.Fatalf("quality payload = %#v, want qa_return=%t change_available=%t and a generation", value, wantReturn, wantChange)
+	}
 }
 
 func integrationColumnByName(t *testing.T, columns []domain.Column, name string) domain.Column {

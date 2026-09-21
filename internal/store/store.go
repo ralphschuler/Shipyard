@@ -856,6 +856,26 @@ func boardInheritanceEligibleColumn(name string) bool {
 		return false
 	}
 }
+
+func qaReviewColumn(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "qa", "review":
+		return true
+	default:
+		return false
+	}
+}
+
+// qaReviewReturn is true only when work is sent backward out of a QA/Review
+// gate. Forward quality-chain steps (Review→QA) and completions (QA→Done,
+// Review→Erledigt) must not be tagged as returns: they are not rework and
+// must not be swallowed by the worker's return no-op filter.
+func qaReviewReturn(currentName string, currentPosition int, targetType string, targetPosition int) bool {
+	if !qaReviewColumn(currentName) || strings.EqualFold(strings.TrimSpace(targetType), "done") {
+		return false
+	}
+	return targetPosition < currentPosition
+}
 func (s *Store) TaskTargetProjects(c context.Context, taskID string) ([]domain.Project, error) {
 	rows, err := s.DB.Query(c, `SELECT DISTINCT p.id,p.name,p.repository_url,p.default_branch,p.local_path,p.last_synced_at,p.last_sync_error,p.created_at,p.updated_at FROM projects p WHERE p.id IN (SELECT project_id FROM task_target_projects WHERE task_id=$1 UNION SELECT m.project_id FROM project_group_members m JOIN task_target_groups g ON g.group_id=m.group_id WHERE g.task_id=$1) ORDER BY p.name`, taskID)
 	if err != nil {
@@ -1735,8 +1755,9 @@ func moveTaskTx(c context.Context, tx pgx.Tx, id, target, source string) error {
 // and therefore remain governed by the board's explicit graph.
 func moveTaskTxWithPolicy(c context.Context, tx pgx.Tx, id, target, source string, allowImplicit bool) error {
 	var current, board, currentName, targetName, transition string
-	err := tx.QueryRow(c, `SELECT t.column_id,t.board_id,c.name
-		FROM tasks t JOIN workflow_columns c ON c.id=t.column_id WHERE t.id=$1 FOR UPDATE`, id).Scan(&current, &board, &currentName)
+	var currentPosition int
+	err := tx.QueryRow(c, `SELECT t.column_id,t.board_id,c.name,c.position
+		FROM tasks t JOIN workflow_columns c ON c.id=t.column_id WHERE t.id=$1 FOR UPDATE`, id).Scan(&current, &board, &currentName, &currentPosition)
 	if err != nil {
 		return err
 	}
@@ -1749,12 +1770,16 @@ func moveTaskTxWithPolicy(c context.Context, tx pgx.Tx, id, target, source strin
 	}
 	var terminal bool
 	var targetType string
-	err = tx.QueryRow(c, "SELECT name,column_type FROM workflow_columns WHERE id=$1 AND board_id=$2", target, board).Scan(&targetName, &targetType)
+	var targetPosition int
+	err = tx.QueryRow(c, "SELECT name,column_type,position FROM workflow_columns WHERE id=$1 AND board_id=$2", target, board).Scan(&targetName, &targetType, &targetPosition)
 	if err != nil {
 		return err
 	}
 	terminal = targetType == "done"
-	_, err = tx.Exec(c, "UPDATE tasks SET column_id=$2,completed_at=CASE WHEN $3 THEN now() ELSE NULL END,updated_at=now() WHERE id=$1", id, target, terminal)
+	// Count a return generation exactly once at the transition that produced
+	// it. Rule claims and multi-target deliveries must not multiply this.
+	qaReturn := qaReviewReturn(currentName, currentPosition, targetType, targetPosition)
+	_, err = tx.Exec(c, `UPDATE tasks SET column_id=$2,completed_at=CASE WHEN $3 THEN now() ELSE NULL END,rework_count=rework_count+(CASE WHEN $4 THEN 1 ELSE 0 END),updated_at=now() WHERE id=$1`, id, target, terminal, qaReturn)
 	if err != nil {
 		return err
 	}
@@ -1803,13 +1828,14 @@ func moveTaskTxWithPolicy(c context.Context, tx pgx.Tx, id, target, source strin
 	// A QA/review return is only automation-eligible when a previous delivery
 	// really changed the repository and was applied. This flag is written in
 	// the same transaction as the transition, making concurrent/replayed
-	// deliveries deterministic and preventing no-op return loops.
+	// deliveries deterministic and preventing no-op return loops. Forward
+	// exits from Review/QA (Review→QA, QA→Done) are not returns.
 	changeAvailable := false
-	returnColumn := strings.EqualFold(strings.TrimSpace(currentName), "qa") || strings.EqualFold(strings.TrimSpace(currentName), "review")
-	if returnColumn && targetType != "done" {
+	if qaReturn {
 		// Bind the evidence to this concrete return generation. A task-wide
 		// EXISTS check would let an old applied run resurrect later unchanged
-		// QA/review returns indefinitely.
+		// QA/review returns indefinitely. Previous forward quality-chain
+		// steps must not look like return generations either.
 		err = tx.QueryRow(c, `SELECT EXISTS(
 			SELECT 1 FROM agent_runs r
 			WHERE r.task_id=$1 AND r.applied_at IS NOT NULL
@@ -1822,6 +1848,7 @@ func moveTaskTxWithPolicy(c context.Context, tx pgx.Tx, id, target, source strin
 				  AND previous.id<>$2
 				  AND lower(trim(previous_from.name)) IN ('qa','review')
 				  AND previous_to.column_type<>'done'
+				  AND previous_from.position > previous_to.position
 			  ), '-infinity'::timestamptz)
 		)`, id, taskTransitionID).Scan(&changeAvailable)
 		if err != nil {
@@ -1829,7 +1856,14 @@ func moveTaskTxWithPolicy(c context.Context, tx pgx.Tx, id, target, source strin
 		}
 	}
 	_, err = tx.Exec(c, `INSERT INTO automation_events(type,task_id,board_id,payload)
-		VALUES($1,$2,$3,jsonb_build_object('target_column_id',$4::text,'qa_return',$5::boolean,'change_available',$6::boolean,'return_generation',$7::text))`, eventType, id, board, target, returnColumn, changeAvailable, taskTransitionID)
+		VALUES($1,$2,$3,jsonb_build_object('target_column_id',$4::text,'qa_return',$5::boolean,'change_available',$6::boolean,'return_generation',$7::text))`, eventType, id, board, target, qaReturn, changeAvailable, taskTransitionID)
+	if err != nil {
+		return err
+	}
+	if qaReturn {
+		_, err = tx.Exec(c, `INSERT INTO audit_events(kind,resource_type,resource_id,metadata)
+			VALUES('task.rework.incremented','task',$1,jsonb_build_object('reason','explicit_review_return','return_generation',$2::text))`, id, taskTransitionID)
+	}
 	return err
 }
 
@@ -3755,15 +3789,6 @@ func (s *Store) CreateRunsForEvent(c context.Context, event domain.AutomationEve
 	if e != nil {
 		return nil, e
 	}
-	if qaReturn, changeAvailable := reviewReturn(event.Payload); qaReturn && changeAvailable {
-		if _, e = tx.Exec(c, "UPDATE tasks SET rework_count=rework_count+1,updated_at=now() WHERE id=$1", event.TaskID); e != nil {
-			return nil, e
-		}
-		if _, e = tx.Exec(c, `INSERT INTO audit_events(kind,resource_type,resource_id,metadata)
-			VALUES('task.rework.incremented','task',$1,jsonb_build_object('reason','explicit_review_return','event_id',$2::text))`, event.TaskID, event.ID); e != nil {
-			return nil, e
-		}
-	}
 	var cooldown int
 	if e = tx.QueryRow(c, "SELECT cooldown_minutes FROM automation_rules WHERE id=$1", rule.ID).Scan(&cooldown); e != nil {
 		return nil, e
@@ -3826,17 +3851,6 @@ func canonicalAutomationPayloadValue(raw json.RawMessage) any {
 		return map[string]any{}
 	}
 	return canonicalAutomationPayload(value)
-}
-
-func reviewReturn(raw json.RawMessage) (qaReturn, changeAvailable bool) {
-	var payload struct {
-		QAReturn        bool `json:"qa_return"`
-		ChangeAvailable bool `json:"change_available"`
-	}
-	if json.Unmarshal(raw, &payload) != nil {
-		return false, false
-	}
-	return payload.QAReturn, payload.ChangeAvailable
 }
 
 func (s *Store) MarkEventProcessed(c context.Context, id string) error {
