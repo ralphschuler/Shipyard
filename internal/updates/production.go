@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -42,6 +43,11 @@ type productionAdapter struct {
 	buildInfoURL string
 	appURL       string
 	writeMu      sync.Mutex
+	pending      *restartHandoff
+}
+
+type restartHandoff struct {
+	version, commit, previousVersion, previousCommit string
 }
 
 // NewProductionOrchestrator wires the explicit host adapter used by the
@@ -71,13 +77,15 @@ func NewProductionOrchestrator(s *store.Store) *Orchestrator {
 		Verify:            p.verify,
 		Migrate:           p.migrate,
 		Switch:            p.switchBinary,
-		// Restart validates and synchronously monitors the supervisor handoff.
-		// A successful install is never reported while the old process is still
-		// serving or before the candidate bundle has been verified.
+		// Restart only validates the candidate bundle. The supervisor monitor
+		// is started from AfterSuccess after the install HTTP response is
+		// flushed; waiting for it here deadlocks the old process with the
+		// monitor that is waiting for this process to exit.
 		Restart:               p.restart,
 		Health:                p.health,
 		RestartVerifiesHealth: true,
 		Rollback:              p.rollback,
+		AfterSuccess:          p.startRestartMonitor,
 	}
 }
 
@@ -89,8 +97,9 @@ func envOr(key, fallback string) string {
 }
 
 func (p *productionAdapter) backup(ctx context.Context, _ Snapshot) error {
-	if info, err := os.Stat(p.backupScript); err != nil || info.Mode()&0111 == 0 {
-		return errors.New("backup adapter is unavailable")
+	info, err := os.Stat(p.backupScript)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&0111 == 0 {
+		return ErrBackupUnavailable
 	}
 	cmd := exec.CommandContext(ctx, p.backupScript)
 	cmd.Env = append(os.Environ(), "DATABASE_URL="+p.databaseURL, "TASKBOARD_BACKUP_DIR="+p.backupDir)
@@ -182,29 +191,59 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 }
 
 func (p *productionAdapter) restart(ctx context.Context, snapshot Snapshot) error {
-	// The current process still owns the HTTP socket, so stopping it here would
-	// truncate the update response. Execute the newly installed binary in its
-	// isolated validation mode instead; this verifies the exact bundle that the
-	// supervisor will start, including its embedded app and build metadata.
+	// Validate the newly installed binary in isolation before reporting install
+	// success. The current process still owns the HTTP socket, so the
+	// supervisor handoff must wait until the handler has flushed that
+	// response: the monitor waits for this process to exit.
 	cmd := exec.CommandContext(ctx, p.binary, "--validate-embedded-app", snapshot.Release.Version, snapshot.Release.Commit)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
 	if err := cmd.Run(); err != nil {
 		return errors.New("new release failed embedded app validation")
 	}
+	p.writeMu.Lock()
+	p.pending = &restartHandoff{
+		version:         snapshot.Release.Version,
+		commit:          snapshot.Release.Commit,
+		previousVersion: snapshot.Current.Version,
+		previousCommit:  snapshot.Current.Commit,
+	}
+	p.writeMu.Unlock()
+	return nil
+}
+
+func (p *productionAdapter) startRestartMonitor() {
+	p.writeMu.Lock()
+	handoff := p.pending
+	p.pending = nil
+	p.writeMu.Unlock()
+	if handoff == nil {
+		return
+	}
+	if err := p.spawnRestartMonitor(*handoff); err != nil {
+		log.Printf("update restart monitor could not start: %v", err)
+		if rollbackErr := p.rollback(context.Background(), Snapshot{}); rollbackErr != nil {
+			log.Printf("update rollback after monitor start failure: %v", rollbackErr)
+		}
+	}
+}
+
+func (p *productionAdapter) spawnRestartMonitor(handoff restartHandoff) error {
 	// The monitor asks the stable supervisor runner to replace the old child,
 	// waits for the old process to disappear, verifies the complete candidate
-	// bundle, and restores the previous binary on failure. Run it synchronously:
-	// returning from Restart before this result would report a false success.
+	// bundle, and restores the previous binary on failure. Start it detached
+	// and do not wait: waiting would deadlock the HTTP install handler.
 	healthURL := envOr(p.healthURL, productionHealthURL)
 	buildInfoURL := envOr(p.buildInfoURL, "http://127.0.0.1:8080/app/build-info.json")
 	appURL := envOr(p.appURL, "http://127.0.0.1:8080/app/")
-	monitor := exec.Command(p.binary, "--monitor-restart", healthURL, buildInfoURL, appURL, p.binary, p.previous, snapshot.Release.Version, snapshot.Release.Commit, snapshot.Current.Version, snapshot.Current.Commit)
+	monitor := exec.Command(p.binary, "--monitor-restart", healthURL, buildInfoURL, appURL, p.binary, p.previous, handoff.version, handoff.commit, handoff.previousVersion, handoff.previousCommit)
 	monitor.Stdout = io.Discard
 	monitor.Stderr = io.Discard
-	if err := monitor.Run(); err != nil {
-		return errors.New("new release restart monitor failed")
+	monitor.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := monitor.Start(); err != nil {
+		return err
 	}
+	go func() { _ = monitor.Wait() }()
 	return nil
 }
 
@@ -237,6 +276,7 @@ type restartMonitorConfig struct {
 	terminate       func(context.Context) error
 	poll            time.Duration
 	wait            time.Duration
+	handoffDelay    time.Duration
 	client          *http.Client
 	restart         func(context.Context) error
 	start           func(context.Context) error
@@ -259,6 +299,7 @@ func RunRestartMonitor(healthURL, buildInfoURL, appURL, binary, previous, versio
 		terminate:       func(context.Context) error { return terminateRunningBundle(binary) },
 		poll:            250 * time.Millisecond,
 		wait:            30 * time.Second,
+		handoffDelay:    250 * time.Millisecond,
 		restart:         requestSupervisorRestart,
 		start:           requestSupervisorRestart,
 	})
@@ -316,6 +357,17 @@ func monitorRestart(ctx context.Context, cfg restartMonitorConfig) error {
 	cfg.client = client
 	deadline := time.NewTimer(cfg.wait)
 	defer deadline.Stop()
+	if cfg.handoffDelay > 0 {
+		// Give the parent time to finish the install HTTP response before this
+		// process asks the supervisor to replace it.
+		timer := time.NewTimer(cfg.handoffDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return rollbackAfterRestartError(cfg, ctx.Err())
+		case <-timer.C:
+		}
+	}
 	if err := cfg.start(ctx); err != nil {
 		return rollbackAfterRestartError(cfg, fmt.Errorf("request supervisor restart: %w", err))
 	}
