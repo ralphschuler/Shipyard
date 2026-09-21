@@ -105,7 +105,7 @@ func TestReleaseWorkflowPinsArtifactsAndTagToRunSHA(t *testing.T) {
 			t.Fatalf("release workflow missing %q", required)
 		}
 	}
-	if strings.Contains(text, "--target master") {
+	if strings.Contains(text, "--target master") || strings.Contains(text, "--target ${{ env.RELEASE_APPROVED_BRANCH }}") {
 		t.Fatal("workflow must not create tags at a moving branch HEAD")
 	}
 	if strings.Contains(text, "-X main.commit=${GITHUB_SHA}") {

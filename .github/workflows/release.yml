@@ -18,8 +18,8 @@ env:
   # unique semver patch release and is stable across workflow retries.
   RELEASE_VERSION: v0.1.${{ github.run_number }}
   # Pin every artifact and the published tag to the commit this run checked
-  # out. github.sha is immutable for the run; a later merge of master cannot
-  # retarget the tag the way --target master would.
+  # out. github.sha is immutable for the run; a later merge of the approved
+  # branch cannot retarget the tag.
   RELEASE_COMMIT: ${{ github.sha }}
   RELEASE_APPROVED_REF: refs/heads/master
   RELEASE_APPROVED_BRANCH: master
