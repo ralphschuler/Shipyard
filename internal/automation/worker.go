@@ -3824,6 +3824,11 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 		defer session.Close()
 		command, args = session.Command, session.Args
 		_ = w.Store.AddRunLog(ctx, run.ID, "info", session.IsolationLog)
+		if session.HostAuthLog != "" {
+			_ = w.Store.AddRunLog(ctx, run.ID, "info", session.HostAuthLog)
+		} else if len(secretValues) == 0 {
+			_ = w.Store.AddRunLog(ctx, run.ID, "warning", hostCLIAuthMissingWarning)
+		}
 		if session.ModelAPIProxy {
 			_ = w.Store.AddRunLog(ctx, run.ID, "info", "Modell-API-Netzwerk: Allowlist-Proxy; Tool-/Projektnetzwerk isoliert")
 		}

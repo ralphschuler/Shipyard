@@ -28,6 +28,7 @@ type sandboxExec struct {
 	Worktree      string
 	Policy        sandbox.Profile
 	Layout        sandboxLayout
+	Provider      string
 	Command       string
 	Args          []string
 	ShellCommand  string
@@ -37,6 +38,7 @@ type sandboxExec struct {
 	RelayScript   string
 	RelaySocket   string
 	RelayPython   string
+	HostCLIAuth   *hostCLIAuthPlan
 }
 
 type cliSandboxRequest struct {
@@ -49,11 +51,13 @@ type cliSandboxRequest struct {
 }
 
 type cliSandbox struct {
-	Command       string
-	Args          []string
-	ModelAPIProxy bool
-	IsolationLog  string
-	closeFns      []func() error
+	Command         string
+	Args            []string
+	ModelAPIProxy   bool
+	IsolationLog    string
+	HostAuthLog     string
+	HostAuthMounted []string
+	closeFns        []func() error
 }
 
 func (s *cliSandbox) Close() error {
@@ -144,14 +148,21 @@ func buildSandboxArgs(spec sandboxExec) ([]string, error) {
 	dest := "/workspace"
 	home := "/workspace"
 	path := "/usr/bin:/bin"
+	auth := hostCLIAuthPlan{}
 	if spec.Layout == sandboxLayoutCLI {
 		dest = abs
-		home = "/tmp/shipyard-home"
+		home = sandboxCLIHome
 		path = "/usr/bin:/bin:/usr/local/bin"
 		if spec.ExtraPATH != "" {
 			path = spec.ExtraPATH + ":" + path
 		}
 		args = append(args, "--tmpfs", home)
+		if spec.HostCLIAuth != nil {
+			auth = *spec.HostCLIAuth
+		} else {
+			auth = resolveHostCLIAuth(spec.Provider, abs)
+		}
+		args = auth.appendDirArgs(args)
 	}
 	args = append(args, sandboxWorktreeBind(abs, spec.Policy, dest)...)
 	for _, extra := range spec.ExtraROBinds {
@@ -183,6 +194,7 @@ func buildSandboxArgs(spec sandboxExec) ([]string, error) {
 	if spec.RelayScript != "" {
 		args = append(args, "--ro-bind", spec.RelayScript, "/tmp/shipyard-model-api-relay.py")
 	}
+	args = auth.appendBindArgs(args)
 	args = append(args,
 		"--setenv", "HOME", home,
 		"--setenv", "PATH", path,
@@ -190,6 +202,7 @@ func buildSandboxArgs(spec sandboxExec) ([]string, error) {
 		"--setenv", "XDG_CONFIG_HOME", filepath.Join(home, ".config"),
 		"--setenv", "XDG_CACHE_HOME", filepath.Join(home, ".cache"),
 	)
+	args = auth.appendEnvArgs(args)
 	if spec.RelaySocket != "" {
 		args = append(args, "--setenv", "SHIPYARD_MODEL_API_SOCKET", "/tmp/shipyard-model-api.sock")
 	}
@@ -292,16 +305,24 @@ func startCLISandbox(ctx context.Context, req cliSandboxRequest) (*cliSandbox, e
 	if err != nil {
 		return nil, err
 	}
-	session := &cliSandbox{Command: "bwrap", IsolationLog: sandboxIsolationSummary(req.Policy)}
+	auth := resolveHostCLIAuth(req.Provider.Provider, req.Worktree)
+	session := &cliSandbox{
+		Command:         "bwrap",
+		IsolationLog:    sandboxIsolationSummary(req.Policy),
+		HostAuthLog:     auth.infoLog(),
+		HostAuthMounted: append([]string(nil), auth.Names...),
+	}
 	spec := sandboxExec{
 		Worktree:      req.Worktree,
 		Policy:        req.Policy,
 		Layout:        sandboxLayoutCLI,
+		Provider:      req.Provider.Provider,
 		Command:       command,
 		Args:          req.Args,
 		ExtraWritable: req.ExtraWritable,
 		ExtraROBinds:  extraBinds,
 		ExtraPATH:     extraPath,
+		HostCLIAuth:   &auth,
 	}
 	if req.Policy.NetworkMode == "none" {
 		python, err := exec.LookPath("python3")
