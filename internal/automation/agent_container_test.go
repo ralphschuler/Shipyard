@@ -609,10 +609,9 @@ func TestContainerMountsClaudeLoginFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	assertMount(t, provider.specs[0].Mounts, cred, true)
-	assertMount(t, provider.specs[0].Mounts, dot, true)
-	assertMountTarget(t, provider.specs[0].Mounts, cred, filepath.Join(containerAgentHome, ".claude", ".credentials.json"))
-	assertMountTarget(t, provider.specs[0].Mounts, dot, filepath.Join(containerAgentHome, ".claude.json"))
+	assertContainerHomeMount(t, provider.specs[0].Mounts)
+	assertContainerHomeFile(t, provider.specs[0].Mounts, filepath.Join(containerAgentHome, ".claude", ".credentials.json"))
+	assertContainerHomeFile(t, provider.specs[0].Mounts, filepath.Join(containerAgentHome, ".claude.json"))
 	for _, mount := range provider.specs[0].Mounts {
 		if mount.Source == claudeDir || strings.HasSuffix(mount.Source, "sessions.json") {
 			t.Fatalf("claude home or session file was mounted: %+v", mount)
@@ -918,7 +917,7 @@ func TestAgentHomeIsRecreatedImmediatelyBeforeCreate(t *testing.T) {
 	if err != nil || !info.IsDir() {
 		t.Fatalf("agent home was not recreated before create: %v", err)
 	}
-	if info.Mode().Perm() != 0o700 {
+	if info.Mode().Perm() != 0o755 {
 		t.Fatalf("agent home mode = %o", info.Mode().Perm())
 	}
 	for _, dir := range []string{".config", ".cache", ".codex"} {
