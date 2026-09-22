@@ -154,6 +154,16 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 	if err := prepareContainerMountAccess(worktree, req.Policy.WriteMode == "worktree"); err != nil {
 		return nil, fmt.Errorf("Run-Worktree konnte nicht für den Container-Agenten vorbereitet werden: %w", err)
 	}
+	// A linked Git worktree keeps its administrative files in the managed
+	// project's common .git directory. That directory is mounted read-only for
+	// the container so Git can resolve the worktree pointer, but rootless
+	// Docker maps the agent user to a subordinate host UID. Shipyard's private
+	// umask would otherwise make the already-approved read-only mount
+	// untraversable. Expose only the Git metadata selected by
+	// gitSandboxROBinds; never the project checkout itself.
+	if err := prepareContainerGitMetadataAccess(worktree); err != nil {
+		return nil, fmt.Errorf("Git-Metadaten des Run-Worktrees konnten nicht für den Container vorbereitet werden: %w", err)
+	}
 	for _, writable := range req.ExtraWritable {
 		if err := prepareContainerMountAccess(writable, true); err != nil {
 			return nil, fmt.Errorf("Container-Ergebnisverzeichnis konnte nicht vorbereitet werden: %w", err)
@@ -221,7 +231,7 @@ func startAgentContainer(ctx context.Context, req agentContainerRequest) (_ *age
 	if err := requireDurableBind(homeHost); err != nil {
 		return nil, err
 	}
-	hostMounts, hostEnv := cliSandboxHostMounts(worktree)
+	hostMounts, hostEnv := containerCLIHostMounts(worktree)
 	var relaySocket, relayScript string
 	if req.Policy.NetworkMode == "none" {
 		proxy, proxyErr := startModelAPIProxyIn(bindRoot, modelAPIAllowlist(req.Provider))
@@ -444,6 +454,84 @@ func prepareContainerMountAccess(path string, writable bool) error {
 	})
 }
 
+// prepareContainerGitMetadataAccess makes only the read-only Git metadata
+// required by a linked worktree traversable inside a rootless run container.
+// The metadata paths are supplied by gitSandboxROBinds, which deliberately
+// excludes the managed project checkout. Unlike the run worktree, these
+// mounts remain read-only in the container.
+func prepareContainerGitMetadataAccess(worktree string) error {
+	gitBinds, _ := gitSandboxROBinds(worktree)
+	for _, path := range gitBinds {
+		if err := prepareContainerReadableTree(path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func prepareContainerReadableTree(path string) error {
+	root, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	root = filepath.Clean(root)
+	info, err := os.Stat(root)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s ist kein Verzeichnis", root)
+	}
+	return filepath.WalkDir(root, func(current string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if entry.IsDir() {
+			return os.Chmod(current, 0o755)
+		}
+		if !entry.Type().IsRegular() {
+			return nil
+		}
+		fileInfo, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		mode := os.FileMode(0o644)
+		if fileInfo.Mode().Perm()&0o111 != 0 {
+			mode |= 0o111
+		}
+		return os.Chmod(current, mode)
+	})
+}
+
+// containerCLIHostMounts intentionally does not propagate the service's Go
+// module cache to the container. The host cache is a read-only bind and Go
+// must create extracted modules and lock files there. A run receives its own
+// writable cache below the disposable container home instead.
+func containerCLIHostMounts(worktree string) ([]string, []sandboxEnvVar) {
+	mounts, env := cliSandboxHostMounts(worktree)
+	cache, hasCache := goModuleCacheDir()
+	if !hasCache {
+		return mounts, nil
+	}
+	filteredMounts := mounts[:0]
+	for _, mount := range mounts {
+		if filepath.Clean(mount) != filepath.Clean(cache) {
+			filteredMounts = append(filteredMounts, mount)
+		}
+	}
+	filteredEnv := env[:0]
+	for _, entry := range env {
+		if entry.Key != "GOMODCACHE" && entry.Key != "GOTOOLCHAIN" {
+			filteredEnv = append(filteredEnv, entry)
+		}
+	}
+	return filteredMounts, filteredEnv
+}
+
 func withCodexManagedWorktreeTrust(args []string) []string {
 	for _, arg := range args {
 		if arg == "--skip-git-repo-check" {
@@ -565,6 +653,17 @@ func ensureAgentHomeLayout(homeHost string, auth hostCLIAuthPlan) error {
 	}
 	if err := os.Chmod(filepath.Join(homeHost, ".cache"), 0o777); err != nil {
 		return err
+	}
+	for _, dir := range []string{
+		filepath.Join(homeHost, ".cache", "go-mod"),
+		filepath.Join(homeHost, ".cache", "go-build"),
+	} {
+		if err := os.MkdirAll(dir, 0o777); err != nil {
+			return err
+		}
+		if err := os.Chmod(dir, 0o777); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1070,6 +1169,12 @@ func containerCreateEnv(auth hostCLIAuthPlan) []container.Env {
 		{Key: "LC_ALL", Value: "C.UTF-8"},
 		{Key: "XDG_CONFIG_HOME", Value: filepath.Join(containerAgentHome, ".config")},
 		{Key: "XDG_CACHE_HOME", Value: filepath.Join(containerAgentHome, ".cache")},
+		// The service-level Go cache is intentionally not shared with a
+		// rootless container: it is mounted read-only and Go needs to unpack
+		// modules and create lock files. Keep both caches in the disposable,
+		// writable agent home for deterministic container tests.
+		{Key: "GOMODCACHE", Value: filepath.Join(containerAgentHome, ".cache", "go-mod")},
+		{Key: "GOCACHE", Value: filepath.Join(containerAgentHome, ".cache", "go-build")},
 		{Key: "GOTOOLCHAIN", Value: "local"},
 		{Key: "NO_COLOR", Value: "1"},
 		{Key: "TERM", Value: "dumb"},
