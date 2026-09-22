@@ -132,7 +132,11 @@ func estimateUsageCost(report *domain.UsageReport, price domain.UsagePrice) bool
 	return true
 }
 
-const agentRunTimeout = 20 * time.Minute
+// defaultAgentRunTimeout covers the complete Delivery/Review process,
+// including a cold Dev-Container build and project test suite. Twenty minutes
+// caused otherwise healthy delivery runs to be cancelled before they could
+// finish.
+const defaultAgentRunTimeout = time.Hour
 const defaultMaxAutomationEventAttempts = 3
 const maxWebhookDeliveryAttempts = 5
 const worktreeRetention = 7 * 24 * time.Hour
@@ -144,6 +148,22 @@ const tmuxSocket = "taskboard"
 const defaultRunLogsDir = "/home/agent/.taskboard-run-logs"
 
 const repositoryApplyLockName = "taskboard-apply.lock"
+
+// agentRunTimeout accepts a Go duration (for example "45m" or "2h") from
+// TASKBOARD_AGENT_RUN_TIMEOUT. Invalid, zero and negative values deliberately
+// fall back to the safe one-hour default, so a typo cannot make all workers
+// fail immediately or run without a deadline.
+func agentRunTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("TASKBOARD_AGENT_RUN_TIMEOUT"))
+	if raw == "" {
+		return defaultAgentRunTimeout
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil || value <= 0 {
+		return defaultAgentRunTimeout
+	}
+	return value
+}
 
 func (w *Worker) tmuxServerName() string {
 	if w != nil && strings.TrimSpace(w.tmuxServer) != "" {
@@ -3614,7 +3634,8 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	if err != nil || !claimed {
 		return
 	}
-	runCtx, cancel := context.WithTimeout(ctx, agentRunTimeout)
+	runTimeout := agentRunTimeout()
+	runCtx, cancel := context.WithTimeout(ctx, runTimeout)
 	w.cancels.Store(run.ID, cancel)
 	defer func() { cancel(); w.cancels.Delete(run.ID) }()
 	if err := validateRunTargetProject(run); err != nil {
@@ -4287,7 +4308,7 @@ func (w *Worker) execute(ctx context.Context, run domain.AgentRun) {
 	if err != nil {
 		reason := err.Error()
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
-			reason = "Agent-Laufzeitlimit von " + agentRunTimeout.String() + " überschritten"
+			reason = "Agent-Laufzeitlimit von " + runTimeout.String() + " überschritten"
 			_ = w.Store.AddRunLog(ctx, run.ID, "error", reason)
 		}
 		_ = w.Store.SetRunStatus(ctx, run.ID, "failed", "", reason)
