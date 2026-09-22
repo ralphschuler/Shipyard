@@ -2307,3 +2307,20 @@ func TestRedactSensitiveDiffRemovesCredentialValues(t *testing.T) {
 		t.Fatalf("redaction marker missing: %s", redacted)
 	}
 }
+
+func TestAgentRunTimeoutUsesOneHourDefaultAndValidatedOverride(t *testing.T) {
+	t.Setenv("TASKBOARD_AGENT_RUN_TIMEOUT", "")
+	if got := agentRunTimeout(); got != time.Hour {
+		t.Fatalf("default timeout = %s, want 1h", got)
+	}
+	t.Setenv("TASKBOARD_AGENT_RUN_TIMEOUT", "45m")
+	if got := agentRunTimeout(); got != 45*time.Minute {
+		t.Fatalf("override timeout = %s, want 45m", got)
+	}
+	for _, invalid := range []string{"zero", "0", "-15m"} {
+		t.Setenv("TASKBOARD_AGENT_RUN_TIMEOUT", invalid)
+		if got := agentRunTimeout(); got != time.Hour {
+			t.Fatalf("invalid timeout %q = %s, want default 1h", invalid, got)
+		}
+	}
+}

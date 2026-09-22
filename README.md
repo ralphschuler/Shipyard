@@ -79,6 +79,7 @@ The application reads these runtime variables:
 | `TASKBOARD_VERSION` | Displayed build version | Build metadata or `development` |
 | `TASKBOARD_COMMIT_SHA` | Displayed commit identifier | `unknown` |
 | `TASKBOARD_BUILD_TIME` | Displayed build timestamp | Empty |
+| `TASKBOARD_AGENT_RUN_TIMEOUT` | Maximum duration of one Delivery, Review or QA run; Go duration such as `45m` or `2h` | `1h` |
 | `TASKBOARD_CHANGELOG_PATH` | Optional local Markdown changelog fallback | `CHANGELOG.md` or `CHANGELOG.markdown` in the service working directory |
 | `SHIPYARD_SECRET_KEY` | Key for encrypted application secrets | None; required for secret storage |
 | `SHIPYARD_MAX_AUTOMATION_EVENT_ATTEMPTS` | Maximum retries for an automation event | `3` |
