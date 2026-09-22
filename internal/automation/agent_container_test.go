@@ -604,6 +604,86 @@ func TestPrepareContainerMountAccessLeavesReadonlyDeliverySnapshotUntouched(t *t
 	}
 }
 
+func TestPrepareContainerGitMetadataAccessMakesOnlyGitTreeReadable(t *testing.T) {
+	root := t.TempDir()
+	common := filepath.Join(root, "project", ".git")
+	gitDir := filepath.Join(common, "worktrees", "run-1")
+	worktree := filepath.Join(root, "run-1")
+	if err := os.MkdirAll(gitDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(worktree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(common, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "commondir"), []byte("../..\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+gitDir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareContainerGitMetadataAccess(worktree); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{common, filepath.Join(common, "worktrees"), gitDir} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o755 {
+			t.Fatalf("Git directory %s mode = %o, want 755", path, info.Mode().Perm())
+		}
+	}
+	for _, path := range []string{filepath.Join(common, "HEAD"), filepath.Join(gitDir, "HEAD"), filepath.Join(gitDir, "commondir")} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o644 {
+			t.Fatalf("Git metadata file %s mode = %o, want 644", path, info.Mode().Perm())
+		}
+	}
+}
+
+func TestContainerUsesPrivateWritableGoCaches(t *testing.T) {
+	useContainerRuntimeRoot(t)
+	worktree := t.TempDir()
+	hostCache := filepath.Join(t.TempDir(), "host-go-mod")
+	if err := os.MkdirAll(hostCache, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GOMODCACHE", hostCache)
+	t.Setenv("CODEX_HOME", t.TempDir())
+	t.Setenv("GROK_HOME", filepath.Join(t.TempDir(), "missing-grok"))
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(t.TempDir(), "missing-claude"))
+	provider := &recordingProvider{name: "docker"}
+	session, err := startAgentContainer(context.Background(), agentContainerRequest{
+		RunID: "run-private-go-cache", Worktree: worktree, Policy: builtinPolicy(t, "strict"),
+		Provider: domain.ProviderSetting{Provider: "codex"}, Command: "codex", Args: []string{"exec"}, Runtime: provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	for _, mount := range provider.specs[0].Mounts {
+		if filepath.Clean(mount.Source) == filepath.Clean(hostCache) {
+			t.Fatalf("host Go cache was mounted: %+v", mount)
+		}
+	}
+	envText := string(readTestFile(t, provider.execs[0].EnvFile))
+	if !strings.Contains(envText, "GOMODCACHE="+containerAgentHome+"/.cache/go-mod\n") {
+		t.Fatalf("private GOMODCACHE missing: %s", envText)
+	}
+	if !strings.Contains(envText, "GOCACHE="+containerAgentHome+"/.cache/go-build\n") {
+		t.Fatalf("private GOCACHE missing: %s", envText)
+	}
+}
+
 func TestContainerStartSkipsMissingAuthDirs(t *testing.T) {
 	useContainerRuntimeRoot(t)
 	home := t.TempDir()
